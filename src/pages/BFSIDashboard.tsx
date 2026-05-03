@@ -1404,7 +1404,7 @@ export default function BFSIDashboard() {
                               breakdown.push('Skills: Zen Matrix Only ✓');
                             } else if (skillCheck.excelMatch) {
                               score += 30;
-                              breakdown.push('Skills: BFSI Dashboard ✓');
+                              breakdown.push('Skills: Excel Only ✓');
                             }
 
                             // 3. Skill Level Bonus from Zen Matrix (0-15 pts)
@@ -2658,7 +2658,7 @@ export default function BFSIDashboard() {
                 <div style={{ textAlign: 'center', padding: 48 }}>
                   <div style={{ width: 48, height: 48, border: '4px solid #e2e8f0', borderTopColor: COLORS.purple, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
                   <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Searching across all employee data...</div>
-                  <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Scanning BFSI data + Zen Matrix resumes</div>
+                  <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Scanning Excel data + Zen Matrix resumes</div>
                 </div>
               )}
 
@@ -2740,9 +2740,9 @@ export default function BFSIDashboard() {
 
                           <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
 
-                            {/* ── SOURCE 1: LOB / BFSI DATA ── */}
+                            {/* ── SOURCE 1: LOB / EXCEL DATA ── */}
                             <div style={{ borderRadius: 12, border: `1px solid #3b82f620`, background: dark ? 'rgba(59,130,246,0.06)' : '#eff6ff', padding: '10px 12px' }}>
-                              <SectionHeader icon="📊" label="LOB / BFSI Data" color="#3b82f6" count={lobReasons.length || 1} />
+                              <SectionHeader icon="📊" label="LOB / Excel Data" color="#3b82f6" count={lobReasons.length || 1} />
                               {/* Always show core LOB fields */}
                               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', marginBottom: lobReasons.length ? 8 : 0 }}>
                                 {[
@@ -2825,7 +2825,7 @@ export default function BFSIDashboard() {
                                 <span style={{ fontSize: 16 }}>🎓</span>
                                 <div>
                                   <div style={{ fontSize: 11, fontWeight: 700, color: T.sub }}>Zen Matrix Resume</div>
-                                  <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic' }}>No resume uploaded yet — only BFSI data available</div>
+                                  <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic' }}>No resume uploaded yet — only Excel data available</div>
                                 </div>
                               </div>
                             )}
@@ -2867,7 +2867,7 @@ export default function BFSIDashboard() {
                   <div style={{ fontWeight: 800, fontSize: 20, color: T.text, marginBottom: 8 }}>Search anything about your employees</div>
                   <div style={{ fontSize: 14, maxWidth: 500, margin: '0 auto', lineHeight: 1.7 }}>
                     Type a skill, domain, keyword, or even a full sentence.<br />
-                    ZenFinder searches across <strong>BFSI data</strong> (skills, projects, location) and <strong>Zen Matrix resumes</strong> (certifications, awards, all skills).
+                    ZenFinder searches across <strong>Excel data</strong> (skills, projects, location) and <strong>Zen Matrix resumes</strong> (certifications, awards, all skills).
                   </div>
                 </div>
               )}
@@ -2957,8 +2957,8 @@ export default function BFSIDashboard() {
                   Source Breakdown
                   <span style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginLeft: 4 }}>— click a card to filter</span>
                 </h4>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-                  {/* BFSI Dashboard */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
+                  {/* Excel Only */}
                   <div 
                     onClick={() => setSourceFilter(sourceFilter === 'excel' ? 'all' : 'excel')}
                     style={{ 
@@ -2971,12 +2971,39 @@ export default function BFSIDashboard() {
                     className="hover-card"
                   >
                     <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.warning, lineHeight: 1, marginBottom: 10 }}>{matchResults._liveCounts?.excel ?? matchResults.excelOnly ?? 0}</div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 BFSI Dashboard</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>BFSI data (L1-L4)</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 Excel Only</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Old data (L1-L4)</div>
                     {sourceFilter === 'excel' && <div style={{ fontSize: 10, color: COLORS.warning, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>}
                     {sourceFilter !== 'excel' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
                   </div>
-
+                  {/* Zen Matrix Only */}
+                  <div 
+                    onClick={() => setSourceFilter(sourceFilter === 'matrix' ? 'all' : 'matrix')}
+                    style={{ 
+                      background: sourceFilter === 'matrix' ? 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(99,102,241,0.1))' : 'linear-gradient(135deg, rgba(59,130,246,0.1), rgba(99,102,241,0.05))', 
+                      borderRadius: 16, padding: '24px', 
+                      border: `2px solid ${sourceFilter === 'matrix' ? COLORS.info : COLORS.info + '44'}`, 
+                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
+                      transform: sourceFilter === 'matrix' ? 'scale(1.05)' : 'scale(1)'
+                    }} 
+                    className="hover-card"
+                  >
+                    <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.info, lineHeight: 1, marginBottom: 10 }}>
+                      {/* Show total with Zen Matrix = matrix-only + both */}
+                      {(matchResults._liveCounts?.matrix ?? 0) + (matchResults._liveCounts?.both ?? 0)}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🔵 Zen Matrix</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>
+                      Has resume upload
+                      {(matchResults._liveCounts?.matrix ?? 0) > 0 && (
+                        <span style={{ display: 'block', marginTop: 2, color: COLORS.info }}>
+                          {matchResults._liveCounts?.matrix} resume only · {matchResults._liveCounts?.both} with Excel
+                        </span>
+                      )}
+                    </div>
+                    {sourceFilter === 'matrix' && <div style={{ fontSize: 10, color: COLORS.info, marginTop: 8, fontWeight: 700 }}>✓ FILTERED (resume only)</div>}
+                    {sourceFilter !== 'matrix' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter resume-only</div>}
+                  </div>
                   {/* Both Sources */}
                   <div 
                     onClick={() => setSourceFilter(sourceFilter === 'both' ? 'all' : 'both')}
@@ -2990,10 +3017,30 @@ export default function BFSIDashboard() {
                     className="hover-card"
                   >
                     <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.success, lineHeight: 1, marginBottom: 10 }}>{matchResults._liveCounts?.both ?? matchResults.bothSources ?? 0}</div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Zen Matrix</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Has resume upload</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Both Sources</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Best matches</div>
                     {sourceFilter === 'both' && <div style={{ fontSize: 10, color: COLORS.success, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>}
                     {sourceFilter !== 'both' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
+                  </div>
+                  {/* Total Unique */}
+                  <div 
+                    onClick={() => setSourceFilter('all')}
+                    style={{ 
+                      background: sourceFilter === 'all' ? 'linear-gradient(135deg, rgba(139,92,246,0.2), rgba(99,102,241,0.1))' : 'linear-gradient(135deg, rgba(139,92,246,0.1), rgba(99,102,241,0.05))', 
+                      borderRadius: 16, padding: '24px', 
+                      border: `2px solid ${sourceFilter === 'all' ? COLORS.purple : COLORS.purple + '44'}`, 
+                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
+                      transform: sourceFilter === 'all' ? 'scale(1.05)' : 'scale(1)'
+                    }} 
+                    className="hover-card"
+                  >
+                    <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.purple, lineHeight: 1, marginBottom: 10 }}>{matchResults.matches.length}</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>Total Unique</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>All employees</div>
+                    {sourceFilter === 'all' 
+                      ? <div style={{ fontSize: 10, color: COLORS.purple, marginTop: 8, fontWeight: 700 }}>✓ SHOWING ALL</div>
+                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to clear filter</div>
+                    }
                   </div>
                 </div>
               </div>
@@ -3004,6 +3051,15 @@ export default function BFSIDashboard() {
                   <h4 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
                     <Users size={22} color={COLORS.success} />
                     Matched Employees
+                    {sourceFilter !== 'all' && (
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, background: dark ? 'rgba(255,255,255,0.08)' : '#f1f5f9', padding: '3px 10px', borderRadius: 8 }}>
+                        Filtered: {sourceFilter === 'excel' ? 'Excel Only' : sourceFilter === 'matrix' ? 'Has Zen Matrix' : 'Both Sources'}
+                        <span
+                          onClick={() => setSourceFilter('all')}
+                          style={{ marginLeft: 6, cursor: 'pointer', color: COLORS.danger, fontWeight: 900 }}
+                        >✕</span>
+                      </span>
+                    )}
                   </h4>
                   <div style={{ display: 'flex', gap: 12 }}>
                     <button
@@ -3058,8 +3114,6 @@ export default function BFSIDashboard() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
                   {matchResults.matches.slice(0, showTopRank ? 5 : (showAllMatches ? undefined : 10)).filter((emp: BFSIEmployee) => {
-                    // Show all top 5 without filtering; apply filter only for full list
-                    if (showTopRank) return true;
                     // Use matchSource — single source of truth computed during matching
                     if (sourceFilter === 'all') return true;
                     const src = (emp as any).matchSource || 'Excel Only';
@@ -3073,6 +3127,7 @@ export default function BFSIDashboard() {
                     const src = (emp as any).matchSource || 'Excel Only';
                     const sourceType = src === 'Both Sources' ? 'both' : src === 'Zen Matrix Only' ? 'matrix' : 'excel';
                     const badgeColor = sourceType === 'both' ? COLORS.success : sourceType === 'matrix' ? COLORS.info : COLORS.warning;
+                    const badgeLabel = sourceType === 'both' ? 'Both' : sourceType === 'matrix' ? 'Matrix' : 'Excel';
                     
                     return (
                       <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, border: `2px solid ${badgeColor}44`, padding: '18px', transition: '0.3s', position: 'relative' }} className="hover-card">
@@ -3104,6 +3159,9 @@ export default function BFSIDashboard() {
                               </div>
                             )}
                           </div>
+                          <div style={{ padding: '6px 12px', background: `${badgeColor}18`, borderRadius: 10, border: `1px solid ${badgeColor}44`, fontSize: 11, fontWeight: 900, color: badgeColor, height: 'fit-content' }}>
+                            {badgeLabel}
+                          </div>
                         </div>
                         <div style={{ fontSize: 13, color: T.text, marginBottom: 10, padding: '10px 14px', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', borderRadius: 10 }}>
                           {/* Show matched skill — not just primary_skill */}
@@ -3112,12 +3170,12 @@ export default function BFSIDashboard() {
                           </div>
                           {(emp as any).matchedZenSkills?.length > 0 && (
                             <div style={{ marginBottom: 4, color: COLORS.info }}>
-                              <strong>Matched Skills:</strong> {[...new Set((emp as any).matchedZenSkills as string[])].join(', ')}
+                              <strong>Matched (Zen Matrix):</strong> {[...new Set((emp as any).matchedZenSkills as string[])].join(', ')}
                             </div>
                           )}
                           {(emp as any).matchedExcelSkills?.length > 0 && (
                             <div style={{ marginBottom: 4, color: COLORS.warning }}>
-                              <strong>Matched Skills:</strong> {[...new Set((emp as any).matchedExcelSkills as string[])].join(', ')}
+                              <strong>Matched (Excel):</strong> {[...new Set((emp as any).matchedExcelSkills as string[])].join(', ')}
                             </div>
                           )}
                           <div><strong>Location:</strong> {emp.location || '—'}</div>
