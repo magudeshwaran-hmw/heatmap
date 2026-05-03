@@ -1404,7 +1404,7 @@ export default function BFSIDashboard() {
                               breakdown.push('Skills: Zen Matrix Only ✓');
                             } else if (skillCheck.excelMatch) {
                               score += 30;
-                              breakdown.push('Skills: Excel Only ✓');
+                              breakdown.push('Skills: BFSI Dashboard ✓');
                             }
 
                             // 3. Skill Level Bonus from Zen Matrix (0-15 pts)
@@ -2658,7 +2658,7 @@ export default function BFSIDashboard() {
                 <div style={{ textAlign: 'center', padding: 48 }}>
                   <div style={{ width: 48, height: 48, border: '4px solid #e2e8f0', borderTopColor: COLORS.purple, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
                   <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Searching across all employee data...</div>
-                  <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Scanning Excel data + Zen Matrix resumes</div>
+                  <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Scanning BFSI data + Zen Matrix resumes</div>
                 </div>
               )}
 
@@ -2684,65 +2684,156 @@ export default function BFSIDashboard() {
                     </div>
                   )}
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(480px, 1fr))', gap: 20 }}>
                     {zfResults.map((emp: any, idx: number) => {
                       const statusColor = emp.status === 'Available-Pool' ? COLORS.success : emp.status === 'Deallocating' ? COLORS.warning : COLORS.info;
-                      return (
-                        <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 16, border: `2px solid ${COLORS.purple}22`, padding: 20, transition: '0.3s', position: 'relative', display: 'flex', flexDirection: 'column' }} className="hover-card">
-                          {/* Relevance score badge */}
-                          <div style={{ position: 'absolute', top: 12, right: 12, background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 10, padding: '3px 10px', fontSize: 11, fontWeight: 900 }}>
-                            {emp.zfScore}pts
-                          </div>
 
-                          <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
-                            <div style={{ width: 48, height: 48, borderRadius: 12, background: `linear-gradient(135deg,${statusColor},${statusColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 20, flexShrink: 0 }}>
+                      // Split reasons by source group
+                      const lobReasons    = (emp.zfReasons || []).filter((r: any) => r.source === 'Excel');
+                      const zenSkills     = (emp.zfReasons || []).filter((r: any) => r.source === 'Zen Matrix → Skills');
+                      const zenCerts      = (emp.zfReasons || []).filter((r: any) => r.source === 'Zen Matrix → Certifications');
+                      const zenProjects   = (emp.zfReasons || []).filter((r: any) => r.source === 'Zen Matrix → Projects');
+                      const zenAwards     = (emp.zfReasons || []).filter((r: any) => r.source === 'Zen Matrix → Awards');
+                      const hasZenData    = zenSkills.length + zenCerts.length + zenProjects.length + zenAwards.length > 0;
+
+                      const SectionHeader = ({ icon, label, color, count }: { icon: string; label: string; color: string; count: number }) => (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                          <span style={{ fontSize: 13 }}>{icon}</span>
+                          <span style={{ fontSize: 10, fontWeight: 900, color, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</span>
+                          <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 6px', borderRadius: 10, background: `${color}18`, color }}>{count} match{count !== 1 ? 'es' : ''}</span>
+                        </div>
+                      );
+
+                      const ReasonRow = ({ r }: { r: any }) => (
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 8px', borderRadius: 6, background: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', marginBottom: 3 }}>
+                          <span style={{ fontSize: 12, flexShrink: 0 }}>{r.icon}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{r.field}: <span style={{ color: COLORS.purple }}>{r.value}</span></div>
+                            <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic', lineHeight: 1.3 }}>{r.context}</div>
+                          </div>
+                        </div>
+                      );
+
+                      return (
+                        <div key={idx} style={{ background: dark ? 'rgba(15,23,42,0.8)' : '#fff', borderRadius: 18, border: `1px solid ${T.bdr}`, overflow: 'hidden', boxShadow: dark ? 'none' : '0 4px 20px rgba(0,0,0,0.07)', display: 'flex', flexDirection: 'column' }} className="hover-card">
+
+                          {/* ── TOP HEADER ── */}
+                          <div style={{ padding: '14px 16px', background: `linear-gradient(135deg,${COLORS.purple}18,${COLORS.purple}08)`, borderBottom: `1px solid ${T.bdr}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg,${statusColor},${statusColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 900, fontSize: 18, flexShrink: 0 }}>
                               {(emp.employee_name || '?')[0]}
                             </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{emp.employee_name}</div>
-                              <div style={{ fontSize: 12, color: T.sub }}>{formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'}</div>
-                              <div style={{ fontSize: 11, marginTop: 2 }}>
-                                <span style={{ padding: '2px 8px', background: `${statusColor}18`, color: statusColor, borderRadius: 6, fontWeight: 700, fontSize: 10 }}>
-                                  {emp.status}
-                                </span>
+                              <div style={{ fontSize: 11, color: T.sub, marginTop: 1 }}>
+                                {formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'} · {emp.location || '—'}
                               </div>
                             </div>
-                          </div>
-
-                          <div style={{ fontSize: 13, color: T.text, marginBottom: 12, padding: '10px 14px', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', borderRadius: 10 }}>
-                            <div style={{ marginBottom: 4 }}><strong>Primary Skill:</strong> {emp.primary_skill || '—'}</div>
-                            <div><strong>Location:</strong> {emp.location || '—'}</div>
-                          </div>
-
-                          {/* Why matched */}
-                          <div style={{ marginBottom: 12, flex: 1 }}>
-                            <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.purple, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Why matched:</div>
-                            <div style={{ maxHeight: 160, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              {emp.zfReasons.map((r: any, i: number) => (
-                                <div key={i} style={{ padding: '8px 10px', background: dark ? 'rgba(139,92,246,0.08)' : '#f5f3ff', borderRadius: 8, border: `1px solid ${COLORS.purple}22` }}>
-                                  {/* Line 1: icon + source + field + value */}
-                                  <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 4 }}>
-                                    <span style={{ flexShrink: 0 }}>{r.icon}</span>
-                                    <span style={{ minWidth: 0 }}>
-                                      <span style={{ fontWeight: 800, color: COLORS.purple, fontSize: 10, textTransform: 'uppercase' }}>{r.source}</span>
-                                      <span style={{ color: T.sub, fontSize: 10 }}> · {r.field}: </span>
-                                      <span style={{ color: T.text, fontWeight: 700, fontSize: 11 }}>{r.value}</span>
-                                    </span>
-                                    {/* Verified badge */}
-                                    <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 800, padding: '1px 6px', borderRadius: 4, background: r.verified ? '#dcfce7' : '#fef9c3', color: r.verified ? '#16a34a' : '#ca8a04' }}>
-                                      {r.verified ? '✅ Real' : '⚠️ Check'}
-                                    </span>
-                                  </div>
-                                  {/* Line 2: context note */}
-                                  <div style={{ fontSize: 10, color: T.sub, paddingLeft: 20, lineHeight: 1.4, fontStyle: 'italic' }}>
-                                    {r.context}
-                                  </div>
-                                </div>
-                              ))}
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                              <div style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 8, padding: '3px 10px', fontSize: 11, fontWeight: 900 }}>
+                                {emp.zfScore} pts
+                              </div>
+                              <span style={{ padding: '2px 8px', background: `${statusColor}18`, color: statusColor, borderRadius: 6, fontWeight: 700, fontSize: 10 }}>
+                                {emp.status}
+                              </span>
                             </div>
                           </div>
 
-                          <div style={{ display: 'flex', gap: 8 }}>
+                          <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
+
+                            {/* ── SOURCE 1: LOB / BFSI DATA ── */}
+                            <div style={{ borderRadius: 12, border: `1px solid #3b82f620`, background: dark ? 'rgba(59,130,246,0.06)' : '#eff6ff', padding: '10px 12px' }}>
+                              <SectionHeader icon="📊" label="LOB / BFSI Data" color="#3b82f6" count={lobReasons.length || 1} />
+                              {/* Always show core LOB fields */}
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', marginBottom: lobReasons.length ? 8 : 0 }}>
+                                {[
+                                  { label: 'Primary Skill', value: emp.primary_skill },
+                                  { label: 'Location',      value: emp.location },
+                                  { label: 'Band / Grade',  value: (emp as any).grade || (emp as any).band },
+                                  { label: 'Status',        value: emp.status },
+                                  { label: 'Project',       value: emp.project_name },
+                                  { label: 'Customer',      value: emp.customer },
+                                  { label: 'Practice',      value: emp.practice_name },
+                                  { label: 'Service Line',  value: emp.service_line },
+                                  { label: 'RMG Status',    value: emp.rmg_status },
+                                  { label: 'Aging Days',    value: emp.aging_days ? `${emp.aging_days} days` : null },
+                                ].filter(f => f.value).map((f, i) => (
+                                  <div key={i} style={{ fontSize: 11 }}>
+                                    <span style={{ color: T.sub }}>{f.label}: </span>
+                                    <span style={{ fontWeight: 700, color: T.text }}>{f.value}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              {/* LOB match reasons */}
+                              {lobReasons.length > 0 && (
+                                <div style={{ marginTop: 6, borderTop: `1px dashed #3b82f630`, paddingTop: 6 }}>
+                                  <div style={{ fontSize: 10, color: '#3b82f6', fontWeight: 800, marginBottom: 4 }}>🎯 Matched on:</div>
+                                  {lobReasons.map((r: any, i: number) => <ReasonRow key={i} r={r} />)}
+                                </div>
+                              )}
+                              {/* L1-L4 skills from Excel */}
+                              {(emp.current_skills || []).filter((s: string) => s && s !== 'NOT_AVAILABLE').length > 0 && (
+                                <div style={{ marginTop: 6, borderTop: `1px dashed #3b82f630`, paddingTop: 6 }}>
+                                  <div style={{ fontSize: 10, color: '#3b82f6', fontWeight: 800, marginBottom: 4 }}>Skills (L1–L4):</div>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                    {(emp.current_skills || []).filter((s: string) => s && s !== 'NOT_AVAILABLE').slice(0, 8).map((s: string, i: number) => (
+                                      <span key={i} style={{ fontSize: 10, padding: '2px 7px', background: '#3b82f618', color: '#3b82f6', borderRadius: 5, fontWeight: 600 }}>{s}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* ── SOURCE 2: ZEN MATRIX DATA ── */}
+                            {hasZenData ? (
+                              <div style={{ borderRadius: 12, border: `1px solid #10b98120`, background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', padding: '10px 12px' }}>
+                                <SectionHeader icon="🎓" label="Zen Matrix Resume" color="#10b981" count={zenSkills.length + zenCerts.length + zenProjects.length + zenAwards.length} />
+
+                                {/* Skills */}
+                                {zenSkills.length > 0 && (
+                                  <div style={{ marginBottom: 8 }}>
+                                    <div style={{ fontSize: 10, color: '#10b981', fontWeight: 800, marginBottom: 4 }}>🎯 Skills:</div>
+                                    {zenSkills.map((r: any, i: number) => <ReasonRow key={i} r={r} />)}
+                                  </div>
+                                )}
+
+                                {/* Certifications */}
+                                {zenCerts.length > 0 && (
+                                  <div style={{ marginBottom: 8 }}>
+                                    <div style={{ fontSize: 10, color: '#10b981', fontWeight: 800, marginBottom: 4 }}>🏅 Certifications:</div>
+                                    {zenCerts.map((r: any, i: number) => <ReasonRow key={i} r={r} />)}
+                                  </div>
+                                )}
+
+                                {/* Projects */}
+                                {zenProjects.length > 0 && (
+                                  <div style={{ marginBottom: 8 }}>
+                                    <div style={{ fontSize: 10, color: '#10b981', fontWeight: 800, marginBottom: 4 }}>🏗️ Projects:</div>
+                                    {zenProjects.map((r: any, i: number) => <ReasonRow key={i} r={r} />)}
+                                  </div>
+                                )}
+
+                                {/* Awards */}
+                                {zenAwards.length > 0 && (
+                                  <div>
+                                    <div style={{ fontSize: 10, color: '#10b981', fontWeight: 800, marginBottom: 4 }}>🏆 Awards:</div>
+                                    {zenAwards.map((r: any, i: number) => <ReasonRow key={i} r={r} />)}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div style={{ borderRadius: 12, border: `1px dashed ${T.bdr}`, padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 16 }}>🎓</span>
+                                <div>
+                                  <div style={{ fontSize: 11, fontWeight: 700, color: T.sub }}>Zen Matrix Resume</div>
+                                  <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic' }}>No resume uploaded yet — only BFSI data available</div>
+                                </div>
+                              </div>
+                            )}
+
+                          </div>
+
+                          {/* ── FOOTER ACTIONS ── */}
+                          <div style={{ padding: '10px 16px', borderTop: `1px solid ${T.bdr}`, display: 'flex', gap: 8 }}>
                             <button
                               onClick={async () => {
                                 try {
@@ -2751,14 +2842,13 @@ export default function BFSIDashboard() {
                                   setSkillMatrixModal({ employee: emp, skills });
                                 } catch { setSkillMatrixModal({ employee: emp, skills: [] }); }
                               }}
-                              style={{ flex: 1, padding: '10px 14px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 10, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                              style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
                             >
-                              <GraduationCap size={15} />
-                              Zen Matrix
+                              <GraduationCap size={14} /> Zen Matrix
                             </button>
                             <button
                               onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
-                              style={{ padding: '10px 14px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 10, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
+                              style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#f1f5f9', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
                             >
                               Profile
                             </button>
@@ -2777,7 +2867,7 @@ export default function BFSIDashboard() {
                   <div style={{ fontWeight: 800, fontSize: 20, color: T.text, marginBottom: 8 }}>Search anything about your employees</div>
                   <div style={{ fontSize: 14, maxWidth: 500, margin: '0 auto', lineHeight: 1.7 }}>
                     Type a skill, domain, keyword, or even a full sentence.<br />
-                    ZenFinder searches across <strong>Excel data</strong> (skills, projects, location) and <strong>Zen Matrix resumes</strong> (certifications, awards, all skills).
+                    ZenFinder searches across <strong>BFSI data</strong> (skills, projects, location) and <strong>Zen Matrix resumes</strong> (certifications, awards, all skills).
                   </div>
                 </div>
               )}
@@ -2867,8 +2957,8 @@ export default function BFSIDashboard() {
                   Source Breakdown
                   <span style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginLeft: 4 }}>— click a card to filter</span>
                 </h4>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
-                  {/* Excel Only */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+                  {/* BFSI Dashboard */}
                   <div 
                     onClick={() => setSourceFilter(sourceFilter === 'excel' ? 'all' : 'excel')}
                     style={{ 
@@ -2881,39 +2971,12 @@ export default function BFSIDashboard() {
                     className="hover-card"
                   >
                     <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.warning, lineHeight: 1, marginBottom: 10 }}>{matchResults._liveCounts?.excel ?? matchResults.excelOnly ?? 0}</div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 Excel Only</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Old data (L1-L4)</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 BFSI Dashboard</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>BFSI data (L1-L4)</div>
                     {sourceFilter === 'excel' && <div style={{ fontSize: 10, color: COLORS.warning, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>}
                     {sourceFilter !== 'excel' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
                   </div>
-                  {/* Zen Matrix Only */}
-                  <div 
-                    onClick={() => setSourceFilter(sourceFilter === 'matrix' ? 'all' : 'matrix')}
-                    style={{ 
-                      background: sourceFilter === 'matrix' ? 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(99,102,241,0.1))' : 'linear-gradient(135deg, rgba(59,130,246,0.1), rgba(99,102,241,0.05))', 
-                      borderRadius: 16, padding: '24px', 
-                      border: `2px solid ${sourceFilter === 'matrix' ? COLORS.info : COLORS.info + '44'}`, 
-                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
-                      transform: sourceFilter === 'matrix' ? 'scale(1.05)' : 'scale(1)'
-                    }} 
-                    className="hover-card"
-                  >
-                    <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.info, lineHeight: 1, marginBottom: 10 }}>
-                      {/* Show total with Zen Matrix = matrix-only + both */}
-                      {(matchResults._liveCounts?.matrix ?? 0) + (matchResults._liveCounts?.both ?? 0)}
-                    </div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🔵 Zen Matrix</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>
-                      Has resume upload
-                      {(matchResults._liveCounts?.matrix ?? 0) > 0 && (
-                        <span style={{ display: 'block', marginTop: 2, color: COLORS.info }}>
-                          {matchResults._liveCounts?.matrix} resume only · {matchResults._liveCounts?.both} with Excel
-                        </span>
-                      )}
-                    </div>
-                    {sourceFilter === 'matrix' && <div style={{ fontSize: 10, color: COLORS.info, marginTop: 8, fontWeight: 700 }}>✓ FILTERED (resume only)</div>}
-                    {sourceFilter !== 'matrix' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter resume-only</div>}
-                  </div>
+
                   {/* Both Sources */}
                   <div 
                     onClick={() => setSourceFilter(sourceFilter === 'both' ? 'all' : 'both')}
@@ -2927,30 +2990,10 @@ export default function BFSIDashboard() {
                     className="hover-card"
                   >
                     <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.success, lineHeight: 1, marginBottom: 10 }}>{matchResults._liveCounts?.both ?? matchResults.bothSources ?? 0}</div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Both Sources</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Best matches</div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Zen Matrix</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Has resume upload</div>
                     {sourceFilter === 'both' && <div style={{ fontSize: 10, color: COLORS.success, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>}
                     {sourceFilter !== 'both' && <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
-                  </div>
-                  {/* Total Unique */}
-                  <div 
-                    onClick={() => setSourceFilter('all')}
-                    style={{ 
-                      background: sourceFilter === 'all' ? 'linear-gradient(135deg, rgba(139,92,246,0.2), rgba(99,102,241,0.1))' : 'linear-gradient(135deg, rgba(139,92,246,0.1), rgba(99,102,241,0.05))', 
-                      borderRadius: 16, padding: '24px', 
-                      border: `2px solid ${sourceFilter === 'all' ? COLORS.purple : COLORS.purple + '44'}`, 
-                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
-                      transform: sourceFilter === 'all' ? 'scale(1.05)' : 'scale(1)'
-                    }} 
-                    className="hover-card"
-                  >
-                    <div style={{ fontSize: 42, fontWeight: 800, color: COLORS.purple, lineHeight: 1, marginBottom: 10 }}>{matchResults.matches.length}</div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>Total Unique</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>All employees</div>
-                    {sourceFilter === 'all' 
-                      ? <div style={{ fontSize: 10, color: COLORS.purple, marginTop: 8, fontWeight: 700 }}>✓ SHOWING ALL</div>
-                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to clear filter</div>
-                    }
                   </div>
                 </div>
               </div>
@@ -2961,15 +3004,6 @@ export default function BFSIDashboard() {
                   <h4 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
                     <Users size={22} color={COLORS.success} />
                     Matched Employees
-                    {sourceFilter !== 'all' && (
-                      <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, background: dark ? 'rgba(255,255,255,0.08)' : '#f1f5f9', padding: '3px 10px', borderRadius: 8 }}>
-                        Filtered: {sourceFilter === 'excel' ? 'Excel Only' : sourceFilter === 'matrix' ? 'Has Zen Matrix' : 'Both Sources'}
-                        <span
-                          onClick={() => setSourceFilter('all')}
-                          style={{ marginLeft: 6, cursor: 'pointer', color: COLORS.danger, fontWeight: 900 }}
-                        >✕</span>
-                      </span>
-                    )}
                   </h4>
                   <div style={{ display: 'flex', gap: 12 }}>
                     <button
@@ -3024,6 +3058,8 @@ export default function BFSIDashboard() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
                   {matchResults.matches.slice(0, showTopRank ? 5 : (showAllMatches ? undefined : 10)).filter((emp: BFSIEmployee) => {
+                    // Show all top 5 without filtering; apply filter only for full list
+                    if (showTopRank) return true;
                     // Use matchSource — single source of truth computed during matching
                     if (sourceFilter === 'all') return true;
                     const src = (emp as any).matchSource || 'Excel Only';
@@ -3037,7 +3073,6 @@ export default function BFSIDashboard() {
                     const src = (emp as any).matchSource || 'Excel Only';
                     const sourceType = src === 'Both Sources' ? 'both' : src === 'Zen Matrix Only' ? 'matrix' : 'excel';
                     const badgeColor = sourceType === 'both' ? COLORS.success : sourceType === 'matrix' ? COLORS.info : COLORS.warning;
-                    const badgeLabel = sourceType === 'both' ? 'Both' : sourceType === 'matrix' ? 'Matrix' : 'Excel';
                     
                     return (
                       <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, border: `2px solid ${badgeColor}44`, padding: '18px', transition: '0.3s', position: 'relative' }} className="hover-card">
@@ -3069,9 +3104,6 @@ export default function BFSIDashboard() {
                               </div>
                             )}
                           </div>
-                          <div style={{ padding: '6px 12px', background: `${badgeColor}18`, borderRadius: 10, border: `1px solid ${badgeColor}44`, fontSize: 11, fontWeight: 900, color: badgeColor, height: 'fit-content' }}>
-                            {badgeLabel}
-                          </div>
                         </div>
                         <div style={{ fontSize: 13, color: T.text, marginBottom: 10, padding: '10px 14px', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', borderRadius: 10 }}>
                           {/* Show matched skill — not just primary_skill */}
@@ -3080,12 +3112,12 @@ export default function BFSIDashboard() {
                           </div>
                           {(emp as any).matchedZenSkills?.length > 0 && (
                             <div style={{ marginBottom: 4, color: COLORS.info }}>
-                              <strong>Matched (Zen Matrix):</strong> {[...new Set((emp as any).matchedZenSkills as string[])].join(', ')}
+                              <strong>Matched Skills:</strong> {[...new Set((emp as any).matchedZenSkills as string[])].join(', ')}
                             </div>
                           )}
                           {(emp as any).matchedExcelSkills?.length > 0 && (
                             <div style={{ marginBottom: 4, color: COLORS.warning }}>
-                              <strong>Matched (Excel):</strong> {[...new Set((emp as any).matchedExcelSkills as string[])].join(', ')}
+                              <strong>Matched Skills:</strong> {[...new Set((emp as any).matchedExcelSkills as string[])].join(', ')}
                             </div>
                           )}
                           <div><strong>Location:</strong> {emp.location || '—'}</div>
