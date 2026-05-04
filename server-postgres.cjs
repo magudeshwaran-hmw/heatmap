@@ -2572,8 +2572,14 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
           // Service Line
           const serviceLine = String(row['Service Lines'] || row['Service Line'] || row['ServiceLine'] || row['SERVICE_LINE'] || '').trim();
 
-          // Primary skill
-          const primarySkill = String(row['Primary Skill Name'] || row['PrimarySkill'] || row['Primary Skill'] || row['ACTUALSKILL'] || skills[0] || '').trim();
+          // Primary skill — use l4_skills (most specific category) → l3_skills → l4_name → l3_name → ACTUALSKILL
+          // l4_skills contains values like "Functional Testing", "Automation Testing - SDET"
+          const rawL4 = String(row['l4_skills'] || row['l4_name'] || '').split(',')[0].trim();
+          const rawL3 = String(row['l3_skills'] || row['l3_name'] || '').split(',')[0].trim();
+          const primarySkill = String(
+            row['Primary Skill Name'] || rawL4 || rawL3 ||
+            row['PrimarySkill'] || row['Primary Skill'] || skills[0] || ''
+          ).trim();
 
           // Customer
           const customer = String(
@@ -2603,7 +2609,7 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
               status = $1, aging_days = $2, rmg_status = $3, pool_status = $4, 
               grade = $5, location = $6, practice_name = $7, service_line = $8,
               employee_name = CASE WHEN employee_name = 'Unknown' OR employee_name IS NULL THEN $10 ELSE employee_name END,
-              primary_skill = CASE WHEN primary_skill IS NULL OR primary_skill = '' THEN $11 ELSE primary_skill END,
+              primary_skill = CASE WHEN $11 != '' THEN $11 ELSE primary_skill END,
               customer = CASE WHEN $12 != '' THEN $12 ELSE customer END,
               pm_name = CASE WHEN $13 != '' THEN $13 ELSE pm_name END,
               deployable_flag = $14,
@@ -2702,7 +2708,9 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
 
           const primarySkill = String(
             row['Primary Skill Name'] || row['PrimarySkill'] || row['Primary Skill'] ||
-            row['ACTUALSKILL'] || row['Skill'] || ''
+            String(row['l4_skills'] || row['l4_name'] || '').split(',')[0].trim() ||
+            String(row['l3_skills'] || row['l3_name'] || '').split(',')[0].trim() ||
+            row['ACTUALSKILL'] || ''
           ).trim();
 
           // Store L3/L4 skills for deallocation employees too (for skill card filtering)
@@ -2747,16 +2755,19 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
               INSERT INTO bfsi_workforce (
                 employee_id, employee_name, status, deallocation_date,
                 return_to_pool_date, release_reason, aging_days, primary_skill,
-                project_name, customer, pm_name, location, rmg_status
-              ) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                project_name, customer, pm_name, location, rmg_status, current_skills
+              ) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
               ON CONFLICT (employee_id) DO UPDATE SET
                 status = 'Deallocating',
                 deallocation_date = EXCLUDED.deallocation_date,
                 release_reason = EXCLUDED.release_reason,
+                primary_skill = CASE WHEN EXCLUDED.primary_skill != '' THEN EXCLUDED.primary_skill ELSE bfsi_workforce.primary_skill END,
+                current_skills = CASE WHEN array_length(EXCLUDED.current_skills, 1) > 0 THEN EXCLUDED.current_skills ELSE bfsi_workforce.current_skills END,
                 updated_at = CURRENT_TIMESTAMP
             `, [empId, empName, 'Deallocating', releaseDate,
                 releaseReason, agingDays, primarySkill, projectName,
-                customer, pmName, location, rmgStatus]);
+                customer, pmName, location, rmgStatus,
+                [...new Set(deallocSkills)].filter(Boolean)]);
           }
           deallocationCount++;
         }
@@ -2884,7 +2895,19 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
         rolesCount + workforceCount + poolCount + deallocationCount, 
         'Success'
       ]);
-      
+
+      // ── FINAL CLEANUP: Any employee with a deallocation_date should be 'Deallocating'
+      // This fixes cases where LOB sheet set status='In-project' but Deallocation sheet
+      // also listed them — the deallocation_date is the authoritative signal
+      await client.query(`
+        UPDATE bfsi_workforce 
+        SET status = 'Deallocating'
+        WHERE deallocation_date IS NOT NULL 
+          AND status != 'Deallocating'
+          AND status != 'Available-Pool'
+      `);
+      console.log('✅ Cleanup: Marked employees with deallocation_date as Deallocating');
+
       await client.query('COMMIT');
       
       res.json({

@@ -47,7 +47,7 @@ export default function AdminDashboard() {
   const { dark } = useDark();
   const T = mkTheme(dark);
 
-  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap'>('Overview');
+  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Certifications' | 'Achievements' | 'Education' | 'Projects'>('Overview');
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [newEmployee, setNewEmployee] = useState({
@@ -452,6 +452,47 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   });
   const [showFilters, setShowFilters] = useState(false);
 
+  // AI Search state for Manage Employees
+  const [aiSearch, setAiSearch] = useState('');
+  const [aiSearchActive, setAiSearchActive] = useState(false);
+  const [aiSearchResults, setAiSearchResults] = useState<any[]>([]);
+  const [aiSearchLoading, setAiSearchLoading] = useState(false);
+
+  // AI Search state for Certifications / Achievements / Education / Projects tabs
+  const [certSearch, setCertSearch] = useState('');
+  const [achSearch, setAchSearch] = useState('');
+  const [eduSearch, setEduSearch] = useState('');
+  const [projSearch, setProjSearch] = useState('');
+  // Expanded cards state (empId → boolean)
+  const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
+
+  const runAiSearch = (query: string, empList: any[]) => {
+    if (!query.trim()) { setAiSearchActive(false); setAiSearchResults([]); return; }
+    setAiSearchLoading(true);
+    setAiSearchActive(true);
+    const q = query.trim().toLowerCase();
+    const qWords = q.split(/\s+/).filter(w => w.length > 1);
+    const matches = (text: string) => {
+      const t = (text || '').toLowerCase();
+      return t.includes(q) || qWords.some(w => t.includes(w));
+    };
+    const scored = empList.map(e => {
+      let score = 0;
+      if (matches(e.name)) score += 30;
+      if (matches(e.zensar_id || e.id)) score += 25;
+      if (matches(e.designation)) score += 20;
+      if (matches(e.department)) score += 15;
+      if (matches(e.location)) score += 15;
+      if (matches(e.email)) score += 10;
+      (e.skills || []).forEach((s: any) => { if (s.selfRating > 0 && matches(s.skillName)) score += 18; });
+      (e.certifications || []).forEach((c: any) => { if (matches(c.cert_name || c.name || '')) score += 22; });
+      (e.projects || []).forEach((p: any) => { if (matches(p.project_name || p.name || '') || matches(p.client || '')) score += 16; });
+      return { ...e, _aiScore: score };
+    }).filter(e => e._aiScore > 0).sort((a, b) => b._aiScore - a._aiScore);
+    setAiSearchResults(scored);
+    setAiSearchLoading(false);
+  };
+
   // Popup Preview State
   const [previewUser, setPreviewUser] = useState<any | null>(null);
   const [previewData, setPreviewData] = useState<AppData | null>(null);
@@ -497,11 +538,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     primary_domain: ''
   });
 
-  const handleOpenPreview = async (emp: any) => {
+  const handleOpenPreview = async (emp: any, targetTab?: typeof popupActiveTab) => {
     setIsPreviewLoading(true);
     setGlobalLoading('Accessing Employee Portfolio...');
     setPreviewUser(emp);
-    setPopupActiveTab('ZenRadar');
+    setPopupActiveTab(targetTab || 'ZenRadar');
     setEditForm({
       name: emp.name || emp.Name || '',
       zensar_id: emp.zensar_id || emp.ZensarID || emp.id || '',
@@ -551,6 +592,20 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         const pRes = await fetch(`${API_BASE}/projects/ALL`);
         if (pRes.ok) ({ projects } = await pRes.json());
       } catch { /* ignore — show employees without project data */ }
+
+      // ── Achievements (non-blocking) ──
+      let achievements: any[] = [];
+      try {
+        const aRes = await fetch(`${API_BASE}/achievements/ALL`);
+        if (aRes.ok) { const aData = await aRes.json(); achievements = aData.achievements || aData || []; }
+      } catch { /* ignore */ }
+
+      // ── Education (non-blocking) ──
+      let education: any[] = [];
+      try {
+        const eRes = await fetch(`${API_BASE}/education/ALL`);
+        if (eRes.ok) { const eData = await eRes.json(); education = eData.education || eData || []; }
+      } catch { /* ignore */ }
 
       const formatted = _emps.map((e: any) => {
         const eid = String(e.id || '').toLowerCase();
@@ -605,6 +660,16 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           return pid === eid || (zid && pid === zid);
         });
 
+        const eAchs = achievements.filter((a: any) => {
+          const aid = String(a.EmployeeID || a.employee_id || '').toLowerCase();
+          return aid === eid || (zid && aid === zid);
+        });
+
+        const eEdu = education.filter((ed: any) => {
+          const edid = String(ed.EmployeeID || ed.employee_id || '').toLowerCase();
+          return edid === eid || (zid && edid === zid);
+        });
+
         return {
           ...e,
           id: primaryId,
@@ -612,6 +677,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           skills: ratingsArray,
           certifications: eCerts,
           projects: eProjs,
+          achievements: eAchs,
+          education: eEdu,
           completion: computeCompletion(ratingsArray),
           submitted: e.submitted || e.Submitted === 'Yes'
         };
@@ -743,7 +810,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       setNewEmployee({ name: '', email: '', designation: '', employeeId: '', location: '', phone: '', department: '', yearsIT: '', yearsZensar: '', password: '', confirmPassword: '' });
       setExtractedDetails({ skills: [] as {name: string; rating: number}[], projects: [], certificates: [], education: [] });
       setRawExtractedData(null);
-      setActiveTab('Employees');
+      setActiveTab('Manage Employees');
       loadAllData();
     }
   };
@@ -799,16 +866,20 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, width: 'fit-content', maxWidth: '100%', marginBottom: 24, border: `1px solid ${T.bdr}` }}>
             {[
-              { id: 'Overview', icon: BarChart3 },
-              { id: 'Manage Employees', icon: Users },
-              { id: 'Skill Heatmap', icon: Grid }
+              { id: 'Overview',          icon: BarChart3,      color: '#3B82F6' },
+              { id: 'Manage Employees',  icon: Users,          color: '#3B82F6' },
+              { id: 'Skill Heatmap',     icon: Grid,           color: '#3B82F6' },
+              { id: 'Certifications',    icon: Award,          color: '#10B981' },
+              { id: 'Achievements',      icon: Sparkles,       color: '#F59E0B' },
+              { id: 'Education',         icon: GraduationCap,  color: '#8B5CF6' },
+              { id: 'Projects',          icon: Briefcase,      color: '#F97316' },
             ].map((t: any) => (
               <button
                 key={t.id}
                 onClick={() => setActiveTab(t.id)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6, padding: '8px 18px', borderRadius: 8, border: 'none',
-                  background: activeTab === t.id ? '#3B82F6' : 'transparent',
+                  background: activeTab === t.id ? t.color : 'transparent',
                   color: activeTab === t.id ? '#fff' : T.sub,
                   fontWeight: 600, fontSize: 13, cursor: 'pointer', transition: '0.2s', flexShrink: 0
                 }}
@@ -847,7 +918,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {activeTab === 'Employees' && (
+          {activeTab === 'Manage Employees' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               {/* Search & Sort Bar */}
               <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -1333,8 +1404,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
               </div>
               
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
-                {employees
+                {(aiSearchActive ? aiSearchResults : employees)
                   .filter(e => {
+                    if (aiSearchActive) return true; // AI search already filtered
                     const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
                     const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
                     const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) && 
@@ -1354,6 +1426,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     return matchesSearch && matchesRole && matchesExp && matchesSkills && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
                   })
                   .sort((a, b) => {
+                    if (aiSearchActive) return 0; // AI search already sorted by score
                     if (sortOrder === 'A-Z') return a.name?.localeCompare(b.name);
                     if (sortOrder === 'Z-A') return b.name?.localeCompare(a.name);
                     if (sortOrder === 'Newest') return (b.id || '').localeCompare(a.id || '');
@@ -1361,7 +1434,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     return 0;
                   })
                   .map(e => (
-                    <div key={e.id} onClick={() => handleOpenPreview(e)} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24, cursor: 'pointer', transition: '0.2s', display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box' }} className="hover:scale-105">
+                    <div key={e.id} onClick={() => handleOpenPreview(e)} style={{ background: T.bg, border: `1px solid ${aiSearchActive && e._aiScore ? '#8B5CF6' : T.bdr}`, borderRadius: 20, padding: 24, cursor: 'pointer', transition: '0.2s', display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box' }} className="hover:scale-105">
                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, marginBottom: 16 }}>
                           <div style={{ width: 48, height: 48, flexShrink: 0, borderRadius: 14, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, color: '#fff' }}>
                             {e.name?.substring(0,2).toUpperCase()}
@@ -1371,8 +1444,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                              <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                           </div>
                           <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                             <div style={{ fontSize: 18, fontWeight: 900, color: e.completion >= 75 ? '#10B981' : '#3B82F6', lineHeight: 1 }}>{e.completion}%</div>
-                             <div style={{ fontSize: 10, color: T.sub, marginTop: 4 }}>Complete</div>
+                             {aiSearchActive && e._aiScore ? (
+                               <div style={{ fontSize: 13, fontWeight: 900, color: '#8B5CF6', lineHeight: 1, padding: '3px 8px', background: 'rgba(139,92,246,0.1)', borderRadius: 6 }}>{e._aiScore} pts</div>
+                             ) : (
+                               <>
+                                 <div style={{ fontSize: 18, fontWeight: 900, color: e.completion >= 75 ? '#10B981' : '#3B82F6', lineHeight: 1 }}>{e.completion}%</div>
+                                 <div style={{ fontSize: 10, color: T.sub, marginTop: 4 }}>Complete</div>
+                               </>
+                             )}
                           </div>
                        </div>
                        
@@ -1428,6 +1507,299 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
             </div>
           )}
+
+          {/* ── CERTIFICATIONS TAB ── */}
+          {activeTab === 'Certifications' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Award size={20} color="#10B981" /> Certifications
+                </h3>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', fontSize: 12, fontWeight: 700, color: '#10B981' }}>
+                    {employees.reduce((s, e) => s + (e.certifications?.length || 0), 0)} Total Certs
+                  </div>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', fontSize: 12, fontWeight: 700, color: '#3B82F6' }}>
+                    {employees.filter(e => (e.certifications?.length || 0) > 0).length} Employees
+                  </div>
+                </div>
+              </div>
+              <div style={{ position: 'relative', marginBottom: 20 }}>
+                <Search size={15} color={T.sub} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <input placeholder="Search by name, certification, issuer..." value={certSearch} onChange={e => setCertSearch(e.target.value)}
+                  style={{ width: '100%', padding: '10px 14px 10px 40px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                {employees.filter(e => (e.certifications?.length || 0) > 0).filter(e => {
+                  if (!certSearch.trim()) return true;
+                  const q = certSearch.toLowerCase();
+                  return e.name?.toLowerCase().includes(q) || (e.certifications || []).some((c: any) => (c.cert_name || c.name || '').toLowerCase().includes(q) || (c.issuing_organization || c.issuer || '').toLowerCase().includes(q));
+                }).sort((a, b) => (b.certifications?.length || 0) - (a.certifications?.length || 0)).map((e: any) => {
+                  const expanded = expandedCards[`cert_${e.id}`];
+                  const items = expanded ? e.certifications : e.certifications.slice(0, 3);
+                  return (
+                    <div key={e.id} style={{ background: T.bg, border: '1px solid rgba(16,185,129,0.25)', borderRadius: 16, padding: 20, transition: '0.2s', borderTop: '3px solid #10B981' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, cursor: 'pointer' }} onClick={() => handleOpenPreview(e, 'My Certification')}>
+                        <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#10B981,#059669)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                          {e.name?.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
+                          <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                        </div>
+                        <div style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.certifications.length} 🏅</div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {items.map((c: any, i: number) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', borderRadius: 8 }}>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏅</span>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{c.cert_name || c.name || 'Certificate'}</div>
+                              {(c.issuing_organization || c.issuer) && <div style={{ fontSize: 10, color: T.sub }}>{c.issuing_organization || c.issuer}</div>}
+                            </div>
+                          </div>
+                        ))}
+                        {e.certifications.length > 3 && (
+                          <button onClick={() => setExpandedCards(prev => ({ ...prev, [`cert_${e.id}`]: !prev[`cert_${e.id}`] }))}
+                            style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#10B981', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.certifications.length - 3} more)`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {employees.filter(e => (e.certifications?.length || 0) > 0).length === 0 && (
+                  <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 48, color: T.sub }}>
+                    <Award size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                    <div style={{ fontWeight: 700 }}>No certifications uploaded yet</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── ACHIEVEMENTS TAB ── */}
+          {activeTab === 'Achievements' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Sparkles size={20} color="#F59E0B" /> Achievements & Awards
+                </h3>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', fontSize: 12, fontWeight: 700, color: '#F59E0B' }}>
+                    {employees.reduce((s, e) => s + (e.achievements?.length || 0), 0)} Total Awards
+                  </div>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', fontSize: 12, fontWeight: 700, color: '#3B82F6' }}>
+                    {employees.filter(e => (e.achievements?.length || 0) > 0).length} Employees
+                  </div>
+                </div>
+              </div>
+              <div style={{ position: 'relative', marginBottom: 20 }}>
+                <Search size={15} color={T.sub} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <input placeholder="Search by name, award title, type..." value={achSearch} onChange={e => setAchSearch(e.target.value)}
+                  style={{ width: '100%', padding: '10px 14px 10px 40px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                {employees.filter(e => (e.achievements?.length || 0) > 0).filter(e => {
+                  if (!achSearch.trim()) return true;
+                  const q = achSearch.toLowerCase();
+                  return e.name?.toLowerCase().includes(q) || (e.achievements || []).some((a: any) => (a.title || a.award_title || '').toLowerCase().includes(q) || (a.award_type || a.category || '').toLowerCase().includes(q));
+                }).sort((a, b) => (b.achievements?.length || 0) - (a.achievements?.length || 0)).map((e: any) => {
+                  const expanded = expandedCards[`ach_${e.id}`];
+                  const items = expanded ? e.achievements : e.achievements.slice(0, 3);
+                  return (
+                    <div key={e.id} style={{ background: T.bg, border: '1px solid rgba(245,158,11,0.25)', borderRadius: 16, padding: 20, transition: '0.2s', borderTop: '3px solid #F59E0B' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, cursor: 'pointer' }} onClick={() => handleOpenPreview(e, 'My Achievements')}>
+                        <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#F59E0B,#D97706)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                          {e.name?.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
+                          <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                        </div>
+                        <div style={{ background: 'rgba(245,158,11,0.15)', color: '#F59E0B', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.achievements.length} 🏆</div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {items.map((a: any, i: number) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(245,158,11,0.06)' : '#fffbeb', borderRadius: 8 }}>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏆</span>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{a.title || a.award_title || 'Achievement'}</div>
+                              {(a.award_type || a.category) && <div style={{ fontSize: 10, color: T.sub }}>{a.award_type || a.category}</div>}
+                            </div>
+                          </div>
+                        ))}
+                        {e.achievements.length > 3 && (
+                          <button onClick={() => setExpandedCards(prev => ({ ...prev, [`ach_${e.id}`]: !prev[`ach_${e.id}`] }))}
+                            style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.achievements.length - 3} more)`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {employees.filter(e => (e.achievements?.length || 0) > 0).length === 0 && (
+                  <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 48, color: T.sub }}>
+                    <Sparkles size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                    <div style={{ fontWeight: 700 }}>No achievements uploaded yet</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── EDUCATION TAB ── */}
+          {activeTab === 'Education' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <GraduationCap size={20} color="#8B5CF6" /> Education
+                </h3>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', fontSize: 12, fontWeight: 700, color: '#8B5CF6' }}>
+                    {employees.reduce((s, e) => s + (e.education?.length || 0), 0)} Total Records
+                  </div>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', fontSize: 12, fontWeight: 700, color: '#3B82F6' }}>
+                    {employees.filter(e => (e.education?.length || 0) > 0).length} Employees
+                  </div>
+                </div>
+              </div>
+              <div style={{ position: 'relative', marginBottom: 20 }}>
+                <Search size={15} color={T.sub} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <input placeholder="Search by name, degree, institution..." value={eduSearch} onChange={e => setEduSearch(e.target.value)}
+                  style={{ width: '100%', padding: '10px 14px 10px 40px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                {employees.filter(e => (e.education?.length || 0) > 0).filter(e => {
+                  if (!eduSearch.trim()) return true;
+                  const q = eduSearch.toLowerCase();
+                  return e.name?.toLowerCase().includes(q) || (e.education || []).some((ed: any) => (ed.degree || ed.qualification || '').toLowerCase().includes(q) || (ed.institution || ed.university || '').toLowerCase().includes(q));
+                }).sort((a, b) => (b.education?.length || 0) - (a.education?.length || 0)).map((e: any) => {
+                  const expanded = expandedCards[`edu_${e.id}`];
+                  const items = expanded ? e.education : e.education.slice(0, 3);
+                  return (
+                    <div key={e.id} style={{ background: T.bg, border: '1px solid rgba(139,92,246,0.25)', borderRadius: 16, padding: 20, transition: '0.2s', borderTop: '3px solid #8B5CF6' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, cursor: 'pointer' }} onClick={() => handleOpenPreview(e, 'My Education')}>
+                        <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                          {e.name?.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
+                          <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                        </div>
+                        <div style={{ background: 'rgba(139,92,246,0.15)', color: '#8B5CF6', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.education.length} 🎓</div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {items.map((ed: any, i: number) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(139,92,246,0.06)' : '#faf5ff', borderRadius: 8 }}>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🎓</span>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{ed.degree || ed.qualification || 'Degree'}</div>
+                              {(ed.institution || ed.university) && <div style={{ fontSize: 10, color: T.sub }}>{ed.institution || ed.university}{ed.year ? ` · ${ed.year}` : ''}</div>}
+                            </div>
+                          </div>
+                        ))}
+                        {e.education.length > 3 && (
+                          <button onClick={() => setExpandedCards(prev => ({ ...prev, [`edu_${e.id}`]: !prev[`edu_${e.id}`] }))}
+                            style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#8B5CF6', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.education.length - 3} more)`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {employees.filter(e => (e.education?.length || 0) > 0).length === 0 && (
+                  <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 48, color: T.sub }}>
+                    <GraduationCap size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                    <div style={{ fontWeight: 700 }}>No education records uploaded yet</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── PROJECTS TAB ── */}
+          {activeTab === 'Projects' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Briefcase size={20} color="#F97316" /> Projects
+                </h3>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(249,115,22,0.1)', border: '1px solid rgba(249,115,22,0.3)', fontSize: 12, fontWeight: 700, color: '#F97316' }}>
+                    {employees.reduce((s, e) => s + (e.projects?.length || 0), 0)} Total Projects
+                  </div>
+                  <div style={{ padding: '6px 16px', borderRadius: 10, background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', fontSize: 12, fontWeight: 700, color: '#3B82F6' }}>
+                    {employees.filter(e => (e.projects?.length || 0) > 0).length} Employees
+                  </div>
+                </div>
+              </div>
+              <div style={{ position: 'relative', marginBottom: 20 }}>
+                <Search size={15} color={T.sub} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <input placeholder="Search by name, project title, client, domain..." value={projSearch} onChange={e => setProjSearch(e.target.value)}
+                  style={{ width: '100%', padding: '10px 14px 10px 40px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                {employees.filter(e => (e.projects?.length || 0) > 0).filter(e => {
+                  if (!projSearch.trim()) return true;
+                  const q = projSearch.toLowerCase();
+                  return e.name?.toLowerCase().includes(q) || (e.projects || []).some((p: any) =>
+                    (p.ProjectName || p.project_name || p.name || '').toLowerCase().includes(q) ||
+                    (p.Client || p.client || '').toLowerCase().includes(q) ||
+                    (p.Domain || p.domain || '').toLowerCase().includes(q)
+                  );
+                }).sort((a, b) => (b.projects?.length || 0) - (a.projects?.length || 0)).map((e: any) => {
+                  const expanded = expandedCards[`proj_${e.id}`];
+                  const items = expanded ? e.projects : e.projects.slice(0, 3);
+                  return (
+                    <div key={e.id} style={{ background: T.bg, border: '1px solid rgba(249,115,22,0.25)', borderRadius: 16, padding: 20, transition: '0.2s', borderTop: '3px solid #F97316' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, cursor: 'pointer' }} onClick={() => handleOpenPreview(e, 'My Projects')}>
+                        <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#F97316,#EA580C)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                          {e.name?.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
+                          <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                        </div>
+                        <div style={{ background: 'rgba(249,115,22,0.15)', color: '#F97316', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.projects.length} 📁</div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {items.map((p: any, i: number) => {
+                          const title = p.ProjectName || p.project_name || p.name || '';
+                          const sub = [p.Client || p.client, p.Domain || p.domain].filter(Boolean).join(' · ');
+                          return (
+                            <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(249,115,22,0.06)' : '#fff7ed', borderRadius: 8 }}>
+                              <span style={{ fontSize: 13, flexShrink: 0 }}>📁</span>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title || 'Untitled Project'}</div>
+                                {sub && <div style={{ fontSize: 10, color: T.sub }}>{sub}</div>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {e.projects.length > 3 && (
+                          <button onClick={() => setExpandedCards(prev => ({ ...prev, [`proj_${e.id}`]: !prev[`proj_${e.id}`] }))}
+                            style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F97316', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.projects.length - 3} more)`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {employees.filter(e => (e.projects?.length || 0) > 0).length === 0 && (
+                  <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 48, color: T.sub }}>
+                    <Briefcase size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                    <div style={{ fontWeight: 700 }}>No projects uploaded yet</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
 
@@ -2098,7 +2470,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             setNewEmployee({ name: '', email: '', designation: '', employeeId: '', location: '', phone: '', department: '', yearsIT: '', yearsZensar: '', password: '', confirmPassword: '' });
             setExtractedDetails({ skills: [] as {name: string; rating: number}[], projects: [], certificates: [], education: [] });
             setRawExtractedData(null);
-            setActiveTab('Employees');
+            setActiveTab('Manage Employees');
             loadAllData();
             toast.success('Employee created and resume data saved!');
           }}

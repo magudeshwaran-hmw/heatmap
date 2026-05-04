@@ -23,4 +23,12 @@ dist-ssr
 *.sln
 *.sw?
 
-# NOTE: .env is intentionally NOT ignored so it transfers with the repo
+# Environment — contains real DB credentials, never commit
+.env
+
+# Excel data files — large binary, not needed in repo
+*.xlsx
+*.xls
+
+# Duplicate subfolder (development artifact)
+zenlap/

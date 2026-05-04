@@ -1,12 +1,12 @@
 -- ============================================================
 -- ZENSAR SKILL NAVIGATOR — COMPLETE DATABASE SETUP
 -- Run this on a fresh PostgreSQL database: skillmatrix
--- Version: April 2026 (synced with server-postgres.cjs)
+-- Version: May 2026 (synced with server-postgres.cjs)
 -- ============================================================
-
--- Step 1: Create the database (run as superuser if needed)
--- CREATE DATABASE skillmatrix;
--- \c skillmatrix
+-- Usage:
+--   psql -U postgres -c "CREATE DATABASE skillmatrix;"
+--   psql -U postgres -d skillmatrix -f COMPLETE_DATABASE_SETUP.sql
+-- ============================================================
 
 -- ============================================================
 -- 1. EMPLOYEES TABLE
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS employees (
 
 CREATE INDEX IF NOT EXISTS idx_employees_email     ON employees(email);
 CREATE INDEX IF NOT EXISTS idx_employees_zensar_id ON employees(zensar_id);
+CREATE INDEX IF NOT EXISTS idx_employees_submitted ON employees(submitted);
 
 -- ============================================================
 -- 2. SKILLS TABLE
@@ -43,8 +44,8 @@ CREATE TABLE IF NOT EXISTS skills (
   id             SERIAL       PRIMARY KEY,
   employee_id    VARCHAR(50)  REFERENCES employees(id) ON DELETE CASCADE,
   skill_name     VARCHAR(255) NOT NULL,
-  self_rating    INTEGER      DEFAULT 0,
-  manager_rating INTEGER,
+  self_rating    INTEGER      DEFAULT 0 CHECK (self_rating BETWEEN 0 AND 5),
+  manager_rating INTEGER      CHECK (manager_rating BETWEEN 0 AND 5),
   validated      BOOLEAN      DEFAULT FALSE,
   created_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_employee_id ON skills(employee_id);
+CREATE INDEX IF NOT EXISTS idx_skills_skill_name  ON skills(skill_name);
 
 -- ============================================================
 -- 3. PROJECTS TABLE
@@ -66,8 +68,8 @@ CREATE TABLE IF NOT EXISTS projects (
   start_date      DATE,
   end_date        DATE,
   description     TEXT,
-  technologies    TEXT[],
-  skills_used     TEXT[],
+  technologies    TEXT[]       DEFAULT '{}',
+  skills_used     TEXT[]       DEFAULT '{}',
   team_size       INTEGER      DEFAULT 0,
   outcome         TEXT,
   is_ongoing      BOOLEAN      DEFAULT FALSE,
@@ -77,6 +79,13 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_employee_id ON projects(employee_id);
+CREATE INDEX IF NOT EXISTS idx_projects_client      ON projects(client);
+
+-- Prevent duplicate project names per employee
+DELETE FROM projects p1 USING projects p2
+  WHERE p1.id > p2.id
+    AND p1.employee_id = p2.employee_id
+    AND LOWER(TRIM(p1.project_name)) = LOWER(TRIM(p2.project_name));
 
 -- ============================================================
 -- 4. CERTIFICATIONS TABLE
@@ -97,6 +106,7 @@ CREATE TABLE IF NOT EXISTS certifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_certifications_employee_id ON certifications(employee_id);
+CREATE INDEX IF NOT EXISTS idx_certifications_cert_name   ON certifications(cert_name);
 
 -- ============================================================
 -- 5. EDUCATION TABLE
@@ -109,6 +119,7 @@ CREATE TABLE IF NOT EXISTS education (
   field_of_study VARCHAR(255),
   start_date     VARCHAR(50),
   end_date       VARCHAR(50),
+  year           VARCHAR(50),
   grade          VARCHAR(50),
   description    TEXT,
   created_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
@@ -140,12 +151,13 @@ CREATE INDEX IF NOT EXISTS idx_achievements_employee_id ON achievements(employee
 -- 7. APP SETTINGS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS app_settings (
-  key   VARCHAR(100) PRIMARY KEY,
-  value TEXT
+  key        VARCHAR(100) PRIMARY KEY,
+  value      TEXT,
+  updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 );
 
--- Default admin credentials (login: admin / admin123)
-INSERT INTO app_settings (key, value) VALUES ('admin_id', 'admin')
+-- Default admin credentials (change password after first login!)
+INSERT INTO app_settings (key, value) VALUES ('admin_id',       'admin')
   ON CONFLICT (key) DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('admin_password', 'admin123')
   ON CONFLICT (key) DO NOTHING;
@@ -154,27 +166,29 @@ INSERT INTO app_settings (key, value) VALUES ('admin_password', 'admin123')
 -- 8. BFSI ROLES TABLE (Reactive + Proactive SRFs)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS bfsi_roles (
-  id            SERIAL       PRIMARY KEY,
-  role_id       VARCHAR(50)  UNIQUE NOT NULL,
-  role_title    VARCHAR(255) NOT NULL,
-  client_name   VARCHAR(255),
-  required_skills TEXT[],
-  days_open     INTEGER      DEFAULT 0,
-  status        VARCHAR(50)  DEFAULT 'Open',
-  fill_priority VARCHAR(50)  DEFAULT 'Medium',
-  assigned_spoc VARCHAR(255),
-  created_date  DATE         DEFAULT CURRENT_DATE,
-  updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-  hire_type     VARCHAR(50),
+  id              SERIAL       PRIMARY KEY,
+  role_id         VARCHAR(50)  UNIQUE NOT NULL,
+  role_title      VARCHAR(255) NOT NULL,
+  client_name     VARCHAR(255),
+  required_skills TEXT[]       DEFAULT '{}',
+  days_open       INTEGER      DEFAULT 0,
+  status          VARCHAR(50)  DEFAULT 'Open',
+  fill_priority   VARCHAR(50)  DEFAULT 'Medium',
+  assigned_spoc   VARCHAR(255),
+  created_date    DATE         DEFAULT CURRENT_DATE,
+  updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+  hire_type       VARCHAR(50),
   job_description TEXT,
-  srf_no        VARCHAR(50),
-  aging_bucket  VARCHAR(50),
-  type          VARCHAR(50),
-  location      VARCHAR(255)
+  srf_no          VARCHAR(50),
+  aging_bucket    VARCHAR(50),
+  type            VARCHAR(50),
+  location        VARCHAR(255),
+  candidate_count INTEGER      DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_bfsi_roles_status ON bfsi_roles(status);
 CREATE INDEX IF NOT EXISTS idx_bfsi_roles_type   ON bfsi_roles(type);
+CREATE INDEX IF NOT EXISTS idx_bfsi_roles_skill  ON bfsi_roles USING GIN(required_skills);
 
 -- ============================================================
 -- 9. BFSI WORKFORCE TABLE (Pool + Deallocation employees)
@@ -184,13 +198,13 @@ CREATE TABLE IF NOT EXISTS bfsi_workforce (
   employee_id         VARCHAR(50)  NOT NULL UNIQUE,
   employee_name       VARCHAR(255) NOT NULL,
   email               VARCHAR(255),
-  current_skills      TEXT[],
-  certifications      TEXT[],
+  current_skills      TEXT[]       DEFAULT '{}',
+  certifications      TEXT[]       DEFAULT '{}',
   experience_years    INTEGER      DEFAULT 0,
   status              VARCHAR(50)  DEFAULT 'Available',
   doj                 DATE,
   primary_skill       VARCHAR(255),
-  domain_expertise    TEXT[],
+  domain_expertise    TEXT[]       DEFAULT '{}',
   reskilling_program  VARCHAR(255),
   graduation_date     DATE,
   bench_days          INTEGER      DEFAULT 0,
@@ -213,12 +227,19 @@ CREATE TABLE IF NOT EXISTS bfsi_workforce (
   grade               VARCHAR(50),
   comments            TEXT,
   srf_no              VARCHAR(50),
+  vertical            VARCHAR(100),
+  rbu                 VARCHAR(100),
+  vbu                 VARCHAR(100),
   created_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_status  ON bfsi_workforce(status);
-CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_billing ON bfsi_workforce(billing_status);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_status        ON bfsi_workforce(status);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_billing       ON bfsi_workforce(billing_status);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_primary_skill ON bfsi_workforce(primary_skill);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_location      ON bfsi_workforce(location);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_dealloc_date  ON bfsi_workforce(deallocation_date);
+CREATE INDEX IF NOT EXISTS idx_bfsi_workforce_skills        ON bfsi_workforce USING GIN(current_skills);
 
 -- ============================================================
 -- 10. BFSI CERTIFICATIONS PIPELINE TABLE
@@ -236,7 +257,8 @@ CREATE TABLE IF NOT EXISTS bfsi_certifications (
   updated_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_bfsi_certifications_emp ON bfsi_certifications(employee_id);
+CREATE INDEX IF NOT EXISTS idx_bfsi_certifications_emp    ON bfsi_certifications(employee_id);
+CREATE INDEX IF NOT EXISTS idx_bfsi_certifications_status ON bfsi_certifications(status);
 
 -- ============================================================
 -- 11. BFSI ROLE ASSIGNMENTS TABLE
@@ -253,6 +275,7 @@ CREATE TABLE IF NOT EXISTS bfsi_assignments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bfsi_assignments_role ON bfsi_assignments(role_id);
+CREATE INDEX IF NOT EXISTS idx_bfsi_assignments_emp  ON bfsi_assignments(employee_id);
 
 -- ============================================================
 -- 12. BFSI UPLOAD HISTORY TABLE
@@ -263,7 +286,8 @@ CREATE TABLE IF NOT EXISTS bfsi_uploads (
   uploaded_by       VARCHAR(255),
   upload_date       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   records_processed INTEGER      DEFAULT 0,
-  status            VARCHAR(50)  DEFAULT 'Success'
+  status            VARCHAR(50)  DEFAULT 'Success',
+  error_message     TEXT
 );
 
 -- ============================================================
@@ -291,12 +315,55 @@ CREATE TABLE IF NOT EXISTS bfsi_summary_data (
 CREATE INDEX IF NOT EXISTS idx_bfsi_summary_skill ON bfsi_summary_data(primary_skill);
 
 -- ============================================================
--- ALL DONE — 13 tables created, zero sample data
+-- SAFE ALTER TABLE — add any missing columns to existing DBs
+-- (Safe to run on both fresh and existing databases)
 -- ============================================================
--- Verify with:
--- SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
---
--- Expected tables:
---   achievements, app_settings, bfsi_assignments, bfsi_certifications,
---   bfsi_roles, bfsi_summary_data, bfsi_uploads, bfsi_workforce,
---   certifications, education, employees, projects, skills
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS vertical            VARCHAR(100);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS rbu                 VARCHAR(100);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS vbu                 VARCHAR(100);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS grade               VARCHAR(50);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS comments            TEXT;
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS srf_no              VARCHAR(50);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS pool_status         VARCHAR(100);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS rmg_status          VARCHAR(100);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS deallocation_date   DATE;
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS return_to_pool_date DATE;
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS release_reason      VARCHAR(255);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS deployable_flag     BOOLEAN DEFAULT FALSE;
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS service_line        VARCHAR(255);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS practice_name       VARCHAR(255);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS band                VARCHAR(50);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS billing_status      VARCHAR(50);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS project_name        VARCHAR(255);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS customer            VARCHAR(255);
+ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS pm_name             VARCHAR(255);
+
+ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS type            VARCHAR(50);
+ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS location        VARCHAR(255);
+ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS candidate_count INTEGER DEFAULT 0;
+ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS srf_no          VARCHAR(50);
+ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS aging_bucket    VARCHAR(50);
+
+ALTER TABLE education ADD COLUMN IF NOT EXISTS year VARCHAR(50);
+ALTER TABLE bfsi_uploads ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- ============================================================
+-- VERIFICATION QUERY — run after setup to confirm all tables
+-- ============================================================
+SELECT
+  table_name,
+  (SELECT COUNT(*) FROM information_schema.columns
+   WHERE table_schema = 'public' AND c.table_name = columns.table_name) AS column_count
+FROM information_schema.tables c
+WHERE table_schema = 'public'
+ORDER BY table_name;
+
+-- ============================================================
+-- EXPECTED OUTPUT — 13 tables:
+--   achievements        | bfsi_assignments    | bfsi_certifications
+--   bfsi_roles          | bfsi_summary_data   | bfsi_uploads
+--   bfsi_workforce      | certifications      | education
+--   employees           | projects            | skills
+--   app_settings
+-- ============================================================
