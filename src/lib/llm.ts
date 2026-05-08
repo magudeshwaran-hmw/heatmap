@@ -22,11 +22,11 @@ import { API_BASE } from '@/lib/api';
 // TO SWITCH: change AI_MODE to 'cloud' and add CLOUD_API_KEY
 // ─────────────────────────────────────────────────────────────
 
-const LOCAL_MODEL = 'deepseek-v3.1:671b-cloud'; // Primary model
+const LOCAL_MODEL = 'qwen3-coder:480b-cloud'; // Primary model
 const RESUME_MODELS = [
+  'qwen3-coder:480b-cloud',
   'deepseek-v3.1:671b-cloud',
   'gemini-3-flash-preview:cloud',
-  'qwen3-coder:480b-cloud',
   'glm-5.1:cloud',
   'gemma4:cloud',
   'nemotron-3-super:cloud',

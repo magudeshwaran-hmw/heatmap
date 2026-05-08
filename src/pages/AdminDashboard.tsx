@@ -730,8 +730,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       toast.error('Zensar ID, Full Name, Email and Password are required');
       return;
     }
-    if (!/^\d{6}$/.test(newEmployee.employeeId.trim())) {
-      toast.error('Zensar ID must be exactly 6 digits');
+    if (!/^\d{5,6}$/.test(newEmployee.employeeId.trim())) {
+      toast.error('Zensar ID must be 5 or 6 digits');
       return;
     }
     // Check password match
@@ -914,154 +914,6 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: t.col, boxShadow: `0 0 15px ${t.col}` }} />
                     </div>
                  ))}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'Manage Employees' && (
-            <div style={{ animation: 'fadeIn 0.4s ease' }}>
-              {/* Search & Sort Bar */}
-              <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-                <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
-                  <Search size={16} color={T.muted} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)' }} />
-                  <input
-                    placeholder="Search name, ID or role..."
-                    value={search}
-                    onChange={e => setSearch(e.target.value)}
-                    style={{ width: '100%', padding: '12px 14px 12px 42px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 500, outline: 'none' }}
-                  />
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button 
-                    onClick={() => {
-                      const filtered = employees.filter(e => {
-                        const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
-                        const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
-                        const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) && 
-                                           (!filters.maxExperience || (e.yearsExperience || 0) <= parseInt(filters.maxExperience));
-                        const matchesProjects = !filters.minProjects || (e.projects?.length || 0) >= parseInt(filters.minProjects);
-                        const matchesCerts = !filters.minCertifications || (e.certifications?.length || 0) >= parseInt(filters.minCertifications);
-                        const matchesCompletion = !filters.completionRange || (() => {
-                          const [min, max] = filters.completionRange.split('-').map(Number);
-                          return e.completion >= min && e.completion <= max;
-                        })();
-                        const matchesHasProjects = !filters.hasProjects || (e.projects?.length > 0);
-                        const matchesHasCerts = !filters.hasCertifications || (e.certifications?.length > 0);
-                        const matchesValidated = !filters.isValidated || e.submitted;
-                        return matchesSearch && matchesRole && matchesExp && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
-                      });
-                      exportAllToExcel(filtered);
-                      toast.success(`Exported ${filtered.length} filtered employees to Excel`);
-                    }}
-                    style={{ 
-                      padding: '10px 14px', 
-                      borderRadius: 10, 
-                      background: '#10B981', 
-                      border: 'none',
-                      color: '#fff', 
-                      fontSize: 12, 
-                      fontWeight: 600, 
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 4
-                    }}
-                  >
-                    <Download size={14} /> Export
-                  </button>
-                  <select 
-                    value={sortOrder} 
-                    onChange={e => setSortOrder(e.target.value as any)}
-                    style={{ padding: '10px 14px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 500, cursor: 'pointer', minWidth: 110 }}
-                  >
-                    <option value="A-Z">A-Z</option>
-                    <option value="Z-A">Z-A</option>
-                    <option value="Newest">Newest</option>
-                    <option value="Oldest">Oldest</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Results Count */}
-              <div style={{ marginBottom: 16, fontSize: 13, color: T.sub }}>
-                Showing {employees.filter(e => {
-                  const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
-                  const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
-                  const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) && 
-                                     (!filters.maxExperience || (e.yearsExperience || 0) <= parseInt(filters.maxExperience));
-                  const matchesProjects = !filters.minProjects || (e.projects?.length || 0) >= parseInt(filters.minProjects);
-                  const matchesCerts = !filters.minCertifications || (e.certifications?.length || 0) >= parseInt(filters.minCertifications);
-                  const matchesCompletion = !filters.completionRange || (() => {
-                    const [min, max] = filters.completionRange.split('-').map(Number);
-                    return e.completion >= min && e.completion <= max;
-                  })();
-                  const matchesHasProjects = !filters.hasProjects || (e.projects?.length > 0);
-                  const matchesHasCerts = !filters.hasCertifications || (e.certifications?.length > 0);
-                  const matchesValidated = !filters.isValidated || e.submitted;
-                  return matchesSearch && matchesRole && matchesExp && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
-                }).length} of {employees.length} employees
-              </div>
-              
-              <div style={{ display: 'grid', gap: 16 }}>
-                {employees
-                  .filter(e => {
-                    const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
-                    const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
-                    const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) && 
-                                       (!filters.maxExperience || (e.yearsExperience || 0) <= parseInt(filters.maxExperience));
-                    const matchesProjects = !filters.minProjects || (e.projects?.length || 0) >= parseInt(filters.minProjects);
-                    const matchesCerts = !filters.minCertifications || (e.certifications?.length || 0) >= parseInt(filters.minCertifications);
-                    const matchesCompletion = !filters.completionRange || (() => {
-                      const [min, max] = filters.completionRange.split('-').map(Number);
-                      return e.completion >= min && e.completion <= max;
-                    })();
-                    const matchesHasProjects = !filters.hasProjects || (e.projects?.length > 0);
-                    const matchesHasCerts = !filters.hasCertifications || (e.certifications?.length > 0);
-                    const matchesValidated = !filters.isValidated || e.submitted;
-                    return matchesSearch && matchesRole && matchesExp && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
-                  })
-                  .sort((a, b) => {
-                    if (sortOrder === 'A-Z') return a.name?.localeCompare(b.name);
-                    if (sortOrder === 'Z-A') return b.name?.localeCompare(a.name);
-                    if (sortOrder === 'Newest') return (b.id || '').localeCompare(a.id || '');
-                    if (sortOrder === 'Oldest') return (a.id || '').localeCompare(b.id || '');
-                    return 0;
-                  })
-                  .map(e => (
-                    <div key={e.id} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: '24px', display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'center', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', position: 'relative' }}>
-                       {/* Left Content: Identity */}
-                       <div style={{ display: 'flex', alignItems: 'center', gap: 16, flex: '1 1 300px' }}>
-                          <div style={{ width: 52, height: 52, borderRadius: 14, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, boxShadow: '0 8px 16px rgba(59,130,246,0.15)', flexShrink: 0 }}>
-                            {e.name?.substring(0,2).toUpperCase()}
-                          </div>
-                          <div style={{ minWidth: 0 }}>
-                             <div style={{ fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</span>
-                                <span style={{ padding: '3px 8px', borderRadius: 6, background: e.submitted ? 'rgba(16,185,129,0.1)' : 'rgba(59,130,246,0.1)', color: e.submitted ? '#10B981' : '#3B82F6', fontSize: 9, fontWeight: 900, textTransform: 'uppercase' }}>{e.submitted ? 'VALIDATED' : 'SENSING'}</span>
-                             </div>
-                             <div style={{ fontSize: 12, color: T.sub, fontWeight: 500, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: '4px 8px' }}>
-                               <span>{e.email || 'no-email@zensar.com'}</span>
-                               <span style={{ color: T.bdr }}>|</span>
-                               <span style={{ color: '#3B82F6', fontWeight: 700 }}>ID: {e.zensar_id || e.id}</span>
-                             </div>
-                          </div>
-                       </div>
-
-                       {/* Right Content: Stats & Actions */}
-                       <div style={{ display: 'flex', alignItems: 'center', gap: 24, flex: '1 1 200px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                          <div style={{ flexShrink: 0 }}>
-                             <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, justifyContent: 'flex-end' }}>
-                                <span style={{ fontSize: 20, fontWeight: 800, color: e.completion >= 75 ? '#10B981' : '#3B82F6' }}>{e.completion}</span>
-                                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub }}>%</span>
-                             </div>
-                             <div style={{ width: 100, height: 6, borderRadius: 10, background: T.bdr, marginTop: 6, overflow: 'hidden' }}>
-                                <div style={{ height: '100%', width: `${e.completion}%`, background: e.completion >= 75 ? '#10B981' : '#3B82F6', borderRadius: 10 }} />
-                             </div>
-                          </div>
-                          <button onClick={() => handleOpenPreview(e)} style={{ width: 44, height: 44, borderRadius: 12, background: T.card, border: `1px solid ${T.bdr}`, color: '#3B82F6', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', boxShadow: '0 4px 12px rgba(0,0,0,0.05)', transition: '0.2s' }} aria-label="View Audit"><Eye size={20}/></button>
-                       </div>
-                    </div>
-                  ))}
               </div>
             </div>
           )}
@@ -2281,7 +2133,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                 return (
                   <>
                     {/* ROW 1: Zensar ID */}
-                    {inp('Zensar ID', 'employeeId', { required: true, placeholder: '6-digit number e.g. 741852', maxLength: 6, hint: 'Exactly 6 digits, e.g. 741852' })}
+                    {inp('Zensar ID', 'employeeId', { required: true, placeholder: '5 or 6 digit ID e.g. 64316', maxLength: 6, hint: '5 or 6 digit Zensar ID' })}
 
                     {/* ROW 2: Full Name */}
                     {inp('Full Name', 'name', { required: true, placeholder: 'e.g. Rahul Sharma' })}
@@ -2403,12 +2255,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       setShowAddEmployeeModal(false);
                       setShowResumeUploadPage(true);
                     }}
-                    disabled={!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6}
+                    disabled={!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)}
                     style={{
                       flex: 2, padding: '14px', borderRadius: 12, border: `2px solid #3B82F6`,
                       background: dark ? 'rgba(59,130,246,0.15)' : '#eff6ff', color: '#3B82F6', fontWeight: 800,
-                      cursor: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6) ? 'not-allowed' : 'pointer',
-                      opacity: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6) ? 0.5 : 1,
+                      cursor: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)) ? 'not-allowed' : 'pointer',
+                      opacity: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)) ? 0.5 : 1,
                       fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
                     }}
                   >
@@ -2418,11 +2270,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
                 <button
                   onClick={() => handleAddEmployee(false)}
-                  disabled={!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6}
+                  disabled={!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)}
                   style={{
                     flex: 2, padding: '14px', borderRadius: 12, border: 'none',
-                    background: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6) ? '#9CA3AF' : 'linear-gradient(135deg, #10B981, #059669)',
-                    color: '#fff', fontWeight: 800, cursor: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || newEmployee.employeeId.length !== 6) ? 'not-allowed' : 'pointer', fontSize: 14,
+                    background: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)) ? '#9CA3AF' : 'linear-gradient(135deg, #10B981, #059669)',
+                    color: '#fff', fontWeight: 800, cursor: (!newEmployee.name || !newEmployee.email.includes('@') || !newEmployee.password || newEmployee.password !== newEmployee.confirmPassword || !newEmployee.employeeId || !(newEmployee.employeeId.length === 5 || newEmployee.employeeId.length === 6)) ? 'not-allowed' : 'pointer', fontSize: 14,
                     boxShadow: '0 8px 24px rgba(16,185,129,0.35)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
                   }}

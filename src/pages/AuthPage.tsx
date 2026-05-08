@@ -172,7 +172,7 @@ export default function AuthPage() {
   // ── Sign up ───────────────────────────────────────────────────────────────
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sZensarId.trim() || !/^\d{6}$/.test(sZensarId.trim())) { toast.error('Zensar ID must be exactly 6 digits'); return; }
+    if (!sZensarId.trim() || !/^\d{5,6}$/.test(sZensarId.trim())) { toast.error('Zensar ID must be 5 or 6 digits'); return; }
     if (!sName.trim())    { toast.error('Enter your full name'); return; }
     if (!sMobile.trim())  { toast.error('Enter your mobile number'); return; }
     if (!sEmail.trim())   { toast.error('Enter your Zensar email'); return; }

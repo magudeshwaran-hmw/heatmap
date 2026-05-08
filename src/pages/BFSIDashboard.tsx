@@ -176,24 +176,83 @@ export default function BFSIDashboard() {
     return 'general';
   };
 
+  // ── ZenFinder: parse query into skill terms and location terms ──
+  const LOCATION_WORDS = ['pune', 'hyderabad', 'bangalore', 'bengaluru', 'chennai', 'mumbai', 'noida', 'delhi', 'gurgaon', 'gurugram', 'india', 'offshore', 'onshore', 'uk', 'usa', 'remote'];
+  const STOP_WORDS = ['in', 'at', 'with', 'and', 'or', 'for', 'the', 'a', 'an', 'developer', 'engineer', 'tester', 'who', 'has', 'have', 'from', 'based'];
+
+  const parseQuery = (q: string) => {
+    const words = q.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    const locationTerms = words.filter(w => LOCATION_WORDS.some(l => w.includes(l)));
+    const skillTerms = words.filter(w => !LOCATION_WORDS.some(l => w.includes(l)) && !STOP_WORDS.includes(w) && w.length > 2);
+    return { skillTerms, locationTerms, allWords: words };
+  };
+
   // ── ZenFinder: shared search function ──
   const runZenFinderSearch = async (rawQuery: string, currentWorkforce: BFSIEmployee[]) => {
     if (!rawQuery.trim()) return;
     setZfLoading(true);
     setZfSearched(true);
     const q = rawQuery.trim().toLowerCase();
-    const qWords = q.split(/\s+/).filter(w => w.length > 2);
     const intent = detectZenFinderIntent(q);
+    const { skillTerms, locationTerms } = parseQuery(q);
     const results: any[] = [];
 
-    const matches = (text: string) => {
+    // Match text against skill terms only (not location words)
+    // Uses PHRASE matching first, then individual terms only if 3+ chars and specific enough
+    const matchesSkill = (text: string) => {
+      if (!text || skillTerms.length === 0) return false;
+      // Normalize: lowercase + replace dashes/slashes with space so
+      // "Automation Testing - SDET" becomes "automation testing  sdet"
+      const t = text.toLowerCase().replace(/[-\/]/g, ' ').replace(/\s+/g, ' ');
+      const skillPhrase = skillTerms.join(' ');
+      // 1. Full phrase match
+      if (t.includes(skillPhrase)) return true;
+      // 2. All skill terms must appear (AND logic)
+      if (skillTerms.length > 1 && skillTerms.every(w => t.includes(w))) return true;
+      // 3. Single specific term (4+ chars, not generic)
+      const GENERIC = ['test', 'work', 'data', 'base', 'soft', 'hard', 'good', 'best', 'high', 'lead'];
+      if (skillTerms.length === 1) {
+        const term = skillTerms[0];
+        if (term.length >= 4 && !GENERIC.includes(term) && t.includes(term)) return true;
+      }
+      return false;
+    };
+
+    // Match text against full query or any word
+    const matchesAny = (text: string) => {
+      if (!text) return false;
       const t = text.toLowerCase();
-      return t.includes(q) || qWords.some(w => t.includes(w));
+      return t.includes(q) || skillTerms.some(w => t.includes(w)) || locationTerms.some(w => t.includes(w));
+    };
+
+    // Match location
+    const LOCATION_ALIASES: Record<string, string[]> = {
+      'bangalore': ['bangalore', 'bengaluru', 'bengaluru-electronic', 'electronic city'],
+      'bengaluru': ['bangalore', 'bengaluru', 'bengaluru-electronic', 'electronic city'],
+      'pune':      ['pune', 'pune campus', 'pune client', 'pune stpi', 'm3bi - pune'],
+      'hyderabad': ['hyderabad', 'hyd', 'dlf sez'],
+      'chennai':   ['chennai'],
+      'mumbai':    ['mumbai', 'navi mumbai'],
+      'noida':     ['noida'],
+      'delhi':     ['delhi', 'gurgaon', 'gurugram'],
+    };
+
+    const matchesLocation = (text: string) => {
+      if (!text || locationTerms.length === 0) return false;
+      const t = text.toLowerCase();
+      return locationTerms.some(w => {
+        // Direct match
+        if (t.includes(w)) return true;
+        // Alias match — e.g. "bangalore" matches "bengaluru-electronic city"
+        const aliases = LOCATION_ALIASES[w] || [];
+        return aliases.some(alias => t.includes(alias));
+      });
     };
 
     for (const emp of currentWorkforce.filter(e => e.status !== 'In-project')) {
       let score = 0;
       const reasons: { icon: string; verified: boolean; source: string; field: string; value: string; context: string; pts: number }[] = [];
+      let hasSkillMatch = false; // must have at least one skill/cert/project match
 
       const addReason = (
         icon: string, verified: boolean,
@@ -206,72 +265,53 @@ export default function BFSIDashboard() {
         }
       };
 
-      // ── For general / skill / project intent: also search Excel data ──
+      // ── Location match (bonus points, only added if skill also matches) ──
+      const locMatch = locationTerms.length > 0 && matchesLocation(emp.location || '');
+      // Location bonus added AFTER skill match confirmed (see gate below)
+
+      // ── BFSI: Primary Skill ──
       if (intent === 'general' || intent === 'skill' || intent === 'project') {
-        // ── Excel: Primary Skill ──
-        if (emp.primary_skill && matches(emp.primary_skill)) {
-          addReason('📊', true, 'Excel', 'Primary Skill', emp.primary_skill,
-            `This is the employee's main declared skill in the Excel upload.`, 20);
+        if (emp.primary_skill && matchesSkill(emp.primary_skill)) {
+          hasSkillMatch = true;
+          addReason('📊', true, 'BFSI Data', 'Primary Skill', emp.primary_skill,
+            `Main declared skill in BFSI data.`, 20);
         }
 
-        // ── Excel: L1-L4 Current Skills ──
+        // ── BFSI: L1-L4 Current Skills ──
         if (intent !== 'project') {
           (emp.current_skills || []).forEach((s, i) => {
             if (!s) return;
             const subSkills = s.split(',').map(x => x.trim()).filter(Boolean);
-            if (subSkills.length > 1) {
-              subSkills.forEach(sub => {
-                if (matches(sub)) {
-                  const display = sub.length > 60 ? sub.substring(0, 60) + '…' : sub;
-                  const parentCategory = s.split('-')[0]?.trim() || '';
-                  const contextNote = parentCategory && parentCategory.toLowerCase() !== sub.toLowerCase()
-                    ? `Found inside "${parentCategory}" skill category in Excel L${i + 1} data. Not a standalone certification.`
-                    : `Listed as an L${i + 1} skill in Excel upload.`;
-                  addReason('📊', true, 'Excel', `L${i + 1} Skill`, display, contextNote, 15);
-                }
-              });
-            } else if (matches(s)) {
-              const display = s.length > 60 ? s.substring(0, 60) + '…' : s;
-              addReason('📊', true, 'Excel', `L${i + 1} Skill`, display,
-                `Listed as an L${i + 1} skill in Excel upload.`, 15);
-            }
+            const toCheck = subSkills.length > 1 ? subSkills : [s];
+            toCheck.forEach(sub => {
+              if (matchesSkill(sub)) {
+                hasSkillMatch = true;
+                const display = sub.length > 60 ? sub.substring(0, 60) + '…' : sub;
+                addReason('📊', true, 'BFSI Data', `L${i + 1} Skill`, display,
+                  `Listed as an L${i + 1} skill in BFSI data.`, 12);
+              }
+            });
           });
         }
 
-        // ── Excel: Location ──
-        if (emp.location && matches(emp.location)) {
-          addReason('📍', true, 'Excel', 'Location', emp.location,
-            `Employee is based at this location per Excel data.`, 10);
+        // ── BFSI: Project / Customer ──
+        if (emp.project_name && matchesSkill(emp.project_name)) {
+          hasSkillMatch = true;
+          addReason('🏗️', true, 'BFSI Data', 'Current Project', emp.project_name,
+            `Employee is currently assigned to this project.`, 10);
         }
-
-        // ── Excel: Project ──
-        if (emp.project_name && matches(emp.project_name)) {
-          addReason('🏗️', true, 'Excel', 'Current Project', emp.project_name,
-            `Employee is currently assigned to this project.`, 12);
-        }
-
-        // ── Excel: Customer ──
-        if (emp.customer && matches(emp.customer)) {
-          addReason('🏢', true, 'Excel', 'Customer', emp.customer,
-            `Employee is working for this customer per Excel data.`, 10);
-        }
-
-        // ── Excel: Practice / Service Line ──
-        if ((emp as any).practice_name && matches((emp as any).practice_name)) {
-          addReason('📊', true, 'Excel', 'Practice', (emp as any).practice_name,
-            `Employee belongs to this practice area.`, 8);
-        }
-        if ((emp as any).service_line && matches((emp as any).service_line)) {
-          addReason('📊', true, 'Excel', 'Service Line', (emp as any).service_line,
-            `Employee is part of this service line.`, 8);
+        if (emp.customer && matchesSkill(emp.customer)) {
+          hasSkillMatch = true;
+          addReason('🏢', true, 'BFSI Data', 'Customer', emp.customer,
+            `Employee is working for this customer.`, 8);
         }
       }
 
-      // ── Zen Matrix: fetch only the relevant data source based on intent ──
+      // ── Zen Matrix: fetch only relevant data based on intent ──
       try {
         const empId = emp.employee_id;
 
-        // ── CERTIFICATIONS — only when intent is certification or general ──
+        // ── CERTIFICATIONS ──
         if (intent === 'certification' || intent === 'general') {
           const certRes = await fetch(`${API_BASE}/certifications/${empId}`);
           if (certRes.ok) {
@@ -280,17 +320,17 @@ export default function BFSIDashboard() {
             (certs as any[]).forEach((c: any) => {
               const name = c.cert_name || c.name || '';
               const org = c.issuing_organization || c.issuer || '';
-              if ((name && matches(name)) || (org && matches(org))) {
+              if ((name && matchesSkill(name)) || (org && matchesSkill(org))) {
+                hasSkillMatch = true;
                 addReason('🏅', true, 'Zen Matrix → Certifications', 'Certificate',
                   `${name}${org ? ` by ${org}` : ''}`,
-                  `Verified certification uploaded to Zen Matrix resume. This is a formal credential.`,
-                  25);
+                  `Verified certification from Zen Matrix resume.`, 25);
               }
             });
           }
         }
 
-        // ── ACHIEVEMENTS — only when intent is achievement or general ──
+        // ── ACHIEVEMENTS ──
         if (intent === 'achievement' || intent === 'general') {
           const achRes = await fetch(`${API_BASE}/achievements/${empId}`);
           if (achRes.ok) {
@@ -298,37 +338,37 @@ export default function BFSIDashboard() {
             const achs = achData.achievements || achData || [];
             (achs as any[]).forEach((a: any) => {
               const title = a.title || '';
-              const desc = a.description || '';
               const type = a.award_type || a.category || '';
-              if (matches(title) || matches(desc) || matches(type)) {
+              if (matchesSkill(title) || matchesSkill(type)) {
+                hasSkillMatch = true;
                 addReason('🏆', true, 'Zen Matrix → Awards', 'Achievement',
                   `${title}${type ? ` (${type})` : ''}`,
-                  `Award/achievement from resume upload. Verified by Zen Matrix.`,
-                  22);
+                  `Award/achievement from Zen Matrix resume.`, 22);
               }
             });
           }
         }
 
-        // ── SKILLS — only when intent is skill or general ──
+        // ── SKILLS ──
         if (intent === 'skill' || intent === 'general') {
           const skillsRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
           if (skillsRes.ok) {
             const skills = await skillsRes.json();
             (skills as any[]).forEach((sk: any) => {
               const name = sk.skill_name || sk.skillName || '';
-              if (name && matches(name)) {
+              if (name && matchesSkill(name)) {
+                hasSkillMatch = true;
                 const level = sk.self_rating || sk.selfRating || 0;
                 addReason('🎓', true, 'Zen Matrix → Skills', 'Skill',
-                  `${name} (Proficiency L${level})`,
-                  `Self-rated skill from resume upload. L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : level === 1 ? 'Beginner' : 'Not rated'}.`,
+                  `${name} (L${level})`,
+                  `Self-rated skill. L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : level === 1 ? 'Beginner' : 'Not rated'}.`,
                   20);
               }
             });
           }
         }
 
-        // ── PROJECTS — only when intent is project or general ──
+        // ── PROJECTS ──
         if (intent === 'project' || intent === 'general') {
           const projRes = await fetch(`${API_BASE}/projects/${empId}`);
           if (projRes.ok) {
@@ -338,31 +378,42 @@ export default function BFSIDashboard() {
               const name = p.project_name || p.name || '';
               const client = p.client || '';
               const domain = p.domain || '';
-              const desc = p.description || '';
               const techs = (p.technologies || []).join(' ');
               const skillsUsed = (p.skills_used || []).join(' ');
-              const combined = [name, client, domain, desc, techs, skillsUsed].join(' ');
-              if (matches(combined)) {
-                const matchedPart = [name, client, domain].filter(x => x && matches(x)).join(' · ') || name;
-                const matchedIn = matches(techs) ? 'technologies used' : matches(skillsUsed) ? 'skills used' : matches(domain) ? 'domain' : 'project name/client';
+              const combined = [name, client, domain, techs, skillsUsed].join(' ');
+              if (matchesSkill(combined)) {
+                hasSkillMatch = true;
+                const matchedPart = [name, client, domain].filter(x => x && matchesSkill(x)).join(' · ') || name;
                 addReason('🏗️', true, 'Zen Matrix → Projects', 'Project',
                   matchedPart.substring(0, 60),
-                  `Found in ${matchedIn} of this project from resume upload.`,
-                  18);
+                  `Found in project data from Zen Matrix resume.`, 18);
               }
             });
           }
         }
       } catch {}
 
-      if (score > 0) {
-        results.push({
-          ...emp,
-          zfScore: score,
-          zfReasons: reasons.slice(0, 6),
-          zfAllReasons: reasons,
-          zfIntent: intent,
-        });
+      // ── Only include if there's a real skill/cert/project match ──
+      // If location was specified in query, employee MUST be in that location
+      if (score > 0 && hasSkillMatch) {
+        // If query has location terms, location match is REQUIRED not optional
+        if (locationTerms.length > 0 && !locMatch) {
+          // Location specified but employee not in that location — skip
+        } else {
+          // Add location bonus when skill matched
+          if (locMatch) {
+            addReason('📍', true, 'BFSI Data', 'Location', emp.location || '',
+              `Employee is based at this location.`, 10);
+            score += 10;
+          }
+          results.push({
+            ...emp,
+            zfScore: score,
+            zfReasons: reasons.slice(0, 6),
+            zfAllReasons: reasons,
+            zfIntent: intent,
+          });
+        }
       }
     }
 
@@ -1218,415 +1269,6 @@ export default function BFSIDashboard() {
                     <p style={{ margin: '4px 0 0', fontSize: 14, color: T.sub }}>Skills in demand · Roles open now</p>
                   </div>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                    {/* Find a Match button */}
-                    <button
-                      onClick={async () => {
-                        const poolEmployees = workforce.filter(w =>
-                          w.status === 'Available-Pool' || w.status === 'Deallocating'
-                        );
-                        const openRoles = roles.filter(r =>
-                          r.type === 'Reactive' || r.type === 'Proactive'
-                        );
-                        if (poolEmployees.length === 0) {
-                          toast.error('No pool employees found. Please upload Excel data first.');
-                          return;
-                        }
-                        if (openRoles.length === 0) {
-                          toast.error('No open roles found. Please upload Excel data first.');
-                          return;
-                        }
-
-                        // ══════════════════════════════════════════════════════════════
-                        // ENHANCED MATCHING ENGINE - 4-Phase Algorithm with Zen Matrix
-                        // ══════════════════════════════════════════════════════════════
-                        // Phase 1: Fetch ALL Zen Matrix skills for pool employees
-                        // Phase 2: FLEXIBLE Pre-filtering (Location + Skill from BOTH sources)
-                        // Phase 3: Advanced Weighted Scoring (0-100 points + skill level bonus)
-                        // Phase 4: Ranking & Top matches selection
-                        // ══════════════════════════════════════════════════════════════
-
-                        console.log('🎯 ═══════════════════════════════════════════════════════════');
-                        console.log('🎯 FIND A MATCH - ENHANCED ALGORITHM STARTED');
-                        console.log('🎯 ═══════════════════════════════════════════════════════════');
-                        console.log(`📊 Pool Employees: ${poolEmployees.length}`);
-                        console.log(`📊 Open Roles: ${openRoles.length}`);
-
-                        // ══════════════════════════════════════════════════════════════
-                        // PHASE 1: FETCH ZEN MATRIX SKILLS FOR ALL POOL EMPLOYEES
-                        // ══════════════════════════════════════════════════════════════
-                        
-                        console.log('🔍 PHASE 1: Fetching Zen Matrix skills for all pool employees...');
-                        const employeeSkillsMap: Record<string, any[]> = {};
-                        
-                        // Batch fetch all skills
-                        try {
-                          const employeeIds = poolEmployees.map(e => e.employee_id);
-                          const batchResponse = await fetch(`${API_BASE}/employees/batch-skills`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ employeeIds })
-                          });
-                          
-                          if (batchResponse.ok) {
-                            const batchData = await batchResponse.json();
-                            Object.keys(batchData).forEach(empId => {
-                              employeeSkillsMap[empId] = batchData[empId] || [];
-                            });
-                            console.log(`✅ Fetched Zen Matrix skills for ${Object.keys(employeeSkillsMap).length} employees`);
-                          } else {
-                            console.log('⚠️ Batch skills API failed, will check individual employees');
-                          }
-                        } catch (error) {
-                          console.log('⚠️ Batch skills fetch error:', error);
-                        }
-
-                        const matches: Array<{ 
-                          role: BFSIRole; 
-                          employee: BFSIEmployee; 
-                          score: number; 
-                          matchedSkills: string[]; 
-                          breakdown: string;
-                          skillMatrixSkills?: any[];
-                          excelSkills: string[];
-                          zenMatrixSkills: string[];
-                          matchSource: 'BFSI Data' | 'Zen Matrix Only' | 'Both Sources';
-                          skillLevelBonus: number;
-                        }> = [];
-
-                        // ── Helper: Normalize skill string ──
-                        const normSkill = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').replace(/[^a-z0-9\s]/g, '').trim();
-
-                        // ── Helper: Check if location matches (FLEXIBLE - allow all if no specific requirement) ──
-                        const locationMatch = (emp: BFSIEmployee, role: BFSIRole): boolean => {
-                          const roleLocation = normSkill(role.location || '');
-                          const empLocation = normSkill(emp.location || '');
-                          
-                          // If no specific location requirement, allow all
-                          if (!roleLocation || roleLocation === '') return true;
-                          
-                          // Offshore locations
-                          const offshoreKeywords = ['hyderabad', 'pune', 'bangalore', 'chennai', 'india', 'offshore'];
-                          const isRoleOffshore = offshoreKeywords.some(k => roleLocation.includes(k));
-                          const isEmpOffshore = offshoreKeywords.some(k => empLocation.includes(k));
-                          
-                          // Onshore locations
-                          const onshoreKeywords = ['uk', 'usa', 'united kingdom', 'united states', 'europe', 'onshore', 'america'];
-                          const isRoleOnshore = onshoreKeywords.some(k => roleLocation.includes(k));
-                          const isEmpOnshore = onshoreKeywords.some(k => empLocation.includes(k));
-                          
-                          // Flexible matching - only filter if there's a clear mismatch
-                          if (isRoleOffshore && isEmpOnshore) return false; // ❌ Role needs offshore, emp is onshore
-                          if (isRoleOnshore && isEmpOffshore) return false; // ❌ Role needs onshore, emp is offshore
-                          
-                          return true; // ✅ Match or no specific requirement
-                        };
-
-                        // ── Helper: Check if skill matches in BOTH Excel AND Zen Matrix ──
-                        const skillMatchBothSources = (emp: BFSIEmployee, role: BFSIRole, zenSkills: any[]): {
-                          matches: boolean;
-                          excelMatch: boolean;
-                          zenMatch: boolean;
-                          matchedExcelSkills: string[];
-                          matchedZenSkills: string[];
-                          skillLevelBonus: number;
-                        } => {
-                          const requiredSkill = normSkill(role.required_skills?.[0] || role.role_title || '');
-                          const requiredKeywords = requiredSkill.split(' ').filter(w => w.length > 2);
-                          
-                          // Check Excel skills (primary_skill + current_skills)
-                          const empPrimarySkill = normSkill(emp.primary_skill || '');
-                          const empCurrentSkills = (emp.current_skills || []).map(s => normSkill(s));
-                          const allExcelSkills = [empPrimarySkill, ...empCurrentSkills].filter(s => s);
-                          
-                          const matchedExcelSkills: string[] = [];
-                          const excelMatch = requiredKeywords.some(keyword => {
-                            const found = allExcelSkills.some(skill => {
-                              if (skill.includes(keyword)) {
-                                matchedExcelSkills.push(skill);
-                                return true;
-                              }
-                              return false;
-                            });
-                            return found;
-                          });
-                          
-                          // Check Zen Matrix skills
-                          const matchedZenSkills: string[] = [];
-                          let skillLevelBonus = 0;
-                          const zenMatch = requiredKeywords.some(keyword => {
-                            const found = zenSkills.some(zSkill => {
-                              const skillName = normSkill(zSkill.skillName || zSkill.skill_name || '');
-                              if (skillName.includes(keyword)) {
-                                matchedZenSkills.push(skillName);
-                                
-                                // Calculate skill level bonus (0-3 levels = 0-15 bonus points)
-                                const level = zSkill.selfRating || zSkill.self_rating || 0;
-                                if (level === 3) skillLevelBonus += 15; // Expert
-                                else if (level === 2) skillLevelBonus += 10; // Intermediate
-                                else if (level === 1) skillLevelBonus += 5; // Beginner
-                                // level 0 = no bonus
-                                
-                                return true;
-                              }
-                              return false;
-                            });
-                            return found;
-                          });
-                          
-                          return {
-                            matches: excelMatch || zenMatch,
-                            excelMatch,
-                            zenMatch,
-                            matchedExcelSkills: [...new Set(matchedExcelSkills)],
-                            matchedZenSkills: [...new Set(matchedZenSkills)],
-                            skillLevelBonus
-                          };
-                        };
-
-                        // ── Helper: Check if employee is available by start date ──
-                        const startDateAvailable = (emp: BFSIEmployee, role: BFSIRole): boolean => {
-                          const meta = parseMeta(role);
-                          const startDateStr = meta.startDate; // "02-MAR-2026"
-                          
-                          if (!startDateStr) return true; // No start date = show all
-                          
-                          // Parse SRF start date
-                          const srfStart = new Date(startDateStr);
-                          if (isNaN(srfStart.getTime())) return true; // Invalid date = show all
-                          
-                          // Pool employees: always available
-                          if (emp.status === 'Available-Pool') return true; // ✅
-                          
-                          // Deallocation employees: check deallocation_date
-                          if (emp.status === 'Deallocating') {
-                            if (!emp.deallocation_date) return true; // No date = assume available
-                            
-                            const deallocDate = new Date(emp.deallocation_date);
-                            if (isNaN(deallocDate.getTime())) return true; // Invalid date = assume available
-                            
-                            // Must be deallocated BEFORE or ON start date
-                            return deallocDate <= srfStart; // ✅ or ❌
-                          }
-                          
-                          return false;
-                        };
-
-                        // ══════════════════════════════════════════════════════════════
-                        // PHASE 2: FLEXIBLE PRE-FILTERING
-                        // ══════════════════════════════════════════════════════════════
-                        
-                        console.log('🔍 PHASE 2: Flexible pre-filtering...');
-                        let totalFiltered = 0;
-                        const filterReasons: Record<string, number> = {
-                          location: 0,
-                          skill: 0,
-                          startDate: 0,
-                        };
-
-                        for (const role of openRoles) {
-                          const meta = parseMeta(role);
-                          const roleMatches: typeof matches = [];
-                          
-                          console.log(`\n🎯 Processing SRF: ${role.role_id} - ${role.role_title}`);
-
-                          for (const emp of poolEmployees) {
-                            // Get Zen Matrix skills for this employee
-                            const zenSkills = employeeSkillsMap[emp.employee_id] || [];
-                            
-                            // Filter 1: Location Match (FLEXIBLE)
-                            if (!locationMatch(emp, role)) {
-                              filterReasons.location++;
-                              totalFiltered++;
-                              continue; // ❌ SKIP
-                            }
-
-                            // Filter 2: Skill Match from BOTH Excel AND Zen Matrix
-                            const skillCheck = skillMatchBothSources(emp, role, zenSkills);
-                            if (!skillCheck.matches) {
-                              filterReasons.skill++;
-                              totalFiltered++;
-                              continue; // ❌ SKIP - No match in either source
-                            }
-
-                            // Filter 3: Start Date Availability
-                            if (!startDateAvailable(emp, role)) {
-                              filterReasons.startDate++;
-                              totalFiltered++;
-                              continue; // ❌ SKIP
-                            }
-
-                            // ══════════════════════════════════════════════════════════════
-                            // PHASE 3: ADVANCED WEIGHTED SCORING (0-100 points + bonuses)
-                            // ══════════════════════════════════════════════════════════════
-                            
-                            let score = 0;
-                            const breakdown: string[] = [];
-
-                            // 1. Location Match (20 pts)
-                            if (locationMatch(emp, role)) {
-                              score += 20;
-                              breakdown.push(`Location: ${emp.location || 'N/A'} ✓`);
-                            }
-
-                            // 2. Skill Match - BOTH SOURCES (40 pts max)
-                            if (skillCheck.excelMatch && skillCheck.zenMatch) {
-                              score += 40;
-                              breakdown.push('Skills: Both Excel & Zen Matrix ✓✓');
-                            } else if (skillCheck.zenMatch) {
-                              score += 35;
-                              breakdown.push('Skills: Zen Matrix Only ✓');
-                            } else if (skillCheck.excelMatch) {
-                              score += 30;
-                              breakdown.push('Skills: BFSI Data ✓');
-                            }
-
-                            // 3. Skill Level Bonus from Zen Matrix (0-15 pts)
-                            if (skillCheck.skillLevelBonus > 0) {
-                              score += skillCheck.skillLevelBonus;
-                              breakdown.push(`Skill Level Bonus: +${skillCheck.skillLevelBonus} pts`);
-                            }
-
-                            // 4. Grade Match (10 pts)
-                            const reqGrade = meta.grade || '';
-                            const empGrade = (emp as any).grade || (emp as any).band || '';
-                            if (reqGrade && empGrade) {
-                              if (reqGrade === empGrade) {
-                                score += 10;
-                                breakdown.push(`Grade: ${empGrade} ✓`);
-                              } else if (reqGrade[0] === empGrade[0]) {
-                                score += 5;
-                                breakdown.push(`Grade Band: ${empGrade[0]} ✓`);
-                              }
-                            }
-
-                            // 5. Start Date (10 pts)
-                            if (startDateAvailable(emp, role)) {
-                              score += 10;
-                              breakdown.push('Available on time ✓');
-                            }
-
-                            // 6. Aging Bonus (5 pts) - Higher aging = more urgent to place
-                            const ageing = emp.aging_days || 0;
-                            if (ageing > 60) {
-                              score += 5;
-                              breakdown.push(`High Aging: ${ageing} days ✓`);
-                            } else if (ageing > 30) {
-                              score += 3;
-                              breakdown.push(`Aging: ${ageing} days`);
-                            }
-
-                            // Determine match source
-                            let matchSource: 'BFSI Data' | 'Zen Matrix Only' | 'Both Sources';
-                            if (skillCheck.excelMatch && skillCheck.zenMatch) {
-                              matchSource = 'Both Sources';
-                            } else if (skillCheck.zenMatch) {
-                              matchSource = 'Zen Matrix Only';
-                            } else {
-                              matchSource = 'BFSI Data';
-                            }
-
-                            roleMatches.push({
-                              role,
-                              employee: emp,
-                              score: Math.min(score, 100),
-                              matchedSkills: [...skillCheck.matchedExcelSkills, ...skillCheck.matchedZenSkills],
-                              breakdown: breakdown.join(' · '),
-                              skillMatrixSkills: zenSkills,
-                              excelSkills: skillCheck.matchedExcelSkills,
-                              zenMatrixSkills: skillCheck.matchedZenSkills,
-                              matchSource,
-                              skillLevelBonus: skillCheck.skillLevelBonus
-                            });
-                          }
-
-                          // ══════════════════════════════════════════════════════════════
-                          // PHASE 4: RANKING & SORTING
-                          // ══════════════════════════════════════════════════════════════
-                          
-                          // Sort by score desc, then skill level bonus desc, then ageing desc
-                          roleMatches.sort((a, b) => {
-                            if (b.score !== a.score) return b.score - a.score;
-                            if (b.skillLevelBonus !== a.skillLevelBonus) return b.skillLevelBonus - a.skillLevelBonus;
-                            return (b.employee.aging_days || 0) - (a.employee.aging_days || 0);
-                          });
-                          
-                          console.log(`✅ Found ${roleMatches.length} matches for ${role.role_id}`);
-                          if (roleMatches.length > 0) {
-                            console.log(`   Top match: ${roleMatches[0].employee.employee_name} (Score: ${roleMatches[0].score}, Source: ${roleMatches[0].matchSource})`);
-                          }
-                          
-                          matches.push(...roleMatches);
-                        }
-
-                        console.log('🎯 ═══════════════════════════════════════════════════════════');
-                        console.log(`🎯 TOTAL MATCHES: ${matches.length}`);
-                        console.log(`🎯 FILTERED OUT: ${totalFiltered}`);
-                        console.log('🎯 ═══════════════════════════════════════════════════════════');
-
-                        if (matches.length === 0) {
-                          toast.error(`No matches found. ${totalFiltered} employees filtered out: ${filterReasons.location} location mismatch, ${filterReasons.skill} skill mismatch, ${filterReasons.startDate} not available by start date.`);
-                          return;
-                        }
-
-                        // ── Build SRF-centric list for display ──
-                        const srfMap: Record<string, { 
-                          role: BFSIRole; 
-                          bestEmployee: BFSIEmployee; 
-                          score: number; 
-                          matchedSkills: string[]; 
-                          breakdown: string; 
-                          allEmployees: BFSIEmployee[];
-                          skillMatrixSkills?: any[];
-                          matchSource: string;
-                          excelSkills: string[];
-                          zenMatrixSkills: string[];
-                        }> = {};
-                        
-                        matches.forEach(m => {
-                          const rid = m.role.role_id;
-                          if (!srfMap[rid]) {
-                            srfMap[rid] = {
-                              role: m.role,
-                              bestEmployee: m.employee,
-                              score: m.score,
-                              matchedSkills: m.matchedSkills,
-                              breakdown: m.breakdown,
-                              allEmployees: [],
-                              skillMatrixSkills: m.skillMatrixSkills,
-                              matchSource: m.matchSource,
-                              excelSkills: m.excelSkills,
-                              zenMatrixSkills: m.zenMatrixSkills
-                            };
-                          }
-                          srfMap[rid].allEmployees.push(m.employee);
-                          if (m.score > srfMap[rid].score) {
-                            srfMap[rid].bestEmployee = m.employee;
-                            srfMap[rid].score = m.score;
-                            srfMap[rid].matchedSkills = m.matchedSkills;
-                            srfMap[rid].breakdown = m.breakdown;
-                            srfMap[rid].skillMatrixSkills = m.skillMatrixSkills;
-                            srfMap[rid].matchSource = m.matchSource;
-                            srfMap[rid].excelSkills = m.excelSkills;
-                            srfMap[rid].zenMatrixSkills = m.zenMatrixSkills;
-                          }
-                        });
-
-                        const srfList = Object.values(srfMap).sort((a, b) => b.score - a.score);
-                        const uniqueEmps = [...new Set(matches.map(m => m.employee.employee_id))].length;
-
-                        toast.success(`✅ ${srfList.length} SRFs matched · ${uniqueEmps} employees available · ${totalFiltered} filtered out`);
-                        setSelectedMetric({
-                          tab: 'match',
-                          metric: `🎯 Find a Match — ${srfList.length} SRFs · ${totalFiltered} Filtered`,
-                          data: srfList,
-                          filterReasons,
-                        });
-                      }}
-                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 28px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 12, cursor: 'pointer', fontSize: 13, fontWeight: 900, border: 'none', boxShadow: '0 10px 20px rgba(16,185,129,0.25)' }}
-                    >
-                      <Sparkles size={18} />
-                      FIND A MATCH
-                    </button>
                     {/* Reactive / Proactive toggle */}
                     <div style={{ display: 'flex', background: dark ? '#1e293b' : '#fff', padding: 6, borderRadius: 14, border: `1px solid ${T.bdr}` }}>
                       <button
@@ -2622,74 +2264,106 @@ export default function BFSIDashboard() {
               <div style={{ position: 'relative', maxWidth: 860, margin: '0 auto', width: '100%' }}>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
                   <div style={{ flex: 1, position: 'relative' }}>
-                    <textarea
-                      value={zfQuery}
-                      onChange={e => {
-                        const val = e.target.value;
-                        setZfQuery(val);
-                        // Auto-suggestions based on typed words
-                        const lastWord = val.split(/\s+/).pop()?.toLowerCase() || '';
-                        if (lastWord.length >= 2) {
-                          const allSuggestions = [
-                            'automation testing', 'performance testing', 'security testing',
-                            'functional testing', 'mobile testing', 'SDET', 'selenium',
-                            'finance', 'banking', 'insurance', 'BFSI', 'healthcare',
-                            'java', 'python', 'javascript', 'react', 'angular',
-                            'aws', 'azure', 'devops', 'kubernetes', 'docker',
-                            'agile', 'scrum', 'project management', 'leadership',
-                            'chargeability', 'billable', 'available', 'pool',
-                            'pune', 'hyderabad', 'bangalore', 'noida', 'chennai',
-                            'certification', 'award', 'PMP', 'ISTQB', 'AWS certified',
-                            'data engineering', 'ETL', 'SQL', 'machine learning', 'AI',
-                          ];
-                          const filtered = allSuggestions.filter(s => s.toLowerCase().includes(lastWord));
-                          setZfSuggestions(filtered.slice(0, 6));
-                          setZfShowSugg(filtered.length > 0);
-                        } else {
-                          setZfShowSugg(false);
-                        }
-                      }}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          if (zfQuery.trim()) {
-                            setZfShowSugg(false);
-                            runZenFinderSearch(zfQuery, workforce);
-                          }
-                        }
-                      }}
-                      placeholder="Search anything... e.g. 'finance automation testing pune' or 'chargeability' or 'someone with AWS and banking experience'"
-                      rows={3}
-                      style={{
-                        width: '100%', padding: '18px 20px', fontSize: 15, fontWeight: 600,
-                        background: dark ? '#0f172a' : '#fff', color: T.text,
-                        border: `2px solid ${COLORS.purple}`, borderRadius: 16,
-                        outline: 'none', resize: 'none', lineHeight: 1.6,
-                        boxShadow: '0 4px 20px rgba(139,92,246,0.15)',
-                        fontFamily: 'inherit', boxSizing: 'border-box'
-                      }}
-                    />
-                    {/* Autocomplete suggestions */}
-                    {zfShowSugg && (
-                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 12, zIndex: 100, boxShadow: '0 8px 24px rgba(0,0,0,0.15)', overflow: 'hidden', marginTop: 4 }}>
-                        {zfSuggestions.map((s, i) => (
-                          <div
-                            key={i}
-                            onClick={() => {
-                              const words = zfQuery.split(/\s+/);
-                              words[words.length - 1] = s;
-                              setZfQuery(words.join(' ') + ' ');
-                              setZfShowSugg(false);
-                            }}
-                            style={{ padding: '10px 16px', cursor: 'pointer', fontSize: 13, color: T.text, borderBottom: i < zfSuggestions.length - 1 ? `1px solid ${T.bdr}` : 'none', transition: '0.15s' }}
-                            onMouseEnter={e => (e.currentTarget.style.background = dark ? 'rgba(139,92,246,0.1)' : '#f5f3ff')}
-                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                          >
-                            🔍 {s}
-                          </div>
-                        ))}
+                    {/* Inline ghost text: typed text + faded completion in one container */}
+                    <div style={{
+                      position: 'relative',
+                      border: `2px solid ${COLORS.purple}`,
+                      borderRadius: 16,
+                      background: dark ? '#0f172a' : '#fff',
+                      boxShadow: '0 4px 20px rgba(139,92,246,0.15)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      overflow: 'hidden',
+                    }}>
+                      {/* Ghost overlay — sits behind, shows typed + faded completion */}
+                      <div style={{
+                        position: 'absolute', left: 0, top: 0, right: 0, bottom: 0,
+                        padding: '18px 20px', fontSize: 15, fontWeight: 600,
+                        lineHeight: 1.5, pointerEvents: 'none', zIndex: 0,
+                        whiteSpace: 'pre', overflow: 'hidden',
+                        fontFamily: 'inherit',
+                      }}>
+                        {/* Typed part — invisible (same color as bg) */}
+                        <span style={{ color: 'transparent' }}>{zfQuery}</span>
+                        {/* Ghost completion — faded */}
+                        {zfShowSugg && zfSuggestions[0] && (() => {
+                          const lastWord = zfQuery.split(/\s+/).pop()?.toLowerCase() || '';
+                          const s = zfSuggestions[0];
+                          const completion = s.toLowerCase().startsWith(lastWord) ? s.slice(lastWord.length) : '';
+                          return completion ? (
+                            <span style={{ color: dark ? 'rgba(255,255,255,0.3)' : 'rgba(100,100,100,0.4)', fontStyle: 'normal' }}>
+                              {completion}
+                            </span>
+                          ) : null;
+                        })()}
                       </div>
-                    )}
+                      {/* Real input — transparent bg so ghost shows through */}
+                      <input
+                        type="text"
+                        value={zfQuery}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setZfQuery(val);
+                          const lastWord = val.split(/\s+/).pop()?.toLowerCase() || '';
+                          if (lastWord.length >= 2) {
+                            const allSuggestions = [
+                              'automation testing', 'performance testing', 'security testing',
+                              'functional testing', 'mobile testing', 'SDET', 'selenium',
+                              'finance', 'banking', 'insurance', 'BFSI', 'healthcare',
+                              'java', 'python', 'javascript', 'react', 'angular',
+                              'aws', 'azure', 'devops', 'kubernetes', 'docker',
+                              'agile', 'scrum', 'project management', 'leadership',
+                              'chargeability', 'billable', 'available', 'pool',
+                              'pune', 'hyderabad', 'bangalore', 'noida', 'chennai',
+                              'certification', 'award', 'PMP', 'ISTQB', 'AWS certified',
+                              'data engineering', 'ETL', 'SQL', 'machine learning', 'AI',
+                            ];
+                            const filtered = allSuggestions.filter(s => s.toLowerCase().startsWith(lastWord));
+                            setZfSuggestions(filtered.slice(0, 1));
+                            setZfShowSugg(filtered.length > 0);
+                          } else {
+                            setZfShowSugg(false);
+                            setZfSuggestions([]);
+                          }
+                        }}
+                        onKeyDown={e => {
+                          if (e.key === 'Tab' && zfShowSugg && zfSuggestions[0]) {
+                            e.preventDefault();
+                            const lastWord = zfQuery.split(/\s+/).pop()?.toLowerCase() || '';
+                            const suggestion = zfSuggestions[0];
+                            if (suggestion.toLowerCase().startsWith(lastWord)) {
+                              const words = zfQuery.split(/\s+/);
+                              words[words.length - 1] = suggestion;
+                              setZfQuery(words.join(' ') + ' ');
+                            }
+                            setZfShowSugg(false);
+                            setZfSuggestions([]);
+                            return;
+                          }
+                          if (e.key === 'Escape') { setZfShowSugg(false); setZfSuggestions([]); return; }
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            setZfShowSugg(false);
+                            if (zfQuery.trim()) runZenFinderSearch(zfQuery, workforce);
+                          }
+                        }}
+                        placeholder="e.g. 'automation testing pune' or 'AWS certified' or 'SDET bangalore'"
+                        style={{
+                          position: 'relative', zIndex: 1,
+                          width: '100%', padding: '18px 20px',
+                          fontSize: 15, fontWeight: 600, lineHeight: 1.5,
+                          background: 'transparent', color: T.text,
+                          border: 'none', outline: 'none',
+                          fontFamily: 'inherit', boxSizing: 'border-box',
+                        }}
+                      />
+                      {/* Tab hint badge */}
+                      {zfShowSugg && zfSuggestions[0] && (
+                        <div style={{ flexShrink: 0, marginRight: 14, padding: '3px 8px', background: `${COLORS.purple}18`, border: `1px solid ${COLORS.purple}44`, borderRadius: 6, fontSize: 10, fontWeight: 800, color: COLORS.purple, whiteSpace: 'nowrap', zIndex: 2 }}>
+                          Tab ↹
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <button
                     onClick={() => {
@@ -3124,8 +2798,19 @@ export default function BFSIDashboard() {
             {/* Content - Scrollable */}
             <div style={{ flex: 1, overflowY: 'auto', padding: 32 }}>
               
-              {/* Compute live counts from matchSource — single source of truth */}
+              {/* Compute live counts — total pool supply vs zen matrix coverage */}
               {(() => {
+                const allSkillData = matchResults.allSkillMatrixData || {};
+                const poolIds = workforce
+                  .filter(w => w.status === 'Available-Pool' || w.status === 'Deallocating' ||
+                    (w.status === 'In-project' && !!(w as any).deallocation_date))
+                  .map(w => w.employee_id);
+                const withZenMatrix = poolIds.filter(id => {
+                  const skills = allSkillData[id] || allSkillData[String(id)] ||
+                    allSkillData[String(id).replace(/^0+/, '')] || [];
+                  return (skills as any[]).length > 0;
+                }).length;
+                matchResults._withZenMatrix = withZenMatrix;
                 const liveCounts = { excel: 0, matrix: 0, both: 0 };
                 for (const emp of matchResults.matches) {
                   const src = (emp as any).matchSource || 'BFSI Data';
@@ -3133,62 +2818,55 @@ export default function BFSIDashboard() {
                   else if (src === 'Zen Matrix Only') liveCounts.matrix++;
                   else liveCounts.excel++;
                 }
-                // Store on matchResults so stat cards can read it without re-computing
                 matchResults._liveCounts = liveCounts;
                 return null;
               })()}
-              
-              {/* Statistics Charts */}
+
+              {/* Source Breakdown — 2 filter cards only */}
               <div style={{ marginBottom: 32 }}>
-                <h4 style={{ margin: '0 0 20px', fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h4 style={{ margin: '0 0 16px', fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
                   <BarChart3 size={22} color={COLORS.success} />
                   Source Breakdown
                   <span style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginLeft: 4 }}>— click a card to filter</span>
                 </h4>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-                  {/* Excel Only — Pool + Deallocation members from Excel */}
-                  <div 
+                  <div
                     onClick={() => setSourceFilter(sourceFilter === 'excel' ? 'all' : 'excel')}
-                    style={{ 
-                      background: sourceFilter === 'excel' ? 'linear-gradient(135deg, rgba(245,158,11,0.2), rgba(249,115,22,0.1))' : 'linear-gradient(135deg, rgba(245,158,11,0.1), rgba(249,115,22,0.05))', 
-                      borderRadius: 16, padding: '28px', 
-                      border: `2px solid ${sourceFilter === 'excel' ? COLORS.warning : COLORS.warning + '44'}`, 
+                    style={{
+                      background: sourceFilter === 'excel' ? 'linear-gradient(135deg, rgba(245,158,11,0.2), rgba(249,115,22,0.1))' : 'linear-gradient(135deg, rgba(245,158,11,0.1), rgba(249,115,22,0.05))',
+                      borderRadius: 14, padding: '24px',
+                      border: `2px solid ${sourceFilter === 'excel' ? COLORS.warning : COLORS.warning + '44'}`,
                       textAlign: 'center', transition: '0.3s', cursor: 'pointer',
                       transform: sourceFilter === 'excel' ? 'scale(1.03)' : 'scale(1)'
-                    }} 
+                    }}
                     className="hover-card"
                   >
-                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.warning, lineHeight: 1, marginBottom: 10 }}>{matchResults._liveCounts?.excel ?? matchResults.excelOnly ?? 0}</div>
-                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 6 }}>🟡 BFSI Data Only</div>
-                    <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.5 }}>
-                      Pool &amp; Deallocation members from BFSI upload.<br />
-                      <span style={{ color: COLORS.warning, fontWeight: 700 }}>No Zen Matrix resume uploaded.</span>
-                    </div>
-                    {sourceFilter === 'excel' && <div style={{ fontSize: 11, color: COLORS.warning, marginTop: 10, fontWeight: 700 }}>✓ FILTERED</div>}
-                    {sourceFilter !== 'excel' && <div style={{ fontSize: 11, color: T.sub, marginTop: 10 }}>Click to filter</div>}
+                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.warning, lineHeight: 1, marginBottom: 8 }}>{matchResults.matches.length}</div>
+                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 BFSI Data</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>All matched from BFSI pool data</div>
+                    {sourceFilter === 'excel'
+                      ? <div style={{ fontSize: 10, color: COLORS.warning, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>
+                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
                   </div>
-                  {/* Zen Matrix Only — employees who uploaded resumes */}
-                  <div 
+                  <div
                     onClick={() => setSourceFilter(sourceFilter === 'matrix' ? 'all' : 'matrix')}
-                    style={{ 
-                      background: sourceFilter === 'matrix' ? 'linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.1))' : 'linear-gradient(135deg, rgba(16,185,129,0.1), rgba(6,182,212,0.05))', 
-                      borderRadius: 16, padding: '28px', 
-                      border: `2px solid ${sourceFilter === 'matrix' ? COLORS.success : COLORS.success + '44'}`, 
+                    style={{
+                      background: sourceFilter === 'matrix' ? 'linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.1))' : 'linear-gradient(135deg, rgba(16,185,129,0.1), rgba(6,182,212,0.05))',
+                      borderRadius: 14, padding: '24px',
+                      border: `2px solid ${sourceFilter === 'matrix' ? COLORS.success : COLORS.success + '44'}`,
                       textAlign: 'center', transition: '0.3s', cursor: 'pointer',
                       transform: sourceFilter === 'matrix' ? 'scale(1.03)' : 'scale(1)'
-                    }} 
+                    }}
                     className="hover-card"
                   >
-                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.success, lineHeight: 1, marginBottom: 10 }}>
+                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.success, lineHeight: 1, marginBottom: 8 }}>
                       {(matchResults._liveCounts?.matrix ?? 0) + (matchResults._liveCounts?.both ?? 0)}
                     </div>
-                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 6 }}>🟢 Zen Matrix Resume</div>
-                    <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.5 }}>
-                      Employees who uploaded their resume to Zen Matrix.<br />
-                      <span style={{ color: COLORS.success, fontWeight: 700 }}>Skills, certs &amp; projects verified.</span>
-                    </div>
-                    {sourceFilter === 'matrix' && <div style={{ fontSize: 11, color: COLORS.success, marginTop: 10, fontWeight: 700 }}>✓ FILTERED</div>}
-                    {sourceFilter !== 'matrix' && <div style={{ fontSize: 11, color: T.sub, marginTop: 10 }}>Click to filter</div>}
+                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Zen Matrix Resume</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Matched with Zen Matrix skills verified</div>
+                    {sourceFilter === 'matrix'
+                      ? <div style={{ fontSize: 10, color: COLORS.success, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>
+                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
                   </div>
                 </div>
               </div>
@@ -3278,124 +2956,83 @@ export default function BFSIDashboard() {
                     const badgeLabel = sourceType === 'both' ? 'Both' : sourceType === 'matrix' ? 'Matrix' : 'BFSI Data';
                     
                     return (
-                      <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, border: `2px solid ${badgeColor}44`, padding: '18px', transition: '0.3s', position: 'relative' }} className="hover-card">
-                        
+                      <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, borderTop: `1px solid ${badgeColor}44`, borderRight: `1px solid ${badgeColor}44`, borderBottom: `1px solid ${badgeColor}44`, borderLeft: `4px solid ${badgeColor}`, padding: '16px', transition: '0.3s', position: 'relative' }} className="hover-card">
+
                         {/* Rank Badge */}
                         {showTopRank && (
-                          <div style={{ position: 'absolute', top: -8, left: -8, width: 32, height: 32, borderRadius: '50%', background: idx < 3 ? 'linear-gradient(135deg,#ffd700,#ffed4e)' : 'linear-gradient(135deg,#6b7280,#9ca3af)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 900, fontSize: 14, border: '2px solid #fff', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+                          <div style={{ position: 'absolute', top: -8, left: -8, width: 28, height: 28, borderRadius: '50%', background: idx < 3 ? 'linear-gradient(135deg,#ffd700,#ffed4e)' : 'linear-gradient(135deg,#6b7280,#9ca3af)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 900, fontSize: 12, border: '2px solid #fff', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
                             #{(emp as any).rank || idx + 1}
                           </div>
                         )}
-                        
-                        <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
-                          <div style={{ width: 48, height: 48, borderRadius: 12, background: `linear-gradient(135deg,${badgeColor},${badgeColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 20, flexShrink: 0 }}>
+
+                        {/* ── Header: Name + Score + Status ── */}
+                        <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'flex-start' }}>
+                          <div style={{ width: 44, height: 44, borderRadius: 10, background: `linear-gradient(135deg,${badgeColor},${badgeColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 18, flexShrink: 0 }}>
                             {(emp.employee_name || '?')[0]}
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                              <div style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{emp.employee_name}</div>
-                              {showTopRank && (emp as any).matchScore && (
-                                <div style={{ padding: '2px 8px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 8, fontSize: 10, fontWeight: 900 }}>
-                                  {(emp as any).matchScore}pts
-                                </div>
-                              )}
+                            <div style={{ fontWeight: 900, fontSize: 14, color: T.text, marginBottom: 2 }}>{emp.employee_name}</div>
+                            <div style={{ fontSize: 11, color: T.sub }}>
+                              {formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'} · {emp.location || '—'}
                             </div>
-                            <div style={{ fontSize: 12, color: T.sub }}>{formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'}</div>
-                            {showTopRank && (emp as any).matchReasons && (
-                              <div style={{ fontSize: 10, color: COLORS.success, marginTop: 2, fontWeight: 600 }}>
-                                {(emp as any).matchReasons}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                            {(emp as any).matchScore && (
+                              <div style={{ padding: '3px 10px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 900 }}>
+                                {(emp as any).matchScore} pts
                               </div>
                             )}
-                          </div>
-                          <div style={{ padding: '6px 12px', background: `${badgeColor}18`, borderRadius: 10, border: `1px solid ${badgeColor}44`, fontSize: 11, fontWeight: 900, color: badgeColor, height: 'fit-content' }}>
-                            {badgeLabel}
+                            <span style={{ padding: '2px 8px', background: emp.status === 'Available-Pool' ? `${COLORS.success}18` : `${COLORS.warning}18`, color: emp.status === 'Available-Pool' ? COLORS.success : COLORS.warning, borderRadius: 6, fontSize: 10, fontWeight: 800 }}>
+                              {emp.status === 'Available-Pool' ? '🟢 Pool' : '🟡 Deallocating'}
+                            </span>
                           </div>
                         </div>
-                        <div style={{ fontSize: 13, color: T.text, marginBottom: 10, padding: '10px 14px', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', borderRadius: 10 }}>
-                          {/* Show matched skill — not just primary_skill */}
-                          <div style={{ marginBottom: 4 }}>
-                            <strong>Primary Skill:</strong> {emp.primary_skill || '—'}
-                          </div>
-                          {(emp as any).matchedZenSkills?.length > 0 && (
-                            <div style={{ marginBottom: 4, color: COLORS.info }}>
-                              <strong>Matched (Zen Matrix):</strong> {[...new Set((emp as any).matchedZenSkills as string[])].join(', ')}
-                            </div>
-                          )}
-                          {(emp as any).matchedExcelSkills?.length > 0 && (
-                            <div style={{ marginBottom: 4, color: COLORS.warning }}>
-                              <strong>Matched (Excel):</strong> {[...new Set((emp as any).matchedExcelSkills as string[])].join(', ')}
-                            </div>
-                          )}
-                          <div><strong>Location:</strong> {emp.location || '—'}</div>
+
+                        {/* ── BFSI Data row ── */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', padding: '8px 12px', background: dark ? 'rgba(59,130,246,0.06)' : '#eff6ff', borderRadius: 8, marginBottom: 8, fontSize: 11 }}>
+                          <div><span style={{ color: T.sub }}>Primary Skill: </span><span style={{ fontWeight: 700, color: T.text }}>{emp.primary_skill || '—'}</span></div>
+                          <div><span style={{ color: T.sub }}>Aging: </span><span style={{ fontWeight: 700, color: (emp.aging_days || 0) > 60 ? COLORS.success : T.text }}>{emp.aging_days || 0} days {(emp.aging_days || 0) > 60 ? '⭐' : ''}</span></div>
+                          {emp.rmg_status && <div style={{ gridColumn: '1/-1' }}><span style={{ color: T.sub }}>RMG: </span><span style={{ fontWeight: 700, color: T.text }}>{emp.rmg_status}</span></div>}
                         </div>
+
+                        {/* ── Zen Matrix matched skills ── */}
+                        {(emp as any).matchedZenSkills?.length > 0 && (
+                          <div style={{ padding: '8px 12px', background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', borderRadius: 8, marginBottom: 8 }}>
+                            <div style={{ fontSize: 10, fontWeight: 800, color: COLORS.success, marginBottom: 4 }}>🎓 Zen Matrix Skills Matched:</div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {[...new Set((emp as any).matchedZenSkills as string[])].map((s: string, i: number) => (
+                                <span key={i} style={{ fontSize: 11, padding: '2px 8px', background: `${COLORS.success}18`, color: COLORS.success, borderRadius: 5, fontWeight: 700 }}>{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* ── Match reasons ── */}
+                        {showTopRank && (emp as any).matchReasons && (
+                          <div style={{ fontSize: 10, color: COLORS.success, marginBottom: 8, fontWeight: 600, padding: '4px 8px', background: `${COLORS.success}10`, borderRadius: 6 }}>
+                            {(emp as any).matchReasons}
+                          </div>
+                        )}
+
+                        {/* ── Actions ── */}
                         <div style={{ display: 'flex', gap: 8 }}>
                           <button
                             onClick={async () => {
-                              console.log(`🎯 [FIRST BUTTON] Opening Skill Matrix for employee:`, {
-                                employee_id: emp.employee_id,
-                                employee_name: emp.employee_name,
-                                primary_skill: emp.primary_skill,
-                                fullEmployeeObject: emp
-                              });
-                              
                               try {
                                 const skillsResponse = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`);
-                                console.log(`📡 [FIRST BUTTON] Skill Matrix API Response:`, {
-                                  status: skillsResponse.status,
-                                  statusText: skillsResponse.statusText,
-                                  url: `${API_BASE}/employees/${emp.employee_id}/skills`,
-                                  requestedEmployeeId: emp.employee_id,
-                                  requestedEmployeeName: emp.employee_name
-                                });
-                                
-                                let skills = [];
-                                if (skillsResponse.ok) {
-                                  skills = await skillsResponse.json();
-                                  console.log(`✅ [FIRST BUTTON] Skills fetched successfully:`, {
-                                    requestedEmployeeId: emp.employee_id,
-                                    requestedEmployeeName: emp.employee_name,
-                                    count: skills.length,
-                                    skills: skills
-                                  });
-                                } else {
-                                  const errorText = await skillsResponse.text();
-                                  console.log(`❌ [FIRST BUTTON] API Error:`, {
-                                    requestedEmployeeId: emp.employee_id,
-                                    requestedEmployeeName: emp.employee_name,
-                                    status: skillsResponse.status,
-                                    error: errorText
-                                  });
-                                }
-                                
-                                console.log(`🎯 [FIRST BUTTON] Setting modal with employee:`, {
-                                  modalEmployeeId: emp.employee_id,
-                                  modalEmployeeName: emp.employee_name,
-                                  skillsCount: skills.length
-                                });
-                                
-                                console.log(`🚀 [FIRST BUTTON] Calling setSkillMatrixModal now...`);
+                                const skills = skillsResponse.ok ? await skillsResponse.json() : [];
                                 setSkillMatrixModal({ employee: emp, skills });
-                                console.log(`✅ [FIRST BUTTON] setSkillMatrixModal called successfully!`);
-                              } catch (error) {
-                                console.error('❌ [FIRST BUTTON] Network Error fetching skills:', error);
+                              } catch {
                                 setSkillMatrixModal({ employee: emp, skills: [] });
                               }
                             }}
-                            style={{ flex: 1, padding: '10px 14px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 10, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: '0.3s' }}
+                            style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
                           >
-                            <GraduationCap size={16} />
-                            Zen Matrix
+                            <GraduationCap size={14} /> Zen Matrix
                           </button>
                           <button
-                            onClick={() => {
-                              // Redirect to Admin Employee Detail Page with specific Zensar ID
-                              const zensarId = formatZensarId(emp.employee_id);
-                              console.log(`🔗 Redirecting to Admin Employee Detail for ID: ${zensarId}`);
-                              
-                              // Navigate to Admin Employee Detail Page
-                              navigate(`/admin/employee/${zensarId}`);
-                            }}
-                            style={{ padding: '10px 14px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 10, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer', transition: '0.3s' }}
+                            onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
+                            style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
                           >
                             Profile
                           </button>
