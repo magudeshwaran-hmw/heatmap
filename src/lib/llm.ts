@@ -1,4 +1,5 @@
 import { API_BASE } from '@/lib/api';
+import { OLLAMA_BASE } from '@/lib/config';
 /*
  * ═══════════════════════════════════════════════
  * TO SWITCH FROM LOCAL TO CLOUD AI:
@@ -25,25 +26,28 @@ import { API_BASE } from '@/lib/api';
 const LOCAL_MODEL = 'qwen3-coder:480b-cloud'; // Primary model
 const RESUME_MODELS = [
   'qwen3-coder:480b-cloud',
-  'deepseek-v3.1:671b-cloud',
+  'deepseek-v3.1:671b-cloud', 
   'gemini-3-flash-preview:cloud',
   'glm-5.1:cloud',
   'gemma4:cloud',
   'nemotron-3-super:cloud',
-  'kimi-k2.5:cloud'
+  'kimi-k2.5:cloud',
+  // Add free local models as fallbacks
+  'llama3.2:3b',
+  'gemma2:2b',
+  'qwen2.5:3b',
+  'phi3:mini'
 ];
 const AI_MODE: 'local' | 'cloud' = 'local';
-const CACHE_TTL = 3600 * 12; 
+// const CACHE_TTL = 3600 * 12; // Currently unused 
 
 // Try both URLs — avoids "AI offline" on machines where 127.0.0.1 works but localhost doesn't
 const LOCAL_URLS = [
   `${API_BASE}/llm`, // Proxy via our backend to completely bypass Browser CORS
-  'http://localhost:11434/api/generate',
-  'http://127.0.0.1:11434/api/generate',
+  `${OLLAMA_BASE}/api/generate`,
 ];
 const LOCAL_STATUS_URLS = [
-  'http://localhost:11434/api/tags',
-  'http://127.0.0.1:11434/api/tags',
+  `${OLLAMA_BASE}/api/tags`,
 ];
 const CLOUD_API_KEY = 'PASTE_API_KEY_HERE'; // replace when approved
 const CLOUD_MODEL = 'claude-3-5-sonnet-20241022';
@@ -190,7 +194,7 @@ export const callLLM = async (
 
     const clean = extractJSON(rawText).trim();
 
-    let parsed;
+    let parsed: any;
     try {
       parsed = JSON.parse(clean);
     } catch (e) {
@@ -244,6 +248,7 @@ export const checkLLMStatus = async (): Promise<{
   online: boolean;
   mode: string;
   message: string;
+  models?: Array<{ name: string }>;
 }> => {
   if (AI_MODE === 'local') {
     for (const url of LOCAL_STATUS_URLS) {
@@ -280,25 +285,57 @@ export const clearLLMCache = () => {
 
 export const getLLMMode = () => AI_MODE;
 
-/**
- * ─── SMART EXTRACTOR ──────────────────────────────────────────
- * Tries the new high-end models in sequence for best accuracy.
- */
-export const callResumeLLM = async (prompt: string): Promise<LLMResult> => {
+export const callResumeLLM = async (prompt: string, accuracyMode = false): Promise<LLMResult> => {
   let lastResult: LLMResult | null = null;
+  const timeout = accuracyMode ? 0 : 15000; // 0 for unlimited in accuracy mode, 15s for normal
   
-  for (const model of RESUME_MODELS) {
+  console.log(`🤖 [AI Audit] ${accuracyMode ? 'ACCURACY MODE (unlimited timeout)' : 'Normal mode'} - timeout: ${timeout === 0 ? 'unlimited' : timeout/1000 + 's'}`);
+  
+  // First try to check if any models are available
+  let availableModels = RESUME_MODELS;
+  try {
+    const statusCheck = await checkLLMStatus();
+    if (statusCheck.online && statusCheck.models) {
+      // Filter to only use models that are actually available
+      const modelNames = statusCheck.models.map((m: any) => m.name);
+      availableModels = RESUME_MODELS.filter(model => modelNames.includes(model));
+      
+      if (availableModels.length === 0) {
+        console.warn('🤖 [AI Audit] No configured models available, trying any available model');
+        availableModels = modelNames.slice(0, 3); // Try first 3 available models
+      }
+    }
+  } catch (e) {
+    console.warn('🤖 [AI Audit] Could not check model availability, using default list');
+  }
+  
+  for (const model of availableModels) {
     try {
       console.log(`🤖 [AI Audit] Attempting scan with ${model}...`);
-      const result = await callLLM(prompt, model);
-      if (result.data && !result.error) return result;
+      
+      // Apply timeout to all attempts for faster fallback (skip timeout in accuracy mode)
+      const result = timeout === 0 
+        ? await callLLM(prompt, model)
+        : await withTimeout(callLLM(prompt, model), timeout);
+      if (result.data && !result.error) {
+        console.log(`✅ [AI Audit] Success with ${model}`);
+        return result;
+      }
       lastResult = result;
-    } catch (e) {
-      console.error(`❌ [AI Audit] ${model} failed:`, e);
+    } catch (e: any) {
+      console.error(`❌ [AI Audit] ${model} failed:`, e.message || e);
+      
+      // Store more specific error information
+      if (e.message?.includes('403') || e.message?.includes('subscription')) {
+        lastResult = { data: null, fromCache: false, error: 'offline', message: `Model ${model} requires subscription` };
+      } else if (e.message?.includes('LLM_TIMEOUT')) {
+        lastResult = { data: null, fromCache: false, error: 'timeout', message: `Model ${model} timed out` };
+      }
     }
   }
   
-  return lastResult || { data: null, fromCache: false, error: 'unknown', message: 'All models failed to extract data.' };
+  console.error('❌ [AI Audit] All models failed. AI features will use fallback extraction.');
+  return lastResult || { data: null, fromCache: false, error: 'offline', message: 'All AI models unavailable. Using pattern-based fallback.' };
 };
 
 /** @deprecated Use checkLLMStatus() */

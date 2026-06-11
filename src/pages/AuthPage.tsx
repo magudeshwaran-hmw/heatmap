@@ -4,7 +4,7 @@ import { toast } from '@/lib/ToastContext';
 import { Eye, EyeOff, User, Lock, Phone, Mail, Briefcase, MapPin, Clock, Hash, ArrowRight, Loader2 } from 'lucide-react';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { apiRegister, apiLogin, apiGetSkills, isServerAvailable } from '@/lib/api';
+import { apiRegister, apiLogin, apiGetSkills, isServerAvailable, API_BASE } from '@/lib/api';
 import { createNewEmployee, upsertEmployee, getAllEmployees, saveSkillRatings } from '@/lib/localDB';
 import { SKILLS } from '@/lib/mockData';
 import type { ProficiencyLevel } from '@/lib/types';
@@ -108,6 +108,90 @@ export default function AuthPage() {
   const [sYearsZensar, setSYearsZensar] = useState('');
   const [sPassword,    setSPassword]    = useState('');
   const [sCPassword,   setSCPassword]   = useState('');
+
+  // ── MS Login Simulation ───────────────────────────────────────────────────
+  const [showMsModal, setShowMsModal] = useState(false);
+  const [customMsName, setCustomMsName] = useState('');
+  const [customMsId, setCustomMsId] = useState('');
+  const [customMsGrade, setCustomMsGrade] = useState('E2');
+  const [customMsDesig, setCustomMsDesig] = useState('Software Engineer');
+  const [customMsRole, setCustomMsRole] = useState<'employee' | 'admin'>('employee');
+
+  const handleMsLogin = async (zid: string, name: string, designation: string, grade: string, userRole: 'employee' | 'admin') => {
+    setLoading(true);
+    try {
+      const email = `${name.toLowerCase().replace(/\s+/g, '.')}@zensar.com`;
+      const phone = '+91 99999 88888';
+      const password = 'microsoft_sso_bypass_2026';
+      
+      let emp;
+      try {
+        emp = await apiRegister({
+          name,
+          email,
+          phone,
+          designation,
+          department: designation.includes('Practice') || designation.includes('Director') ? 'Delivery' : 'Quality Intelligence',
+          location: 'Pune, Maharashtra',
+          yearsIT: grade === 'F1' ? 1 : grade === 'E1' ? 7 : grade === 'E2' ? 10 : grade === 'D' ? 13 : 16,
+          yearsZensar: grade === 'F1' ? 1 : grade === 'E1' ? 4 : grade === 'E2' ? 5 : grade === 'D' ? 8 : 10,
+          password,
+          resumeUploaded: false,
+          zensarId: zid,
+          grade
+        } as any);
+      } catch (err: any) {
+        if (err.message.includes('exists') || err.message.toLowerCase().includes('already registered') || err.message.toLowerCase().includes('already exists')) {
+          emp = await apiLogin(zid, password);
+          await fetch(`${API_BASE}/admin/employees/update`, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+            },
+            body: JSON.stringify({ 
+              id: zid, 
+              name,
+              designation,
+              grade 
+            })
+          }).catch(() => {});
+        } else {
+          throw err;
+        }
+      }
+
+      upsertEmployee({
+        id: emp.id,
+        name: emp.name || name,
+        email: emp.email || email,
+        phone: emp.phone || phone,
+        designation: emp.designation || designation,
+        department: emp.department || 'Quality Intelligence',
+        location: emp.location || 'Pune, Maharashtra',
+        yearsIT: Number(emp.yearsIT ?? 5),
+        yearsZensar: Number(emp.yearsZensar ?? 2),
+        primarySkill: emp.primarySkill || '',
+        primaryDomain: emp.primaryDomain || '',
+        overallCapability: Number(emp.overallCapability ?? 0),
+        submitted: false,
+        resumeUploaded: false,
+        grade: grade,
+        skills: SKILLS.map(s => ({ skillId: s.id, selfRating: 0 as ProficiencyLevel, managerRating: null, validated: false })),
+      } as any);
+
+      localStorage.setItem('skill_nav_session_id', zid);
+      login(userRole, emp.id, emp.name || name);
+      
+      toast.success(`Microsoft Authentication Successful! Welcome, ${name} [Grade: ${grade}] 📄`);
+      setShowMsModal(false);
+      navigate('/employee/resume-upload');
+    } catch (err: any) {
+      toast.error('Microsoft SSO Simulation Error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // ── Login ─────────────────────────────────────────────────────────────────
   const handleLogin = async (e: React.FormEvent) => {
@@ -290,6 +374,35 @@ export default function AuthPage() {
                 {loading ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <><ArrowRight size={16} /> Login</>}
               </button>
 
+              <div style={{ display: 'flex', alignItems: 'center', margin: '8px 0', gap: 10 }}>
+                <div style={{ flex: 1, height: '1px', background: T.bdr }} />
+                <span style={{ fontSize: 11, color: T.sub, fontWeight: 700, textTransform: 'uppercase' }}>or</span>
+                <div style={{ flex: 1, height: '1px', background: T.bdr }} />
+              </div>
+
+              <button 
+                type="button"
+                onClick={() => setShowMsModal(true)}
+                style={{
+                  width: '100%', padding: '12px', borderRadius: '12px',
+                  background: dark ? 'rgba(255,255,255,0.06)' : '#ffffff', 
+                  border: `1.5px solid ${T.bdr}`,
+                  color: dark ? '#fff' : '#0f172a', fontWeight: 700, fontSize: '14px', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.12)' : '#f8fafc'}
+                onMouseLeave={e => e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.06)' : '#ffffff'}
+              >
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '2px', width: 14, height: 14 }}>
+                  <div style={{ background: '#F25022', width: 6, height: 6 }} />
+                  <div style={{ background: '#7FBA00', width: 6, height: 6 }} />
+                  <div style={{ background: '#00A4EF', width: 6, height: 6 }} />
+                  <div style={{ background: '#FFB900', width: 6, height: 6 }} />
+                </div>
+                Sign in with Microsoft
+              </button>
+
               <div style={{ textAlign: 'center', fontSize: '13px', color: dark ? 'rgba(255,255,255,0.45)' : 'rgba(15,23,42,0.45)', marginTop: '4px' }}>
                 New here?{' '}
                 <span onClick={() => setMode('signup')} style={{ color: '#60A5FA', cursor: 'pointer', fontWeight: 600 }}>
@@ -368,6 +481,186 @@ export default function AuthPage() {
           )}
         </div>
       </div>
+
+      {showMsModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(4,9,28,0.7)',
+          backdropFilter: 'blur(10px)', zIndex: 999, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }} className="fadeIn">
+          <div style={{
+            background: dark ? 'rgba(15,23,42,0.95)' : '#ffffff',
+            border: `1px solid ${T.bdr}`,
+            borderRadius: 20, width: '100%', maxWidth: 540,
+            padding: 30, color: dark ? '#fff' : '#0f172a',
+            boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)',
+            maxHeight: '90vh', overflowY: 'auto'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '2px', width: 14, height: 14 }}>
+                  <div style={{ background: '#F25022', width: 6, height: 6 }} />
+                  <div style={{ background: '#7FBA00', width: 6, height: 6 }} />
+                  <div style={{ background: '#00A4EF', width: 6, height: 6 }} />
+                  <div style={{ background: '#FFB900', width: 6, height: 6 }} />
+                </div>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>Microsoft Single Sign-On</h3>
+              </div>
+              <button 
+                onClick={() => setShowMsModal(false)}
+                style={{ background: 'none', border: 'none', color: T.sub, fontSize: 20, cursor: 'pointer', fontWeight: 700 }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p style={{ fontSize: 13, color: T.sub, marginBottom: 20 }}>
+              Simulating Microsoft Azure AD enterprise login. Select an employee profile below to sign in automatically and fetch their grade.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
+              {[
+                { name: 'Sneha Reddy', zid: '64311', desig: 'Trainee SDET', grade: 'F1', role: 'employee' as const },
+                { name: 'Amit Patel', zid: '64312', desig: 'Associate QA Engineer', grade: 'F1', role: 'employee' as const },
+                { name: 'Priya Nair', zid: '64313', desig: 'Senior QA Engineer', grade: 'E1', role: 'employee' as const },
+                { name: 'Rahul Sharma', zid: '64314', desig: 'Technical Lead', grade: 'E2', role: 'employee' as const },
+                { name: 'John Doe', zid: '64315', desig: 'Practice Lead', grade: 'D', role: 'employee' as const },
+                { name: 'Jane Smith', zid: '64316', desig: 'QA Director (Admin)', grade: 'C', role: 'admin' as const },
+              ].map(profile => (
+                <button
+                  type="button"
+                  key={profile.zid}
+                  onClick={() => handleMsLogin(profile.zid, profile.name, profile.desig, profile.grade, profile.role)}
+                  style={{
+                    padding: 14, borderRadius: 12, border: `1.5px solid ${T.bdr}`,
+                    background: dark ? 'rgba(255,255,255,0.02)' : '#f8fafc',
+                    color: dark ? '#fff' : '#0f172a', textAlign: 'left', cursor: 'pointer',
+                    transition: 'all 0.2s', display: 'flex', flexDirection: 'column', gap: 4
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.borderColor = '#3B82F6';
+                    e.currentTarget.style.background = dark ? 'rgba(59,130,246,0.1)' : 'rgba(59,130,246,0.05)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.borderColor = T.bdr;
+                    e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.02)' : '#f8fafc';
+                  }}
+                >
+                  <strong style={{ fontSize: 14 }}>{profile.name}</strong>
+                  <span style={{ fontSize: 11, color: T.sub }}>{profile.desig}</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginTop: 4 }}>
+                    <span style={{ fontSize: 10, background: 'rgba(59,130,246,0.15)', color: '#3B82F6', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>
+                      Grade: {profile.grade}
+                    </span>
+                    <span style={{ fontSize: 10, color: T.muted }}>ID: {profile.zid}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ borderTop: `1px solid ${T.bdr}`, paddingTop: 20 }}>
+              <h4 style={{ margin: '0 0 14px', fontSize: 14, fontWeight: 800 }}>Or Sign in with Custom AD Profile</h4>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.sub, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>Full Name</label>
+                  <input
+                    type="text"
+                    value={customMsName}
+                    onChange={e => setCustomMsName(e.target.value)}
+                    placeholder="e.g. Robert Vance"
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: 8,
+                      background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+                      border: `1px solid ${T.bdr}`, color: dark ? '#fff' : '#0f172a', fontSize: 13
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.sub, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>Zensar ID</label>
+                  <input
+                    type="text"
+                    value={customMsId}
+                    onChange={e => { if (/^\d*$/.test(e.target.value)) setCustomMsId(e.target.value); }}
+                    placeholder="e.g. 64320"
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: 8,
+                      background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+                      border: `1px solid ${T.bdr}`, color: dark ? '#fff' : '#0f172a', fontSize: 13
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 20 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.sub, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>Grade</label>
+                  <select
+                    value={customMsGrade}
+                    onChange={e => setCustomMsGrade(e.target.value)}
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: 8,
+                      background: dark ? '#1e293b' : '#ffffff',
+                      border: `1px solid ${T.bdr}`, color: dark ? '#fff' : '#0f172a', fontSize: 13
+                    }}
+                  >
+                    {['F1', 'E1', 'E2', 'D', 'C'].map(g => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.sub, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>Designation</label>
+                  <input
+                    type="text"
+                    value={customMsDesig}
+                    onChange={e => setCustomMsDesig(e.target.value)}
+                    placeholder="Software Engineer"
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: 8,
+                      background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+                      border: `1px solid ${T.bdr}`, color: dark ? '#fff' : '#0f172a', fontSize: 13
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.sub, display: 'block', marginBottom: 4, textTransform: 'uppercase' }}>Role</label>
+                  <select
+                    value={customMsRole}
+                    onChange={e => setCustomMsRole(e.target.value as any)}
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: 8,
+                      background: dark ? '#1e293b' : '#ffffff',
+                      border: `1px solid ${T.bdr}`, color: dark ? '#fff' : '#0f172a', fontSize: 13
+                    }}
+                  >
+                    <option value="employee">Employee</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (!customMsName.trim() || !customMsId.trim() || customMsId.length < 5) {
+                    toast.error('Please enter a valid Name and 5-6 digit Zensar ID');
+                    return;
+                  }
+                  handleMsLogin(customMsId, customMsName, customMsDesig, customMsGrade, customMsRole);
+                }}
+                style={{
+                  width: '100%', padding: '12px', borderRadius: 10,
+                  background: 'linear-gradient(135deg, #00A4EF, #3B82F6)',
+                  color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: 'pointer'
+                }}
+              >
+                Sign In with Custom Profile
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
 

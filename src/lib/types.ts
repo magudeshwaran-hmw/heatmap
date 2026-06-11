@@ -16,6 +16,13 @@ export interface SkillRating {
   managerRating: ProficiencyLevel | null;
   validated: boolean;
   aiDetected?: boolean;  // true = AI filled this; user cannot change it
+  lastValidationDate?: string;
+  lastProjectDate?: string;
+  lastCertificationDate?: string;
+  lastUsedDate?: string;
+  freshnessScore?: number;
+  freshnessStatus?: string;
+  revalidationReq?: boolean;
 }
 
 
@@ -36,6 +43,7 @@ export interface Employee {
   overallCapability: number;
   submitted?: boolean;
   submittedAt?: string;
+  grade?: string;
 }
 
 export interface GrowthPlan {

@@ -6,7 +6,7 @@ import { API_BASE } from '@/lib/api';
  */
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, SkipForward, Loader2, AlertCircle, Edit2, Trash2, CheckCircle } from 'lucide-react';
+import { Upload, FileText, SkipForward, Loader2, AlertCircle, Edit2, Trash2, CheckCircle, X } from 'lucide-react';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { SKILLS } from '@/lib/mockData';
 import { useAuth } from '@/lib/authContext';
@@ -16,7 +16,123 @@ import { getEmployee, saveSkillRatings, upsertEmployee } from '@/lib/localDB';
 import { apiSaveSkills, isServerAvailable } from '@/lib/api';
 import ZensarLoader from '@/components/ZensarLoader';
 import type { ProficiencyLevel, SkillRating } from '@/lib/types';
-import { extractTextFromPDF, extractEverythingFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromPDF, accurateExtractFromResume } from '@/lib/resumeExtraction';
+
+// Enhanced fallback extraction when AI is completely unavailable
+const createEnhancedFallback = (text: string, filename: string) => {
+  console.log('[ResumeUpload] � Creating enhanced pattern-based extraction');
+  
+  // Extract name with better patterns
+  const namePatterns = [
+    /([A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+)/g, // Three names
+    /([A-Z][a-z]+ [A-Z][a-z]+)/g, // Two names
+    /^([A-Z][a-z]+)\s/m, // First line name
+  ];
+  
+  let extractedName = '';
+  for (const pattern of namePatterns) {
+    const match = text.match(pattern);
+    if (match && match[0] && match[0].length > 3) {
+      extractedName = match[0];
+      break;
+    }
+  }
+  
+  if (!extractedName) {
+    extractedName = filename.replace(/[._]/g, ' ').replace(/\.(pdf|doc|docx)$/i, '');
+  }
+  
+  // Extract skills by looking for keywords
+  const skillMap: Record<string, number> = {
+    "Selenium": 0, "Appium": 0, "JMeter": 0, "Postman": 0, "JIRA": 0, "TestRail": 0,
+    "Python": 0, "Java": 0, "JavaScript": 0, "TypeScript": 0, "C#": 0, "SQL": 0,
+    "API Testing": 0, "Mobile Testing": 0, "Performance Testing": 0, "Security Testing": 0, "Database Testing": 0,
+    "Banking": 0, "Healthcare": 0, "E-Commerce": 0, "Insurance": 0, "Telecom": 0,
+    "Functional Testing": 0, "Automation Testing": 0, "Regression Testing": 0, "UAT": 0,
+    "Git": 0, "Jenkins": 0, "Docker": 0, "Azure DevOps": 0,
+    "ChatGPT/Prompt Engineering": 0, "AI Test Automation": 0
+  };
+  
+  const lowerText = text.toLowerCase();
+  
+  // Pattern matching for skills with context
+  Object.keys(skillMap).forEach(skill => {
+    const skillLower = skill.toLowerCase();
+    const skillPatterns = [
+      skillLower,
+      skillLower.replace(/\s+/g, '[-_\\s]*'), // Handle variations
+      skillLower.replace(/testing/g, 'test'), // "automation test" -> "automation testing"
+    ];
+    
+    skillPatterns.forEach(pattern => {
+      const regex = new RegExp(`\\b${pattern}\\b`, 'gi');
+      const matches = lowerText.match(regex);
+      if (matches) {
+        const count = matches.length;
+        // Score based on frequency and context
+        if (count >= 3) skillMap[skill] = 3;
+        else if (count >= 2) skillMap[skill] = 2;
+        else skillMap[skill] = 1;
+      }
+    });
+  });
+  
+  // Extract experience years
+  const expPatterns = [
+    /(\d+)[\s\+]*years?\s+(?:of\s+)?experience/i,
+    /(\d+)\s*yrs?\s+exp/i,
+    /experience.*?(\d+)\s*years?/i
+  ];
+  
+  let yearsIT = 2;
+  for (const pattern of expPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      yearsIT = parseInt(match[1]) || 2;
+      break;
+    }
+  }
+  
+  // Extract designation
+  const designationPatterns = [
+    /(?:software|qa|test)\s+(?:engineer|developer|analyst|tester)/i,
+    /(?:senior|junior|lead)\s+(?:developer|engineer|tester)/i,
+    /(?:full\s+stack|frontend|backend)\s+developer/i
+  ];
+  
+  let designation = 'Software Engineer';
+  for (const pattern of designationPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      designation = match[0];
+      break;
+    }
+  }
+  
+  // Determine primary skills from high-scored skills
+  const scoredSkills = Object.entries(skillMap)
+    .filter(([_, score]) => score > 0)
+    .sort(([, a], [, b]) => b - a);
+  
+  return {
+    profile: {
+      name: extractedName,
+      designation: designation,
+      yearsIT: yearsIT,
+      primarySkill: scoredSkills[0]?.[0] || 'Software Development',
+      secondarySkill: scoredSkills[1]?.[0] || 'Testing', 
+      tertiarySkill: scoredSkills[2]?.[0] || 'API Development'
+    },
+    skills: skillMap,
+    projects: [{
+      ProjectName: 'Professional Experience',
+      Role: designation,
+      Description: 'Software development and testing experience'
+    }],
+    certifications: [],
+    education: [{ degree: 'Bachelor', institution: 'University', year: new Date().getFullYear() - yearsIT }]
+  };
+};
 
 export default function ResumeUploadPage({ 
   isPopup: propIsPopup, 
@@ -50,28 +166,52 @@ export default function ResumeUploadPage({
   }, []);
 
   const handleFile = async (f: File) => {
-    setFile(f);
     setStatus('reading');
     setErrorMsg('');
     try {
       const text = await extractTextFromPDF(f);
       if (!text.trim()) {
         setStatus('error');
-        setErrorMsg('Could not read text from file. Try a text-based PDF or skip.');
+        setErrorMsg('Could not read text from file. Try a text-based PDF or use pattern extraction.');
         return;
       }
+      
       setStatus('extracting');
-      const data = await extractEverythingFromResume(text);
-      if (!data) {
-        setStatus('error');
-        setErrorMsg('AI could not extract data (Ollama may be offline). You can skip and fill manually.');
-        return;
-      }
-      setExtractedData(data);
-      setStatus('preview');
+      
+      console.log('[ResumeUpload] Starting accurate AI extraction (unlimited time)...');
+      
+  try {
+    // Use accurate extraction with unlimited time for perfect results
+    const extractionResult = await accurateExtractFromResume(text);
+    console.log('[ResumeUpload] ✅ Accurate extraction succeeded!');
+    setExtractedData(extractionResult);
+    setStatus('preview');
+    return;
+  } catch (err: any) {
+    console.log('[ResumeUpload] ❌ AI extraction failed, using enhanced fallback...');
+    console.log('[ResumeUpload] Error details:', err.message);
+    
+    // Use enhanced pattern-based fallback when AI is unavailable
+    const fallbackData = createEnhancedFallback(text, f.name);
+    console.log('[ResumeUpload] 🔄 Enhanced fallback data created:', fallbackData);
+    setExtractedData(fallbackData);
+    setStatus('preview');
+    
+    // Provide user feedback about AI status
+    if (err.message?.includes('subscription') || err.message?.includes('403')) {
+      toast.info('Using smart pattern extraction (AI models require subscription)');
+    } else if (err.message?.includes('LLM_TIMEOUT') || err.message?.includes('timeout')) {
+      toast.info('Using smart pattern extraction (AI response too slow)');
+    } else if (err.message?.includes('503') || err.message?.includes('unavailable')) {
+      toast.info('Using smart pattern extraction (AI service temporarily unavailable)');
+    } else {
+      toast.info('Using enhanced pattern extraction for data processing');
+    }
+    return;
+  }
     } catch (err: any) {
       setStatus('error');
-      setErrorMsg(err.message || 'Unexpected error. Please skip and fill manually.');
+      setErrorMsg(err.message || 'Unexpected error. Please try pattern extraction.');
     }
   };
 
@@ -81,7 +221,46 @@ export default function ResumeUploadPage({
   const onConfirmAndSave = async () => {
     if (!employeeId || employeeId === 'new') return;
     setIsSaving(true);
+    
     try {
+      // Handle case where no extractedData exists
+      if (!extractedData) {
+        // Create minimal profile for ZenAssess
+        const minimalProfile = {
+          name: 'User',
+          experience: '1 Year',
+          yearsIT: 1,
+          designation: 'Software Engineer',
+          primarySkill: 'Software Development',
+          secondarySkill: 'Testing',
+          tertiarySkill: 'API Development',
+          skills: [],
+          projects: [],
+          certifications: [],
+          education: [],
+          candidateId: employeeId,
+          source: 'Manual Entry',
+          extractionTimestamp: new Date().toISOString(),
+          profileVersion: '1.0.0'
+        };
+        
+        console.log('[ResumeUpload] 📝 Creating minimal profile with Primary/Secondary/Tertiary skills:', {
+          primary: minimalProfile.primarySkill,
+          secondary: minimalProfile.secondarySkill,
+          tertiary: minimalProfile.tertiarySkill
+        });
+        
+        localStorage.setItem('candidateProfile', JSON.stringify(minimalProfile));
+        localStorage.setItem('zenscan_raw_extraction', JSON.stringify({}));
+        
+        if (isPopup && onTabChange) {
+          onTabChange('/employee/zenassess');
+        } else {
+          navigate('/employee/zenassess');
+        }
+        return;
+      }
+
       const emp = getEmployee(employeeId);
       const extractedSkills = extractedData?.skills || {};
       const ratings: SkillRating[] = SKILLS.map(sk => ({
@@ -108,6 +287,81 @@ export default function ResumeUploadPage({
         const month = monthMatch ? monthMap[monthMatch[1].toLowerCase()] : '01';
         return `${year}-${month}-01`;
       };
+
+      const p = extractedData?.profile || {};
+      const s = extractedData?.skills || {};
+      const c = extractedData?.certifications || [];
+      const pr = extractedData?.projects || [];
+      const ed = extractedData?.education || [];
+
+      // Create candidateProfile for ZenAssess (localStorage)
+      const skillsList = Object.entries(s).filter(([_, lvl]) => (lvl as number) > 0).map(([name, lvl]) => ({
+        skillName: name,
+        selfRating: lvl as number,
+        assessmentScore: 0
+      }));
+
+      // Determine Primary/Secondary/Tertiary skills based on ratings
+      const sortedSkills = Object.entries(s)
+        .filter(([_, lvl]) => (lvl as number) > 0)
+        .sort(([, a], [, b]) => (b as number) - (a as number)); // Sort by rating descending
+      
+      console.log('[ResumeUpload] 📊 Sorted skills for Primary/Secondary/Tertiary:', sortedSkills.slice(0, 5));
+      
+      const primarySkill = sortedSkills[0]?.[0] || p.primarySkill || 'Software Development';
+      const secondarySkill = sortedSkills[1]?.[0] || p.secondarySkill || 'Testing';
+      const tertiarySkill = sortedSkills[2]?.[0] || p.tertiarySkill || 'API Development';
+
+      console.log('[ResumeUpload] 🎯 Final Skills Classification:', {
+        primary: primarySkill,
+        secondary: secondarySkill, 
+        tertiary: tertiarySkill
+      });
+
+      const candidateProfile = {
+        name: p.name || 'Unknown',
+        experience: `${p.yearsIT || 0} Year${(p.yearsIT || 0) !== 1 ? 's' : ''}`,
+        yearsIT: p.yearsIT || 0,
+        designation: p.designation || 'Software Engineer',
+        primarySkill: primarySkill,
+        secondarySkill: secondarySkill,
+        tertiarySkill: tertiarySkill,
+        skills: skillsList,
+        projects: pr.map((proj: any) => ({
+          name: proj.ProjectName || proj.name || '',
+          role: proj.Role || proj.role || '',
+          description: proj.Description || proj.description || ''
+        })),
+        certifications: c.map((cert: any) => {
+          // Ensure certifications are strings (fix the toLowerCase error)
+          if (typeof cert === 'string') return cert;
+          return cert.CertName || cert.certName || cert.name || String(cert) || '';
+        }).filter(Boolean),
+        education: ed.map((e: any) => ({
+          degree: e.degree || '',
+          institution: e.institution || '',
+          year: e.year || ''
+        })),
+        candidateId: employeeId,
+        source: 'ZenScan PDF Parser',
+        extractionTimestamp: new Date().toISOString(),
+        profileVersion: '1.0.0'
+      };
+
+      console.log('[ResumeUpload] Saving candidateProfile for ZenAssess:', candidateProfile);
+      console.log('[ResumeUpload] 🎯 Primary/Secondary/Tertiary Skills Check:', {
+        primary: candidateProfile.primarySkill,
+        secondary: candidateProfile.secondarySkill,
+        tertiary: candidateProfile.tertiarySkill,
+        skillsCount: candidateProfile.skills.length
+      });
+      
+      localStorage.setItem('candidateProfile', JSON.stringify(candidateProfile));
+      localStorage.setItem('zenscan_raw_extraction', JSON.stringify(extractedData));
+      
+      // Verify the data was saved
+      const saved = localStorage.getItem('candidateProfile');
+      console.log('[ResumeUpload] Verified saved profile:', saved ? JSON.parse(saved) : 'NOT FOUND');
 
       // Store in localDB
       if (emp) saveSkillRatings(employeeId, emp.name, ratings);
@@ -315,8 +569,7 @@ export default function ResumeUploadPage({
           yearsIT: p.yearsIT || emp.yearsIT, 
           location: p.location || emp.location, 
           phone: p.phone || emp.phone,
-          primary_skill: p.primarySkill || emp.primary_skill,
-          secondary_skill: p.secondarySkill || emp.secondary_skill,
+          primarySkill: p.primarySkill || emp.primarySkill,
         });
         // Also update primary/secondary skill in backend
         if (p.primarySkill || p.secondarySkill) {
@@ -325,22 +578,21 @@ export default function ResumeUploadPage({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
               id: employeeId, 
-              primary_skill: p.primarySkill || undefined,
-              secondary_skill: p.secondarySkill || undefined,
+              primarySkill: p.primarySkill || undefined,
             })
           }).catch(() => {});
         }
       }
 
-      // Show success and redirect to Dashboard
+      // Show success and redirect to ZenAssess
       const totalSaved = eduSaved + certSaved + projSaved + achSaved;
       toast.success(`✅ Resume data saved! Skills ✓ · ${projSaved} projects · ${certSaved} certs · ${eduSaved} education · ${achSaved} achievements${skipMsg}`);
 
-      // In popup mode, switch to Dashboard tab. Otherwise navigate to dashboard.
+      // In popup mode, switch to ZenAssess tab. Otherwise navigate to ZenAssess.
       if (isPopup && onTabChange) {
-        onTabChange('/employee/dashboard');
+        onTabChange('/employee/zenassess');
       } else {
-        navigate('/employee/dashboard', { state: { fromResume: true, saved: true } });
+        navigate('/employee/zenassess', { state: { fromResume: true, saved: true } });
       }
     } catch (err: any) {
       console.error('Save error:', err);
@@ -366,8 +618,15 @@ export default function ResumeUploadPage({
     return (
       <div style={{ minHeight: '100vh', background: T.bg, color: T.text, padding: '40px 7vw' }}>
         <div style={{ maxWidth: 1000, margin: '0 auto', background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
-          <div style={{ background: 'linear-gradient(135deg, #6B2D8B, #3B82F6)', padding: '24px', color: '#fff' }}>
+          <div style={{ background: 'linear-gradient(135deg, #6B2D8B, #3B82F6)', padding: '24px', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
             <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>🤖 AI Extracted Insights</h2>
+            <button
+              onClick={() => isPopup && onTabChange ? onTabChange('/employee/dashboard') : navigate('/employee/dashboard')}
+              aria-label="Close"
+              style={{ background: 'rgba(255,255,255,0.15)', border: 'none', color: '#fff', borderRadius: 8, width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              <X size={20} />
+            </button>
           </div>
           <div style={{ padding: '24px' }}>
             <div style={{ background: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 10, marginBottom: 20, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 12 }}>
@@ -653,7 +912,9 @@ export default function ResumeUploadPage({
               <button onClick={() => setStatus('idle')} style={{ padding: '14px 32px', minWidth: 140, background: 'transparent', border: `1px solid ${T.bdr}`, color: T.text, borderRadius: 10, cursor: 'pointer', fontSize: 14, fontWeight: 600 }}>
                 ← Re-upload
               </button>
-              <button onClick={onConfirmAndSave} style={{ padding: '14px 40px', minWidth: 200, background: '#3B82F6', border: 'none', color: '#fff', fontWeight: 700, borderRadius: 10, cursor: 'pointer', fontSize: 14 }}>Confirm & Save All →</button>
+              <button onClick={onConfirmAndSave} style={{ padding: '14px 40px', minWidth: 200, background: '#3B82F6', border: 'none', color: '#fff', fontWeight: 700, borderRadius: 10, cursor: 'pointer', fontSize: 14 }}>
+                Go to ZenAssess →
+              </button>
             </div>
           </div>
         </div>
@@ -709,11 +970,15 @@ export default function ResumeUploadPage({
 
         {isProcessing && (
           <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: '32px', textAlign: 'center', marginBottom: 16 }}>
-            <ZensarLoader size={48} dark={dark} label={status === 'reading' ? 'Reading CV...' : 'Sensing Talent...'} />
+            <ZensarLoader size={48} dark={dark} label={status === 'reading' ? 'Reading CV...' : 'AI Processing Resume...'} />
           </div>
         )}
 
-        {status === 'error' && <div style={{ color: '#f87171', fontSize: 13, textAlign: 'center', marginBottom: 16 }}>{errorMsg}</div>}
+        {status === 'error' && (
+          <div>
+            <div style={{ color: '#f87171', fontSize: 13, textAlign: 'center', marginBottom: 16 }}>{errorMsg}</div>
+          </div>
+        )}
 
         <button onClick={() => isPopup && onTabChange ? onTabChange('/employee/dashboard') : navigate('/employee/dashboard')} disabled={isProcessing} style={{ width: '100%', padding: 12, borderRadius: 12, background: T.card, border: `1px solid ${T.bdr}`, color: T.sub, fontWeight: 600, cursor: 'pointer', opacity: isProcessing ? 0.5 : 1 }}>
           Skip to Dashboard →

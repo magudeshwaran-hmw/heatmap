@@ -32,6 +32,8 @@ import EducationPage from "@/pages/EducationPage";
 import ResumeUploadPage from "@/pages/ResumeUploadPage";
 import AchievementsPage from "@/pages/AchievementsPage";
 import BFSIDashboard from "@/pages/BFSIDashboard";
+import ZenAssessPage from "@/pages/ZenAssessPage";
+import AssessmentOverviewPage from "@/pages/AssessmentOverviewPage";
 import { useEffect } from "react";
 
 const queryClient = new QueryClient();
@@ -70,6 +72,8 @@ function AppRoutes() {
         <Route path="/employee/education"      element={isLoggedIn ? <EducationPage />      : <Navigate to="/login" />} />
         <Route path="/employee/achievements"   element={isLoggedIn ? <AchievementsPage />   : <Navigate to="/login" />} />
         <Route path="/employee/resume-upload"  element={isLoggedIn ? <ResumeUploadPage />   : <Navigate to="/login" />} />
+        <Route path="/employee/assessment-overview" element={isLoggedIn ? <AssessmentOverviewPage /> : <Navigate to="/login" />} />
+        <Route path="/employee/zenassess"      element={isLoggedIn ? <ZenAssessPage />      : <Navigate to="/login" />} />
 
         {/* Legacy URL redirects and fallbacks */}
         <Route path="/employee"              element={<Navigate to="/employee/dashboard" />} />

@@ -3,19 +3,89 @@
  * Falls back to localStorage if the server is not running.
  */
 
-export const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? `http://${window.location.hostname}:3001/api` : '/api');
+import { shouldUseGatewayProxies } from './tunnelHosts';
 
-async function req<T>(
-  method: string, path: string, body?: unknown
-): Promise<T> {
+/** Ensure API base always ends with /api (VITE_API_URL may be set with or without it). */
+function resolveApiBase(): string {
+  // Tunnel / single gateway: relative /api (same host as the public URL)
+  if (shouldUseGatewayProxies()) return '/api';
+
+  const raw = import.meta.env.VITE_API_URL?.trim();
+  if (raw) {
+    const trimmed = raw.replace(/\/+$/, '');
+    return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+  }
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    return `http://${window.location.hostname}:3001/api`;
+  }
+  return '/api';
+}
+
+export const API_BASE = resolveApiBase();
+
+// Token storage helpers
+export const tokenStore = {
+  getAccess: () => localStorage.getItem('zn_access_token'),
+  getRefresh: () => localStorage.getItem('zn_refresh_token'),
+  set: (access: string, refresh: string) => {
+    localStorage.setItem('zn_access_token', access);
+    localStorage.setItem('zn_refresh_token', refresh);
+  },
+  clear: () => {
+    localStorage.removeItem('zn_access_token');
+    localStorage.removeItem('zn_refresh_token');
+  },
+};
+
+export async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = tokenStore.getAccess();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  // Auto-refresh on 401 TOKEN_EXPIRED
+  if (res.status === 401) {
+    const errData = await res.json().catch(() => ({}));
+    if (errData.code === 'TOKEN_EXPIRED') {
+      const refreshed = await tryRefreshToken();
+      if (refreshed) {
+        // Retry original request with new token
+        headers['Authorization'] = `Bearer ${tokenStore.getAccess()}`;
+        const retry = await fetch(`${API_BASE}${path}`, {
+          method, headers, body: body ? JSON.stringify(body) : undefined,
+        });
+        const retryData = await retry.json();
+        if (!retry.ok) throw new Error(retryData.error || `HTTP ${retry.status}`);
+        return retryData as T;
+      }
+    }
+    throw new Error(errData.error || `HTTP ${res.status}`);
+  }
+
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data as T;
+}
+
+async function tryRefreshToken(): Promise<boolean> {
+  const refresh = tokenStore.getRefresh();
+  if (!refresh) return false;
+  try {
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: refresh }),
+    });
+    if (!res.ok) { tokenStore.clear(); return false; }
+    const data = await res.json();
+    localStorage.setItem('zn_access_token', data.accessToken);
+    return true;
+  } catch { tokenStore.clear(); return false; }
 }
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -53,8 +123,19 @@ export async function apiRegister(payload: RegisterPayload): Promise<EmployeeRec
 }
 
 export async function apiLogin(login: string, password: string): Promise<EmployeeRecord> {
-  const res = await req<{ success: boolean; employee: EmployeeRecord }>('POST', '/login', { login, password });
+  const res = await req<{ success: boolean; employee: EmployeeRecord; accessToken: string; refreshToken: string }>(
+    'POST', '/login', { login, password }
+  );
+  if (res.accessToken && res.refreshToken) {
+    tokenStore.set(res.accessToken, res.refreshToken);
+  }
   return res.employee;
+}
+
+export async function apiLogout(): Promise<void> {
+  const refresh = tokenStore.getRefresh();
+  try { await req('POST', '/auth/logout', { refreshToken: refresh }); } catch { /* ignore */ }
+  tokenStore.clear();
 }
 
 // ─── Employees ────────────────────────────────────────────────────────────────
@@ -74,6 +155,7 @@ export async function apiUpdateEmployee(id: string, data: Partial<EmployeeRecord
 // ─── Skills ───────────────────────────────────────────────────────────────────
 export interface ApiSkillRating {
   skillId: string; selfRating: number; managerRating: number | null; validated: boolean;
+  skillName?: string; verifiedBadgeLevel?: string | null; selfClaimedLevel?: string | null;
 }
 
 export async function apiGetSkills(employeeId: string): Promise<ApiSkillRating[]> {

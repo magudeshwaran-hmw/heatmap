@@ -3,6 +3,10 @@
 > **Internal Talent Intelligence Platform for Zensar Technologies**
 > Built with React 18 + TypeScript + Node.js + PostgreSQL + AI (Ollama / Gemini)
 
+> 🚀 **Setting up on a new laptop?** Follow [`SETUP_GUIDE.md`](./SETUP_GUIDE.md) and
+> run [`SETUP_DATABASE.sql`](./SETUP_DATABASE.sql) — then `npm run dev` (local) and
+> `npm run forward:cf` (public URL).
+
 ---
 
 ## Table of Contents

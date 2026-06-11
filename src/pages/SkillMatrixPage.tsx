@@ -8,7 +8,7 @@ import { Save, AlertCircle, CheckCircle2, ChevronRight, ChevronLeft, Send } from
 import { saveSkillRatings, submitSkillMatrix, computeCompletion, getIncompleteSkills, getEmployee, exportEmployeeToExcel, upsertEmployee } from '@/lib/localDB';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { apiSaveSkills, apiSubmit, isServerAvailable } from '@/lib/api';
+import { apiSaveSkills, apiSubmit, apiGetSkills, isServerAvailable } from '@/lib/api';
 import { useApp } from '@/lib/AppContext';
 import ZensarLoader from '@/components/ZensarLoader';
 
@@ -87,6 +87,29 @@ export default function SkillMatrixPage({
     return empRecord?.submitted === true || data?.user?.Submitted === 'Yes';
   });
 
+  // ── Verified badges (ZenAssess) — always read fresh from DB, never from cache ──
+  // Badge display must come from verified_badge_level only (never self_rating).
+  const [verifiedBadges, setVerifiedBadges] = useState<Record<string, string>>({});
+
+  // Refetch on mount, on employee change, AND on every navigation to this page
+  // (location.key changes) — so a badge earned in ZenAssess shows immediately
+  // when the employee returns to ZenMatrix, with no manual refresh.
+  useEffect(() => {
+    if (!activeEmpId || activeEmpId === 'new') return;
+    (async () => {
+      try {
+        const skills = await apiGetSkills(activeEmpId);
+        const badges: Record<string, string> = {};
+        (skills || []).forEach((s: any) => {
+          const name = s.skillName || s.skill_name;
+          const verified = s.verifiedBadgeLevel || s.verified_badge_level;
+          if (name && verified) badges[name] = verified;
+        });
+        setVerifiedBadges(badges);
+      } catch { /* verified badges remain empty — safe default */ }
+    })();
+  }, [activeEmpId, location.key, (location.state as any)?.forceRefresh]);
+
   useEffect(() => {
     if (!employeeId || employeeId === 'new' || alreadySubmitted) return;
     const sessionId = localStorage.getItem('skill_nav_session_id');
@@ -164,8 +187,15 @@ export default function SkillMatrixPage({
       const incompleteIds = incomplete.map(s => s.id);
       return SKILLS.filter(s => incompleteIds.includes(s.id) || sessionRatedIds.includes(s.id));
     }
-    return SKILLS.filter(s => s.category === activeCategory);
-  }, [showIncomplete, incomplete, sessionRatedIds, activeCategory]);
+    // Within a category: verified skills first, then self-claimed, then unrated.
+    // Stable sort preserves the original order inside each group.
+    const rank = (s: typeof SKILLS[number]) => {
+      if (verifiedBadges[s.name]) return 0;
+      const selfRating = ratings.find(r => r.skillId === s.id)?.selfRating ?? 0;
+      return selfRating > 0 ? 1 : 2;
+    };
+    return SKILLS.filter(s => s.category === activeCategory).sort((a, b) => rank(a) - rank(b));
+  }, [showIncomplete, incomplete, sessionRatedIds, activeCategory, verifiedBadges, ratings]);
 
   const updateRating = (skillId: string, level: ProficiencyLevel) => {
     setRatings(prev => prev.map(r => r.skillId === skillId ? { ...r, selfRating: level } : r));
@@ -353,6 +383,12 @@ export default function SkillMatrixPage({
                 <div style={{ textAlign: 'right', minWidth: '90px' }}>
                   <div style={{ fontSize: '10px', color: T.muted }}>MY LEVEL</div>
                   <div style={{ fontSize: '12px', fontWeight: 700, color: rated ? LVL_COLOR[r.selfRating] : T.muted }}>{LVL_LABEL[r.selfRating]}</div>
+                </div>
+                <div style={{ textAlign: 'right', minWidth: '110px' }}>
+                  <div style={{ fontSize: '10px', color: T.muted }}>VERIFIED</div>
+                  <div style={{ fontSize: '12px', fontWeight: 700, color: verifiedBadges[skill.name] ? '#10B981' : T.muted }}>
+                    {verifiedBadges[skill.name] ? `✓ ${verifiedBadges[skill.name]}` : '—'}
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   {([0, 1, 2, 3] as ProficiencyLevel[]).map(l => (

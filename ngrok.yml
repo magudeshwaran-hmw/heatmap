@@ -1,0 +1,16 @@
+# Single-tunnel config — forwards ONE public URL to the full local stack on port 8080.
+#
+# ONE-TIME SETUP (pick one):
+#   A) Add NGROK_AUTHTOKEN=... to .env  then:  npm run forward
+#   B) ngrok config add-authtoken YOUR_TOKEN  then:  npm run forward
+#
+# Sign up: https://dashboard.ngrok.com/signup
+
+version: "2"
+# authtoken is read from .env via scripts/forward.cjs (do not commit tokens here)
+
+tunnels:
+  zenlap:
+    addr: 8080
+    proto: http
+    inspect: true

@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS employees (
   primary_skill      VARCHAR(255),
   primary_domain     VARCHAR(255),
   secondary_skill    VARCHAR(255),
+  tertiary_skill     VARCHAR(255),
+  grade              VARCHAR(50),
   created_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 );
@@ -47,6 +49,10 @@ CREATE TABLE IF NOT EXISTS skills (
   self_rating    INTEGER      DEFAULT 0 CHECK (self_rating BETWEEN 0 AND 5),
   manager_rating INTEGER      CHECK (manager_rating BETWEEN 0 AND 5),
   validated      BOOLEAN      DEFAULT FALSE,
+  allocation_readiness INTEGER DEFAULT 0,
+  allocation_risk      VARCHAR(20) DEFAULT 'Low',
+  ready_for_allocation BOOLEAN DEFAULT TRUE,
+  capability_score     INTEGER DEFAULT 0,
   created_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(employee_id, skill_name)
@@ -347,6 +353,33 @@ ALTER TABLE bfsi_roles ADD COLUMN IF NOT EXISTS aging_bucket    VARCHAR(50);
 ALTER TABLE education ADD COLUMN IF NOT EXISTS year VARCHAR(50);
 ALTER TABLE bfsi_uploads ADD COLUMN IF NOT EXISTS error_message TEXT;
 ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- ============================================================
+-- ZENASSESS V10 BACKEND FIXES (June 2026)
+-- ============================================================
+-- Add missing columns to employees table for grade-based assessment
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS tertiary_skill VARCHAR(255);
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS grade VARCHAR(50);
+
+-- Create or extend zenassess_sessions table for per-skill tracking
+CREATE TABLE IF NOT EXISTS zenassess_sessions (
+  id              SERIAL       PRIMARY KEY,
+  employee_id     VARCHAR(50)  REFERENCES employees(id) ON DELETE CASCADE,
+  skill_name      VARCHAR(255) NOT NULL,
+  validated_level VARCHAR(50),
+  attempt_number  INTEGER      DEFAULT 1,
+  silent_drop_path TEXT,
+  badge_awarded   BOOLEAN      DEFAULT FALSE,
+  self_claimed_level_at_test VARCHAR(50),
+  created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Add missing columns to skills table
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS verified_badge_level VARCHAR(50);
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS self_claimed_level VARCHAR(50);
+
+CREATE INDEX IF NOT EXISTS idx_zenassess_employee_skill ON zenassess_sessions(employee_id, skill_name);
 
 -- ============================================================
 -- VERIFICATION QUERY — run after setup to confirm all tables

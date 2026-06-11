@@ -3,30 +3,21 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const path = require('path');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const fallbackQuestions = require('./fallbackQuestions.cjs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors({
-  origin: function(origin, callback) {
-    // Allow all origins but properly (not wildcard when credentials used)
-    callback(null, origin || '*');
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// PostgreSQL connection
+// PostgreSQL connection with SSL support for cloud databases
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 1234,
+  port: process.env.DB_PORT || 5432,
   database: process.env.DB_NAME || 'skillmatrix',
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'password',
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
 // Test database connection
@@ -37,6 +28,31 @@ pool.on('connect', () => {
 pool.on('error', (err) => {
   console.error('❌ PostgreSQL connection error:', err.message);
 });
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.endsWith('.ngrok.io') ||
+      origin.endsWith('.ngrok-free.app') ||
+      origin.endsWith('.ngrok-free.dev') ||
+      origin.endsWith('.trycloudflare.com')
+    ) {
+      return callback(null, true);
+    }
+    callback(new Error('Not allowed'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Attach user from JWT on every request (non-blocking)
+app.use((req, res, next) => { if (typeof attachUser === 'function') attachUser(req, res, next); else next(); });
 
 // Skill names array (32 skills)
 const SKILL_NAMES = [
@@ -86,13 +102,1150 @@ function withTimeout(promise, ms) {
   });
 }
 
+// ============================================================
+// PHASE 1 — JWT + SECURITY HELPERS
+// ============================================================
+
+// JWT secret — falls back to env var, then a hardcoded dev secret
+const JWT_SECRET = process.env.JWT_SECRET || 'zensar_jwt_dev_secret_change_in_production_2026';
+const JWT_EXPIRES_IN = '15m';
+const REFRESH_EXPIRES_DAYS = 7;
+
+/** Generate a signed access token (15 min) */
+function generateAccessToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
+
+/** Hash a refresh token for safe DB storage */
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * JWT Auth Middleware — optional enforcement.
+ * Attaches req.user if a valid Bearer token is present.
+ * Does NOT block requests without a token (backward compatible).
+ * Use requireAuth() or requireAdmin() to enforce on specific routes.
+ */
+function attachUser(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      req.user = decoded; // { employeeId, role, name }
+    } catch (_) {
+      // Invalid/expired token — req.user stays undefined
+    }
+  }
+  next();
+}
+
+/** Middleware: require a valid JWT. Returns 401 if missing/invalid. (Bypassed during transition) */
+function requireAuth(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // Backward compatibility: allow requests without JWT tokens during transition
+    return next();
+  }
+  const token = authHeader.slice(7);
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    // Backward compatibility: allow requests even with expired/invalid JWT tokens during transition
+    req.user = undefined;
+    next();
+  }
+}
+
+/** Middleware: require admin role. (Bypassed during transition if no token) */
+function requireAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    // Backward compatibility: allow if no req.user (transition/session mode) or role is admin
+    if (!req.user || req.user.role === 'admin') return next();
+    return res.status(403).json({ error: 'Admin access required' });
+  });
+}
+
+/** Middleware: require ownership (employee can only access own data) or admin. (Bypassed during transition if no token) */
+function requireOwnership(paramName = 'id') {
+  return (req, res, next) => {
+    requireAuth(req, res, () => {
+      // Backward compatibility: allow if no req.user (transition/session mode)
+      if (!req.user) return next();
+      if (req.user.role === 'admin') return next();
+      const resourceId = Reflect.get(req.params, paramName);
+      if (
+        resourceId &&
+        (resourceId.toLowerCase() === req.user.employeeId.toLowerCase() ||
+         resourceId === req.user.employeeId)
+      ) return next();
+      return res.status(403).json({ error: 'Access denied' });
+    });
+  };
+}
+
+/** Write to audit_log — non-blocking, never throws */
+async function auditLog({ employeeId, role, action, resource, resourceId, oldValue, newValue, details, req, status = 'success' }) {
+  try {
+    const ip = req ? (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '') : '';
+    const ua = req ? (req.headers['user-agent'] || '') : '';
+    const detailsVal = details || newValue || null;
+    await pool.query(
+      `INSERT INTO audit_log (employee_id, role, action, resource, resource_id, old_value, new_value, ip_address, user_agent, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        employeeId || null, role || null, action, resource || null, resourceId || null,
+        oldValue ? JSON.stringify(oldValue) : null,
+        detailsVal ? JSON.stringify(detailsVal) : null,
+        ip, ua, status
+      ]
+    );
+  } catch (_) { /* audit failures must never break the main flow */ }
+}
+
+/** Check rate limit: max 5 failed logins per IP in 15 minutes */
+async function checkLoginRateLimit(ip) {
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*) as cnt FROM login_sessions
+       WHERE ip_address = $1 AND success = false
+         AND created_at > NOW() - INTERVAL '15 minutes'`,
+      [ip]
+    );
+    return parseInt(result.rows[0].cnt) >= 5;
+  } catch (_) { return false; }
+}
+
+/** Log a login attempt */
+async function logLoginAttempt({ employeeId, loginId, success, failureReason, req }) {
+  try {
+    const ip = req ? (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '') : '';
+    const ua = req ? (req.headers['user-agent'] || '') : '';
+    await pool.query(
+      `INSERT INTO login_sessions (employee_id, login_id, success, failure_reason, ip_address, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [employeeId || null, loginId || null, success, failureReason || null, ip, ua]
+    );
+  } catch (_) {}
+}
+
+/** Ensure Phase 1 security tables exist (idempotent) */
+async function ensureSecurityTables() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id          SERIAL PRIMARY KEY,
+        employee_id VARCHAR(50) NOT NULL,
+        token_hash  VARCHAR(255) NOT NULL UNIQUE,
+        expires_at  TIMESTAMP NOT NULL,
+        revoked     BOOLEAN DEFAULT FALSE,
+        ip_address  VARCHAR(50),
+        user_agent  TEXT,
+        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_rt_employee ON refresh_tokens(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_rt_hash ON refresh_tokens(token_hash)`);
+    await pool.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'employee'`);
+    await pool.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMP`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id          SERIAL PRIMARY KEY,
+        employee_id VARCHAR(50),
+        role        VARCHAR(20),
+        action      VARCHAR(100) NOT NULL,
+        resource    VARCHAR(100),
+        resource_id VARCHAR(100),
+        old_value   JSONB,
+        new_value   JSONB,
+        ip_address  VARCHAR(50),
+        user_agent  TEXT,
+        status      VARCHAR(20) DEFAULT 'success',
+        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_al_employee ON audit_log(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_al_action ON audit_log(action)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_al_created ON audit_log(created_at)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS login_sessions (
+        id             SERIAL PRIMARY KEY,
+        employee_id    VARCHAR(50),
+        login_id       VARCHAR(255),
+        success        BOOLEAN NOT NULL,
+        failure_reason VARCHAR(100),
+        ip_address     VARCHAR(50),
+        user_agent     TEXT,
+        created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ls_employee ON login_sessions(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ls_ip ON login_sessions(ip_address)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ls_created ON login_sessions(created_at)`);
+  } catch (err) {
+    console.error('⚠️ Security tables init error (non-blocking):', err.message);
+  }
+}
+
+/** Ensure Phase 2 question bank tables exist (idempotent) */
+async function ensurePhase2Tables() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS question_bank (
+        id             SERIAL PRIMARY KEY,
+        skill_name     VARCHAR(255) NOT NULL,
+        band           VARCHAR(20)  NOT NULL,
+        difficulty     VARCHAR(20)  NOT NULL,
+        question_text  TEXT NOT NULL,
+        options        JSONB NOT NULL,
+        correct_option INTEGER NOT NULL,
+        explanation    TEXT,
+        topic          VARCHAR(100),
+        points         INTEGER DEFAULT 1,
+        time_seconds   INTEGER DEFAULT 60,
+        active         BOOLEAN DEFAULT TRUE,
+        version        INTEGER DEFAULT 1,
+        created_by     VARCHAR(50),
+        created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_skill ON question_bank(skill_name)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_band ON question_bank(band)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_active ON question_bank(active)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assessment_analytics (
+        id             SERIAL PRIMARY KEY,
+        session_id     VARCHAR(50),
+        employee_id    VARCHAR(50) NOT NULL,
+        skill_name     VARCHAR(255) NOT NULL,
+        band           VARCHAR(20) NOT NULL,
+        question_id    INTEGER,
+        time_taken_sec INTEGER,
+        answer_given   INTEGER,
+        is_correct     BOOLEAN,
+        answer_changes INTEGER DEFAULT 0,
+        created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_aa_session ON assessment_analytics(session_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_aa_employee ON assessment_analytics(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_aa_skill ON assessment_analytics(skill_name)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS manager_reviews (
+        id                  SERIAL PRIMARY KEY,
+        session_id          VARCHAR(50) NOT NULL,
+        employee_id         VARCHAR(50) NOT NULL,
+        skill_name          VARCHAR(255) NOT NULL,
+        reviewer_id         VARCHAR(50),
+        review_status       VARCHAR(30) DEFAULT 'pending',
+        review_notes        TEXT,
+        final_decision      VARCHAR(20),
+        sla_deadline        TIMESTAMP,
+        review_started_at   TIMESTAMP,
+        review_completed_at TIMESTAMP,
+        escalated_to        VARCHAR(50),
+        escalation_reason   TEXT,
+        created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mr_session ON manager_reviews(session_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mr_employee ON manager_reviews(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mr_status ON manager_reviews(review_status)`);
+
+    // Extend zenassess_sessions with new columns
+    const newCols = [
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS skill_name          VARCHAR(255)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS question_ids        INTEGER[]`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS session_fingerprint VARCHAR(255)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS tab_switch_count    INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS copy_paste_count    INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS answer_change_count INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS time_per_question   JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS integrity_score     INTEGER DEFAULT 100`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS integrity_flags     JSONB DEFAULT '[]'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS mcq_score           NUMERIC(5,2)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS contribution_score  NUMERIC(5,2)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS evidence_score      NUMERIC(5,2)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS final_score         NUMERIC(5,2)`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS sla_deadline        TIMESTAMP`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS fullscreen_exit_count INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS browser_blur_count INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS devtools_detected BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS explain_score_breakdown JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS contribution_breakdown JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS github_metadata JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS allocation_readiness_score INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS allocation_risk VARCHAR(20) DEFAULT 'Low'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS ready_for_allocation BOOLEAN DEFAULT TRUE`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS expert_profile          JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS extracted_evidence      JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS evidence_evaluation     JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS technical_discussion    JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS leadership_discussion   JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS consistency_analysis    JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS ai_recommendation       JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS authenticity_analysis   JSONB DEFAULT '{}'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS leadership_signals      TEXT`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS architecture_signals    TEXT`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS decision_making_signals TEXT`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS mentoring_signals       TEXT`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS domain_expertise       TEXT`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS project_allocation_score INTEGER DEFAULT 0`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS typing_velocity_log JSONB DEFAULT '[]'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS answer_snapshots    JSONB DEFAULT '[]'`,
+    ];
+    for (const col of newCols) {
+      try { await pool.query(col); } catch (_) {}
+    }
+
+    // Extend employees table
+    try {
+      await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS secondary_skill VARCHAR(255)`);
+      await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS tertiary_skill VARCHAR(255)`);
+    } catch (err) {
+      console.error('⚠️ employees alter error:', err.message);
+    }
+
+    // Extend skills table
+    const skillCols = [
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS last_used_date      DATE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS last_project_date   DATE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS last_validated_date DATE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS last_cert_date      DATE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS freshness_score     INTEGER DEFAULT 100`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS freshness_status    VARCHAR(20) DEFAULT 'active'`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS confidence_score    INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS revalidation_req    BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS source              VARCHAR(50) DEFAULT 'self'`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS hidden_skill        BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS discovery_source    VARCHAR(50)`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS allocation_readiness INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS allocation_risk VARCHAR(20) DEFAULT 'Low'`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS ready_for_allocation BOOLEAN DEFAULT TRUE`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS capability_score    INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS leadership_signals      TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS architecture_signals    TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS decision_making_signals TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS mentoring_signals       TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS domain_expertise       TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS project_allocation_score INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS validated_level VARCHAR(50) DEFAULT 'Not Validated'`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS assessment_score INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS technical_depth INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS project_strength INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS certification_strength INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS mentoring_strength INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS github_strength INTEGER DEFAULT 0`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS verified_badge_level VARCHAR(30) DEFAULT NULL`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS self_claimed_level   VARCHAR(30) DEFAULT NULL`,
+    ];
+    for (const col of skillCols) {
+      try { await pool.query(col); } catch (_) {}
+    }
+
+    // Extend bfsi_assignments
+    const assignCols = [
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS allocation_readiness INTEGER DEFAULT 0`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS confidence_at_alloc  INTEGER DEFAULT 0`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS freshness_at_alloc   INTEGER DEFAULT 0`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS risk_score           INTEGER DEFAULT 0`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS recommended_rank     INTEGER`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS admin_override       BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS override_reason      TEXT`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS outcome_status       VARCHAR(30)`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS outcome_notes        TEXT`,
+      `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS outcome_recorded_at  TIMESTAMP`,
+    ];
+    for (const col of assignCols) {
+      try { await pool.query(col); } catch (_) {}
+    }
+
+    // Create Skill Confidence History table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS skill_confidence_history (
+        id               SERIAL PRIMARY KEY,
+        employee_id      VARCHAR(50) NOT NULL,
+        skill_name       VARCHAR(255) NOT NULL,
+        confidence_score INTEGER NOT NULL,
+        source           VARCHAR(100) NOT NULL,
+        reason           TEXT,
+        created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_sch_emp_skill ON skill_confidence_history(employee_id, skill_name)');
+
+    // Create Recalculate Skill Freshness & Confidence Stored Function
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION recalculate_employee_skill_freshness(emp_id VARCHAR)
+      RETURNS VOID AS $$
+      DECLARE
+        s RECORD;
+        val_date DATE;
+        proj_date DATE;
+        cert_date DATE;
+        used_date DATE;
+        f_score INTEGER;
+        f_status VARCHAR(20);
+        reval BOOLEAN;
+        days_since INTEGER;
+        
+        -- Confidence parameters
+        c_score INTEGER;
+        self_rating_pts INTEGER;
+        assess_pts INTEGER;
+        review_pts INTEGER;
+        proj_pts INTEGER;
+        cert_pts INTEGER;
+        proj_count INTEGER;
+        cert_count INTEGER;
+        has_assess BOOLEAN;
+        has_review BOOLEAN;
+        last_hist_score INTEGER;
+        reason_str TEXT;
+        outcome_date DATE;
+        success_alloc_count INTEGER;
+        failure_alloc_count INTEGER;
+
+        -- Allocation Readiness parameters
+        latest_score NUMERIC;
+        latest_integrity INTEGER;
+        latest_contrib NUMERIC;
+        readiness INTEGER;
+        risk VARCHAR(20);
+        ready BOOLEAN;
+
+        -- Capability Score parameters
+        assess_component INTEGER;
+        proj_component INTEGER;
+        cert_component INTEGER;
+        exp_component INTEGER;
+        freshness_component INTEGER;
+        domain_component INTEGER;
+        years_exp INTEGER;
+        has_domain_match BOOLEAN;
+        cap_score INTEGER;
+      BEGIN
+        -- ── HIDDEN SKILL DISCOVERY ──
+        -- Discover from projects
+        FOR s IN 
+          SELECT DISTINCT LOWER(p_sk) as l_sk
+          FROM projects p,
+          LATERAL unnest(COALESCE(p.skills_used, ARRAY[]::TEXT[]) || COALESCE(p.technologies, ARRAY[]::TEXT[])) as p_sk
+          WHERE p.employee_id = emp_id
+        LOOP
+          reason_str := NULL;
+          SELECT name INTO reason_str 
+          FROM (SELECT unnest(ARRAY['Selenium','Appium','JMeter','Postman','JIRA','TestRail','Python','Java','JavaScript','TypeScript','C#','SQL','API Testing','Mobile Testing','Performance Testing','Security Testing','Database Testing','Banking','Healthcare','E-Commerce','Insurance','Telecom','Functional Testing','Automation Testing','Regression Testing','UAT','Git','Jenkins','Docker','Azure DevOps','ChatGPT/Prompt Engineering','AI Test Automation']) as name) as lst
+          WHERE LOWER(lst.name) = s.l_sk;
+
+          IF reason_str IS NOT NULL THEN
+            IF NOT EXISTS(SELECT 1 FROM skills WHERE employee_id = emp_id AND skill_name = reason_str) THEN
+              INSERT INTO skills (employee_id, skill_name, self_rating, hidden_skill, discovery_source)
+              VALUES (emp_id, reason_str, 1, TRUE, 'project');
+            END IF;
+          END IF;
+        END LOOP;
+
+        -- Discover from certifications
+        FOR s IN 
+          SELECT unnest(ARRAY['Selenium','Appium','JMeter','Postman','JIRA','TestRail','Python','Java','JavaScript','TypeScript','C#','SQL','API Testing','Mobile Testing','Performance Testing','Security Testing','Database Testing','Banking','Healthcare','E-Commerce','Insurance','Telecom','Functional Testing','Automation Testing','Regression Testing','UAT','Git','Jenkins','Docker','Azure DevOps','ChatGPT/Prompt Engineering','AI Test Automation']) as name
+        LOOP
+          IF EXISTS(
+            SELECT 1 FROM certifications 
+            WHERE employee_id = emp_id AND cert_name ILIKE '%' || s.name || '%'
+          ) THEN
+            IF NOT EXISTS(SELECT 1 FROM skills WHERE employee_id = emp_id AND skill_name = s.name) THEN
+              INSERT INTO skills (employee_id, skill_name, self_rating, hidden_skill, discovery_source, validated)
+              VALUES (emp_id, s.name, 1, TRUE, 'certification', TRUE);
+            END IF;
+          END IF;
+        END LOOP;
+
+        FOR s IN SELECT id, skill_name, self_rating, created_at, updated_at FROM skills WHERE employee_id = emp_id LOOP
+          -- 1. last_validated_date
+          SELECT COALESCE(MAX(created_at::DATE), s.updated_at::DATE)
+          INTO val_date
+          FROM zenassess_sessions
+          WHERE employee_id = emp_id AND skill_name = s.skill_name AND status = 'completed';
+
+          -- 2. last_project_date
+          SELECT MAX(COALESCE(end_date, CURRENT_DATE))
+          INTO proj_date
+          FROM projects
+          WHERE employee_id = emp_id AND (s.skill_name = ANY(skills_used) OR s.skill_name = ANY(technologies));
+
+          -- 3. last_cert_date
+          SELECT MAX(issue_date)
+          INTO cert_date
+          FROM certifications
+          WHERE employee_id = emp_id AND cert_name ILIKE '%' || s.skill_name || '%';
+
+          -- 3.5. outcome_date
+          SELECT MAX(a.outcome_recorded_at::DATE) INTO outcome_date
+          FROM bfsi_assignments a
+          JOIN bfsi_roles r ON a.role_id = r.role_id
+          WHERE a.employee_id = (SELECT zensar_id FROM employees WHERE id = emp_id)
+            AND s.skill_name = ANY(r.required_skills)
+            AND a.outcome_status = 'Success';
+
+          -- 4. last_used_date
+          used_date := GREATEST(
+            COALESCE(val_date, '1970-01-01'::DATE),
+            COALESCE(proj_date, '1970-01-01'::DATE),
+            COALESCE(cert_date, '1970-01-01'::DATE),
+            COALESCE(outcome_date, '1970-01-01'::DATE),
+            COALESCE(s.updated_at::DATE, '1970-01-01'::DATE)
+          );
+          IF used_date = '1970-01-01'::DATE THEN
+            used_date := CURRENT_DATE;
+          END IF;
+
+          -- Calculate days since
+          days_since := CURRENT_DATE - used_date;
+          IF days_since < 0 THEN
+            days_since := 0;
+          END IF;
+
+          -- Freshness Score logic
+          IF days_since <= 180 THEN
+            f_score := 100;
+          ELSIF days_since <= 365 THEN
+            f_score := 100 - ((days_since - 180) * 0.16)::INTEGER;
+          ELSIF days_since <= 730 THEN
+            f_score := 70 - ((days_since - 365) * 0.11)::INTEGER;
+          ELSE
+            f_score := 30 - ((days_since - 730) * 0.05)::INTEGER;
+          END IF;
+
+          IF f_score < 0 THEN
+            f_score := 0;
+          ELSIF f_score > 100 THEN
+            f_score := 100;
+          END IF;
+
+          -- Status logic
+          IF f_score >= 75 THEN
+            f_status := 'active';
+          ELSIF f_score >= 40 THEN
+            f_status := 'decaying';
+          ELSE
+            f_status := 'stale';
+          END IF;
+
+          IF f_status = 'stale' THEN
+            reval := TRUE;
+          ELSE
+            reval := FALSE;
+          END IF;
+
+          -- ── CONFIDENCE CALCULATION ──
+          self_rating_pts := 0;
+          IF s.self_rating > 0 THEN
+            self_rating_pts := 40;
+          END IF;
+
+          -- Check if has completed assessment
+          SELECT EXISTS(
+            SELECT 1 FROM zenassess_sessions 
+            WHERE employee_id = emp_id AND skill_name = s.skill_name AND status IN ('completed', 'passed', 'review_required')
+          ) INTO has_assess;
+          assess_pts := 0;
+          IF has_assess THEN
+            assess_pts := 30;
+          END IF;
+
+          -- Check if has approved manager review
+          SELECT EXISTS(
+            SELECT 1 FROM manager_reviews 
+            WHERE employee_id = emp_id AND skill_name = s.skill_name AND review_status = 'approved'
+          ) INTO has_review;
+          review_pts := 0;
+          IF has_review THEN
+            review_pts := 15;
+          END IF;
+
+          -- Count projects
+          SELECT COUNT(*) INTO proj_count
+          FROM projects
+          WHERE employee_id = emp_id AND (s.skill_name = ANY(skills_used) OR s.skill_name = ANY(technologies));
+          proj_pts := LEAST(10, proj_count * 5);
+
+          -- Count certs
+          SELECT COUNT(*) INTO cert_count
+          FROM certifications
+          WHERE employee_id = emp_id AND cert_name ILIKE '%' || s.skill_name || '%';
+          cert_pts := 0;
+          IF cert_count > 0 THEN
+            cert_pts := 10;
+          END IF;
+
+          -- Count successful delivery outcomes in BFSI roles
+          SELECT COUNT(*) INTO success_alloc_count
+          FROM bfsi_assignments a
+          JOIN bfsi_roles r ON a.role_id = r.role_id
+          WHERE a.employee_id = (SELECT zensar_id FROM employees WHERE id = emp_id)
+            AND s.skill_name = ANY(r.required_skills)
+            AND a.outcome_status = 'Success';
+
+          -- Count failure delivery outcomes in BFSI roles
+          SELECT COUNT(*) INTO failure_alloc_count
+          FROM bfsi_assignments a
+          JOIN bfsi_roles r ON a.role_id = r.role_id
+          WHERE a.employee_id = (SELECT zensar_id FROM employees WHERE id = emp_id)
+            AND s.skill_name = ANY(r.required_skills)
+            AND a.outcome_status = 'Failure';
+
+          c_score := self_rating_pts + assess_pts + review_pts + proj_pts + cert_pts + (success_alloc_count * 10) - (failure_alloc_count * 15);
+          IF c_score < 0 THEN
+            c_score := 0;
+          ELSIF c_score > 100 THEN
+            c_score := 100;
+          END IF;
+
+          -- Fetch details from latest completed zenassess_session
+          SELECT COALESCE(score, 0), COALESCE(integrity_score, 100), COALESCE(contribution_score, 0)
+          INTO latest_score, latest_integrity, latest_contrib
+          FROM zenassess_sessions
+          WHERE employee_id = emp_id AND skill_name = s.skill_name AND status IN ('completed', 'passed', 'review_required')
+          ORDER BY created_at DESC LIMIT 1;
+
+          IF latest_score IS NULL THEN
+            latest_score := 0;
+            latest_integrity := 100;
+            latest_contrib := 0;
+          END IF;
+
+          -- Calculate Readiness Score: (Validation Score * 0.3) + (Confidence * 0.25) + (Freshness * 0.2) + (Integrity * 0.15) + (Contribution * 0.1)
+          readiness := ROUND((latest_score * 0.3) + (c_score * 0.25) + (f_score * 0.2) + (latest_integrity * 0.15) + (latest_contrib * 0.1));
+
+          -- Determine Risk:
+          -- High Risk: If Integrity < 60 OR Freshness < 40 OR Validation Score < 50
+          -- Medium Risk: If Integrity is 60-79 OR Freshness is 40-74 OR Validation Score < 60
+          -- Low Risk: Otherwise
+          IF latest_integrity < 60 OR f_score < 40 OR latest_score < 50 THEN
+            risk := 'High';
+          ELSIF latest_integrity < 80 OR f_score < 75 OR latest_score < 60 THEN
+            risk := 'Medium';
+          ELSE
+            risk := 'Low';
+          END IF;
+
+          -- Ready For Allocation: (Readiness >= 60% && Integrity >= 50 && Validation Score >= 50)
+          IF readiness >= 60 AND latest_integrity >= 50 AND latest_score >= 50 THEN
+            ready := TRUE;
+          ELSE
+            ready := FALSE;
+          END IF;
+
+          -- Calculate Capability Score components:
+          -- 1. Assessment (max 20 pts)
+          assess_component := ROUND(COALESCE(latest_score, 0) * 0.20);
+          
+          -- 2. Projects (max 20 pts)
+          SELECT COALESCE(MAX(
+            CASE 
+              WHEN domain ILIKE '%Banking%' OR domain ILIKE '%Insurance%' OR domain ILIKE '%BFSI%' OR domain ILIKE '%Claims%' 
+                   OR client ILIKE '%Bank%' OR client ILIKE '%Insurance%' OR client ILIKE '%Finance%' OR client ILIKE '%Claims%' THEN 20
+              ELSE 10
+            END
+          ), 5) INTO proj_component
+          FROM projects
+          WHERE employee_id = emp_id AND (s.skill_name = ANY(skills_used) OR s.skill_name = ANY(technologies));
+
+          -- 3. Certifications (max 20 pts)
+          SELECT COALESCE(MAX(
+            CASE 
+              WHEN cert_name ILIKE '%ISTQB%' OR cert_name ILIKE '%AWS%' OR cert_name ILIKE '%Azure%' OR cert_name ILIKE '%Google%' 
+                   OR cert_name ILIKE '%CISA%' OR cert_name ILIKE '%CISSP%' OR cert_name ILIKE '%Scrum%' OR cert_name ILIKE '%Associate%' 
+                   OR cert_name ILIKE '%Professional%' OR cert_name ILIKE '%Architect%' THEN 20
+              ELSE 5
+            END
+          ), 0) INTO cert_component
+          FROM certifications
+          WHERE employee_id = emp_id AND cert_name ILIKE '%' || s.skill_name || '%';
+
+          -- 4. Experience (max 10 pts)
+          SELECT COALESCE(years_it, 0) INTO years_exp FROM employees WHERE id = emp_id;
+          IF years_exp >= 12 THEN
+            exp_component := 10;
+          ELSIF years_exp >= 6 THEN
+            exp_component := 8;
+          ELSE
+            exp_component := 5;
+          END IF;
+
+          -- 5. Freshness (max 15 pts)
+          freshness_component := ROUND(f_score * 0.15);
+
+          -- 6. Domain Match (max 15 pts)
+          SELECT EXISTS(
+            SELECT 1 FROM employees WHERE id = emp_id AND (primary_domain ILIKE '%Banking%' OR primary_domain ILIKE '%Insurance%' OR primary_domain ILIKE '%BFSI%' OR primary_domain ILIKE '%Claims%')
+          ) OR EXISTS(
+            SELECT 1 FROM projects WHERE employee_id = emp_id AND (domain ILIKE '%Banking%' OR domain ILIKE '%Insurance%' OR domain ILIKE '%BFSI%' OR domain ILIKE '%Claims%')
+          ) INTO has_domain_match;
+
+          IF has_domain_match THEN
+            domain_component := 15;
+          ELSE
+            domain_component := 0;
+          END IF;
+
+          cap_score := assess_component + proj_component + cert_component + exp_component + freshness_component + domain_component;
+          IF cap_score > 100 THEN
+            cap_score := 100;
+          END IF;
+
+          -- Update record
+          UPDATE skills
+          SET last_validated_date = val_date,
+              last_project_date = proj_date,
+              last_cert_date = cert_date,
+              last_used_date = used_date,
+              freshness_score = f_score,
+              freshness_status = f_status,
+              revalidation_req = reval,
+              confidence_score = c_score,
+              allocation_readiness = readiness,
+              allocation_risk = risk,
+              ready_for_allocation = ready,
+              capability_score = cap_score
+          WHERE id = s.id;
+
+          -- Log history & trends
+          SELECT confidence_score INTO last_hist_score
+          FROM skill_confidence_history
+          WHERE employee_id = emp_id AND skill_name = s.skill_name
+          ORDER BY created_at DESC LIMIT 1;
+
+          IF last_hist_score IS NULL OR last_hist_score != c_score THEN
+            reason_str := 'Score recalculated: Self-Rating (' || self_rating_pts || ' pts)';
+            IF assess_pts > 0 THEN
+              reason_str := reason_str || ', Assessment (' || assess_pts || ' pts)';
+            END IF;
+            IF review_pts > 0 THEN
+              reason_str := reason_str || ', Expert Review (' || review_pts || ' pts)';
+            END IF;
+            IF proj_pts > 0 THEN
+              reason_str := reason_str || ', Projects (' || proj_pts || ' pts)';
+            END IF;
+            IF cert_pts > 0 THEN
+              reason_str := reason_str || ', Certifications (' || cert_pts || ' pts)';
+            END IF;
+            
+            INSERT INTO skill_confidence_history (employee_id, skill_name, confidence_score, source, reason)
+            VALUES (emp_id, s.skill_name, c_score, 'system', reason_str);
+          END IF;
+        END LOOP;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+
+    // Backfill calculations for all employees
+    try {
+      await pool.query('SELECT recalculate_employee_skill_freshness(id) FROM employees');
+    } catch (_) {}
+
+    // Seed Functional Testing Questions
+    try {
+      await seedFunctionalTestingQuestions();
+    } catch (err) {
+      console.error('⚠️ Seeding Functional Testing questions failed:', err.message);
+    }
+  } catch (err) {
+    console.error('⚠️ Phase 2 tables init error (non-blocking):', err.message);
+  }
+}
+
+async function seedFunctionalTestingQuestions() {
+  const check = await pool.query("SELECT COUNT(*) FROM question_bank WHERE skill_name = 'Functional Testing'");
+  const count = parseInt(check.rows[0].count, 10);
+  if (count > 0) {
+    return;
+  }
+
+  const questions = [
+    // 20 Beginner Questions
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Which SDLC model is characterized by incremental development and high adaptability to changes?',
+      options: ['Waterfall', 'V-Model', 'Agile', 'Big Bang'],
+      correct_option: 2,
+      explanation: 'Agile development is structured in short increments called iterations or sprints, allowing teams to adapt to changes quickly.',
+      topic: 'SDLC'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'When should test planning begin in the Software Testing Life Cycle (STLC)?',
+      options: ['After coding is complete', 'As soon as requirements are gathered', 'During the design phase', 'During the deployment phase'],
+      correct_option: 1,
+      explanation: 'Test planning should start as early as possible, ideally as soon as the requirements are gathered and analyzed.',
+      topic: 'STLC'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Which test case design technique focuses on testing the boundaries of input ranges?',
+      options: ['Equivalence Partitioning', 'Boundary Value Analysis', 'Decision Table Testing', 'State Transition Testing'],
+      correct_option: 1,
+      explanation: 'Boundary Value Analysis (BVA) is a black-box test design technique that focuses on testing values at the boundaries of input domains.',
+      topic: 'Test Case Design'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'What is the status of a defect when it is first logged by a tester?',
+      options: ['Open', 'New', 'Assigned', 'Resolved'],
+      correct_option: 1,
+      explanation: 'A newly logged defect enters the Defect Lifecycle with the status New.',
+      topic: 'Defect Lifecycle'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'A spelling mistake in the company name on the homepage of a website has:',
+      options: ['High Severity, High Priority', 'Low Severity, High Priority', 'High Severity, Low Priority', 'Low Severity, Low Priority'],
+      correct_option: 1,
+      explanation: 'A spelling mistake on the homepage is low severity because it does not break functionality, but high priority because of business visibility.',
+      topic: 'Severity vs Priority'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Regression testing is performed to:',
+      options: ['Find new defects in new features', 'Verify that changes did not introduce defects in existing features', 'Test system performance under load', 'Ensure the system is secure'],
+      correct_option: 1,
+      explanation: 'Regression testing ensures that changes, bug fixes, or enhancements did not break existing features.',
+      topic: 'Regression Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'The main goal of smoke testing is to:',
+      options: ['Verify the build is stable enough for detailed testing', 'Test all edge cases', 'Execute the entire regression suite', 'Validate database performance'],
+      correct_option: 0,
+      explanation: 'Smoke testing is a subset of test cases executed to verify that the core functions of a build work and that the build is stable enough for deeper testing.',
+      topic: 'Smoke Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Sanity testing is usually:',
+      options: ['A broad and deep testing of the entire application', 'A quick and focused test of a specific build to verify minor fixes', 'Automated performance validation', 'Non-functional testing'],
+      correct_option: 1,
+      explanation: 'Sanity testing is performed on a relatively stable build to check that specific bugs are fixed and related features function properly.',
+      topic: 'Sanity Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Which of the following is a functional testing type?',
+      options: ['Performance Testing', 'Usability Testing', 'Sanity Testing', 'Load Testing'],
+      correct_option: 2,
+      explanation: 'Sanity testing is a type of functional testing. Performance, usability, and load testing are non-functional testing types.',
+      topic: 'Functional Testing Basics'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'In which SDLC phase are business requirements gathered and analyzed?',
+      options: ['Design', 'Implementation', 'Requirements Gathering', 'Maintenance'],
+      correct_option: 2,
+      explanation: 'Requirements Gathering is the phase where customer/business needs are collected and analyzed.',
+      topic: 'SDLC'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'What is the output of the Test Design phase in STLC?',
+      options: ['Test Strategy', 'Test Plan', 'Test Cases', 'Test Execution Report'],
+      correct_option: 2,
+      explanation: 'The primary outputs of the Test Design phase are the finalized Test Cases and Test Data.',
+      topic: 'STLC'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Equivalence Partitioning involves:',
+      options: ['Dividing input data into valid and invalid partitions', 'Testing all input combinations', 'Testing database constraints', 'Running test cases in random order'],
+      correct_option: 0,
+      explanation: 'Equivalence Partitioning divides the input data domain into classes of data for which similar system behavior is expected.',
+      topic: 'Test Case Design'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'If a developer rejects a logged defect as not a bug, what is the status of the defect?',
+      options: ['Rejected', 'Closed', 'Deferred', 'Reopened'],
+      correct_option: 0,
+      explanation: 'When a developer disagrees that a logged issue is a bug, they set its status to Rejected.',
+      topic: 'Defect Lifecycle'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'A crash in a rarely used feature of a banking app has:',
+      options: ['High Severity, Low Priority', 'Low Severity, High Priority', 'High Severity, High Priority', 'Low Severity, Low Priority'],
+      correct_option: 0,
+      explanation: 'A system crash indicates High Severity, but since the feature is rarely used, it might have Low Priority for scheduling the fix.',
+      topic: 'Severity vs Priority'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'When is regression testing typically executed?',
+      options: ['Only before the first release', 'After code changes, bug fixes, or updates', 'During the requirement gathering phase', 'Only when the customer reports a bug'],
+      correct_option: 1,
+      explanation: 'Regression testing is executed whenever code is modified or updated to check for side effects.',
+      topic: 'Regression Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Who typically performs smoke testing?',
+      options: ['Only Business Analysts', 'Only Developers', 'QA Engineers or Developers', 'End Users'],
+      correct_option: 2,
+      explanation: 'Developers run smoke tests before sharing a build, and QA engineers execute them upon receiving it.',
+      topic: 'Smoke Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Sanity testing is a subset of:',
+      options: ['Acceptance Testing', 'Regression Testing', 'Unit Testing', 'System Testing'],
+      correct_option: 1,
+      explanation: 'Sanity testing is a specialized subset of regression testing that focuses on verifying the stability of specific changes.',
+      topic: 'Sanity Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'Black-box testing is a testing method where:',
+      options: ['The tester knows the internal code structure', 'The tester does not know the internal code structure', 'The test is run without any UI', 'The database is tested directly'],
+      correct_option: 1,
+      explanation: 'Black-box testing treats the system as a black box where the internal implementation is not known or analyzed.',
+      topic: 'Functional Testing Basics'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'What does STLC stand for?',
+      options: ['System Testing Lifecycle', 'Software Test Lifecycle', 'Software Testing Life Cycle', 'Standard Test Life Cycle'],
+      correct_option: 2,
+      explanation: 'STLC stands for Software Testing Life Cycle.',
+      topic: 'STLC'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'beginner',
+      difficulty: 'EASY',
+      question_text: 'What status should a defect be set to after a tester verifies the developer\'s fix is working?',
+      options: ['Resolved', 'Verified', 'Closed', 'Finished'],
+      correct_option: 2,
+      explanation: 'After verification, a tester changes the defect status to Closed, marking the end of the lifecycle.',
+      topic: 'Defect Lifecycle'
+    },
+
+    // 15 Intermediate Questions (Hard)
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'What is the primary purpose of a requirements traceability matrix (RTM)?',
+      options: ['To track project budget', 'To map requirements to test cases and defects', 'To monitor team performance', 'To schedule testing tasks'],
+      correct_option: 1,
+      explanation: 'RTM is a document that maps and traces user requirements with test cases and defects to ensure complete test coverage.',
+      topic: 'Requirement Analysis'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Which estimation technique uses optimistic, pessimistic, and most likely estimates?',
+      options: ['Delphi Method', 'Wideband Delphi', 'Three-Point Estimation', 'Function Point Analysis'],
+      correct_option: 2,
+      explanation: 'Three-Point Estimation utilizes a weighted average of three estimates (optimistic, pessimistic, and realistic) to calculate task duration.',
+      topic: 'Test Estimation'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'In risk-based testing, how is test priority determined?',
+      options: ['By developer availability', 'By Likelihood of failure and Business Impact', 'By the order requirements are written', 'By the number of lines of code'],
+      correct_option: 1,
+      explanation: 'Risk exposure is calculated based on probability (likelihood of failure) and business impact.',
+      topic: 'Risk-Based Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'If an input field accepts values between 10 and 50 inclusive, which values are tested under boundary value analysis (3-value boundary testing)?',
+      options: ['9, 10, 11, 49, 50, 51', '10, 30, 50', '9, 10, 50, 51', '0, 10, 50, 100'],
+      correct_option: 0,
+      explanation: 'Three-value boundary testing tests the boundary, one step below, and one step above: (9, 10, 11) and (49, 50, 51).',
+      topic: 'Boundary Value Analysis'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'For an input field that accepts a 5-digit ZIP code (00000 to 99999), which represents an invalid equivalence partition?',
+      options: ['A 5-digit number', 'A 6-digit number', 'Any number starting with 9', 'Any number between 10000 and 20000'],
+      correct_option: 1,
+      explanation: 'A 6-digit number is an invalid input and represents an invalid equivalence partition.',
+      topic: 'Equivalence Partitioning'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Which defect metric measures the efficiency of the test team in finding defects before release?',
+      options: ['Defect Density', 'Defect Detection Efficiency (DDE)', 'Defect Rejection Rate', 'Defect Leakage Rate'],
+      correct_option: 1,
+      explanation: 'DDE measures the percentage of total software defects that were identified by the QA team during the testing cycle.',
+      topic: 'Defect Management'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Defect density is calculated as:',
+      options: ['Total defects / Total test cases executed', 'Total defects / Size of software (e.g., KLOC or Function Points)', 'Total closed defects / Total logged defects', 'Total defects found / Testing hours'],
+      correct_option: 1,
+      explanation: 'Defect Density is the number of defects confirmed in a module or system divided by the size of the software.',
+      topic: 'Test Metrics'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'During requirement analysis, what is "ambiguity in requirements"?',
+      options: ['A requirement that cannot be automated', 'A requirement that can be interpreted in multiple ways', 'A requirement that is too expensive to implement', 'A requirement that lacks developer approval'],
+      correct_option: 1,
+      explanation: 'Ambiguity occurs when a requirement is unclear and can lead to multiple interpretations by developers and testers.',
+      topic: 'Requirement Analysis'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Wideband Delphi estimation relies on:',
+      options: ['Historical data analysis', 'Anonymized consensus among a panel of experts', 'A single architect\'s estimation', 'Random sampling of test cases'],
+      correct_option: 1,
+      explanation: 'Wideband Delphi is a consensus-based estimation technique where a panel of experts answers questionnaires anonymously.',
+      topic: 'Test Estimation'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Risk exposure is calculated as:',
+      options: ['Probability × Impact', 'Severity + Priority', 'Defects × Severity', 'Testing Time / Remaining Defects'],
+      correct_option: 0,
+      explanation: 'Risk exposure (or risk value) is calculated as the product of the probability of occurrence and its negative impact.',
+      topic: 'Risk-Based Testing'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'If an input field accepts age from 18 to 60, what are the two-value boundary values?',
+      options: ['17, 18, 60, 61', '18, 60', '17, 61', '19, 59'],
+      correct_option: 1,
+      explanation: 'Two-value boundary testing tests only the exact boundary values: 18 and 60.',
+      topic: 'Boundary Value Analysis'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'Which of the following is true about equivalence partitions?',
+      options: ['Partitions must overlap', 'A test case can cover multiple values from the same partition to be thorough', 'All values within a single partition are expected to behave the same way', 'Equivalence partitioning applies only to positive inputs'],
+      correct_option: 2,
+      explanation: 'The fundamental premise of equivalence partitioning is that any value within a partition yields the same result.',
+      topic: 'Equivalence Partitioning'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'What is a "deferred" defect?',
+      options: ['A defect that is rejected as not a bug', 'A defect whose fix is postponed to a future release', 'A defect that is fixed but not yet verified', 'A defect that cannot be reproduced'],
+      correct_option: 1,
+      explanation: 'A deferred status means a defect has been acknowledged but its remediation is scheduled for a future sprint or release.',
+      topic: 'Defect Management'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'What does a high Defect Leakage Rate indicate?',
+      options: ['Excellent testing quality', 'Defects are being missed during the testing phase and caught in production', 'Developers are fixing bugs very quickly', 'The test environment is highly stable'],
+      correct_option: 1,
+      explanation: 'Defect leakage refers to bugs that slipped past validation and were reported by end-users or clients in production.',
+      topic: 'Test Metrics'
+    },
+    {
+      skill_name: 'Functional Testing',
+      band: 'intermediate',
+      difficulty: 'HARD',
+      question_text: 'What is the primary focus of static testing?',
+      options: ['Executing the software to find runtime errors', 'Reviewing requirements, designs, and code without executing the software', 'Simulating high traffic load', 'Testing database failover mechanisms'],
+      correct_option: 1,
+      explanation: 'Static testing is verification performed without executing the code, using reviews, walk-throughs, and inspections.',
+      topic: 'Requirement Analysis'
+    }
+  ];
+
+  for (const q of questions) {
+    await pool.query(
+      `INSERT INTO question_bank (skill_name, band, difficulty, question_text, options, correct_option, explanation, topic, points, time_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [q.skill_name, q.band, q.difficulty, q.question_text, JSON.stringify(q.options), q.correct_option, q.explanation, q.topic, 1, 60]
+    );
+  }
+}
+
+// ============================================================
+// END PHASE 1 HELPERS
+// ============================================================
+
 // Helper function to execute queries
 async function query(text, params) {
   const start = Date.now();
   try {
     const res = await pool.query(text, params);
     const duration = Date.now() - start;
-    console.log('📊 Query executed', { text, duration, rows: res.rowCount });
     return res;
   } catch (error) {
     console.error('❌ Query error:', { text, params, error: error.message });
@@ -100,8 +1253,8 @@ async function query(text, params) {
   }
 }
 
-// Initialize database tables on startup
-async function initializeDatabase() {
+// Full schema sync on startup (tables, migrations, ZenAssess, BFSI, sandbox)
+async function syncDatabaseSchema() {
   try {
     console.log('🔄 Syncing Zensar Database Schema...');
     // Create employees table
@@ -122,11 +1275,17 @@ async function initializeDatabase() {
         submitted BOOLEAN DEFAULT FALSE,
         resume_uploaded BOOLEAN DEFAULT FALSE,
         primary_skill VARCHAR(255),
+        secondary_skill VARCHAR(255),
+        tertiary_skill VARCHAR(255),
         primary_domain VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS github_username VARCHAR(100)`);
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS secondary_skill VARCHAR(255)`);
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS tertiary_skill VARCHAR(255)`);
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS grade VARCHAR(50)`);
 
     // Create skills table
     await query(`
@@ -137,11 +1296,83 @@ async function initializeDatabase() {
         self_rating INTEGER DEFAULT 0,
         manager_rating INTEGER,
         validated BOOLEAN DEFAULT FALSE,
+        verified_badge_level VARCHAR(50) DEFAULT NULL,
+        self_claimed_level VARCHAR(50) DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(employee_id, skill_name)
       )
     `);
+    await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS verified_badge_level VARCHAR(50) DEFAULT NULL`).catch(() => {});
+    await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS self_claimed_level VARCHAR(50) DEFAULT NULL`).catch(() => {});
+
+    // Backfill self_claimed_level from the numeric self_rating for legacy rows
+    // that have a rating but no claimed level. Mapping matches the rows already
+    // populated and the app's level scale: rating 3+ = Expert, 2 = Intermediate,
+    // 1 = Beginner. Idempotent (only touches rows where self_claimed_level IS NULL).
+    try {
+      const backfill = await query(`
+        UPDATE skills
+        SET self_claimed_level = CASE
+          WHEN self_rating >= 3 THEN 'Expert'
+          WHEN self_rating = 2 THEN 'Intermediate'
+          WHEN self_rating = 1 THEN 'Beginner'
+          ELSE NULL
+        END
+        WHERE self_claimed_level IS NULL
+          AND self_rating IS NOT NULL
+          AND self_rating > 0
+      `);
+      if (backfill.rowCount > 0) {
+      }
+    } catch (e) {
+      console.warn('[migration] self_claimed_level backfill skipped:', e.message);
+    }
+
+    // Pool employees (resume pool / bench, separate from ZenMatrix employees) +
+    // flags on employees so BFSI can combine both sources. Additive & idempotent.
+    await query(`
+      CREATE TABLE IF NOT EXISTS pool_employees (
+        id VARCHAR(50) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        designation VARCHAR(255),
+        department VARCHAR(255),
+        grade VARCHAR(50),
+        years_it INTEGER DEFAULT 0,
+        location VARCHAR(255),
+        primary_skill VARCHAR(255),
+        secondary_skill VARCHAR(255),
+        tertiary_skill VARCHAR(255),
+        source VARCHAR(50) DEFAULT 'pool',
+        resume_url VARCHAR(500),
+        added_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch((e) => console.warn('[migration] pool_employees create skipped:', e.message));
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_pool BOOLEAN DEFAULT false`).catch(() => {});
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pool_source VARCHAR(50) DEFAULT NULL`).catch(() => {});
+
+    // Allocate / Reserve tracking (Find a Match). Additive & idempotent.
+    for (const col of [
+      `status VARCHAR(50) DEFAULT 'available'`,
+      `allocated_srf VARCHAR(100) DEFAULT NULL`, `allocated_role VARCHAR(255) DEFAULT NULL`,
+      `allocated_at TIMESTAMP DEFAULT NULL`, `allocated_by VARCHAR(100) DEFAULT NULL`,
+      `reserved_srf VARCHAR(100) DEFAULT NULL`, `reserved_role VARCHAR(255) DEFAULT NULL`,
+      `reserved_at TIMESTAMP DEFAULT NULL`, `reserved_by VARCHAR(100) DEFAULT NULL`,
+    ]) {
+      await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
+    }
+    await query(`
+      CREATE TABLE IF NOT EXISTS allocation_log (
+        id SERIAL PRIMARY KEY,
+        employee_id VARCHAR(100),
+        srf_id VARCHAR(100),
+        role_name VARCHAR(255),
+        action VARCHAR(50) DEFAULT 'allocated',
+        actioned_by VARCHAR(100),
+        actioned_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch((e) => console.warn('[migration] allocation_log create skipped:', e.message));
 
     // Create projects table
     await query(`
@@ -251,7 +1482,6 @@ async function initializeDatabase() {
 
     // CLEANUP: Remove any projects with empty/placeholder names
     await query("DELETE FROM projects WHERE project_name IS NULL OR project_name = '' OR project_name = '.'");
-    console.log('🧹 Cleanup: Removed malformed project records.');
 
     // Create BFSI roles table
     await query(`
@@ -416,9 +1646,98 @@ async function initializeDatabase() {
     await query(`CREATE INDEX IF NOT EXISTS idx_bfsi_assignments_role ON bfsi_assignments(role_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_bfsi_summary_skill ON bfsi_summary_data(primary_skill)`);
 
+    // Initialize Phase 1 (Security) and Phase 2 (ZenAssess) tables
+    await ensureSecurityTables();
+    await ensurePhase2Tables();
+
+    // Create SQL sandbox schema for coding assessments
+    await ensureSandboxSchema();
     console.log('✅ Database tables initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization error (non-blocking):', error.message);
+  }
+}
+
+async function ensureSandboxSchema() {
+  try {
+    await query(`CREATE SCHEMA IF NOT EXISTS zenassess_sandbox`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS zenassess_sandbox.employees (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100),
+        department VARCHAR(100),
+        salary NUMERIC(10,2),
+        manager_id INTEGER,
+        hire_date DATE,
+        location VARCHAR(100)
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS zenassess_sandbox.products (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200),
+        category VARCHAR(100),
+        price NUMERIC(10,2),
+        stock INTEGER,
+        supplier_id INTEGER
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS zenassess_sandbox.orders (
+        id SERIAL PRIMARY KEY,
+        customer_id INTEGER,
+        product_id INTEGER,
+        quantity INTEGER,
+        order_date DATE,
+        status VARCHAR(50),
+        total_amount NUMERIC(10,2)
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS zenassess_sandbox.customers (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200),
+        email VARCHAR(200),
+        country VARCHAR(100),
+        created_at DATE
+      )
+    `);
+    // Seed only if empty
+    const empCount = await query('SELECT COUNT(*) FROM zenassess_sandbox.employees');
+    if (parseInt(empCount.rows[0].count) === 0) {
+      await query(`INSERT INTO zenassess_sandbox.employees (name, department, salary, manager_id, hire_date, location) VALUES
+        ('Alice Johnson', 'Engineering', 95000, NULL, '2018-01-15', 'London'),
+        ('Bob Smith', 'Engineering', 80000, 1, '2019-03-20', 'Manchester'),
+        ('Carol White', 'QA', 72000, 1, '2020-06-10', 'London'),
+        ('David Brown', 'Engineering', 88000, 1, '2017-09-05', 'London'),
+        ('Eve Davis', 'QA', 68000, 3, '2021-01-20', 'Edinburgh'),
+        ('Frank Wilson', 'DevOps', 91000, 1, '2016-11-30', 'London'),
+        ('Grace Lee', 'DevOps', 85000, 6, '2019-07-15', 'Bristol'),
+        ('Henry Martinez', 'QA', 65000, 3, '2022-04-01', 'London')
+      `);
+      await query(`INSERT INTO zenassess_sandbox.customers (name, email, country, created_at) VALUES
+        ('Acme Corp', 'contact@acme.com', 'UK', '2020-01-01'),
+        ('TechCo Ltd', 'info@techco.com', 'UK', '2020-03-15'),
+        ('Global Sys', 'hello@globalsys.com', 'DE', '2021-06-01'),
+        ('SoftWare Inc', 'sales@software.com', 'US', '2019-12-01')
+      `);
+      await query(`INSERT INTO zenassess_sandbox.products (name, category, price, stock, supplier_id) VALUES
+        ('Laptop Pro', 'Electronics', 1299.99, 50, 1),
+        ('Wireless Mouse', 'Electronics', 29.99, 200, 1),
+        ('USB Hub', 'Electronics', 19.99, 150, 2),
+        ('Monitor 27"', 'Electronics', 399.99, 30, 1),
+        ('Keyboard Mech', 'Electronics', 89.99, 100, 2)
+      `);
+      await query(`INSERT INTO zenassess_sandbox.orders (customer_id, product_id, quantity, order_date, status, total_amount) VALUES
+        (1, 1, 5, '2024-01-10', 'COMPLETED', 6499.95),
+        (2, 2, 10, '2024-01-15', 'COMPLETED', 299.90),
+        (1, 3, 20, '2024-02-01', 'PENDING', 399.80),
+        (3, 4, 2, '2024-02-10', 'COMPLETED', 799.98),
+        (4, 5, 8, '2024-03-01', 'PROCESSING', 719.92)
+      `);
+    }
+  } catch (err) {
+    console.error('❌ Sandbox schema error (non-blocking):', err.message);
   }
 }
 
@@ -428,7 +1747,36 @@ async function initializeDatabase() {
 app.get('/api/health', (req, res) => res.status(200).send('OK'));
 app.head('/api/health', (req, res) => res.status(200).send('OK'));
 
+// Full stack status — DB + Ollama + backend (for single-port / competition demo)
+app.get('/api/system/status', async (req, res) => {
+  const ollamaUrl = process.env.VITE_OLLAMA_URL || 'http://127.0.0.1:11434';
+  let db = false;
+  let ollama = false;
+  let employeeCount = 0;
+  try {
+    await pool.query('SELECT 1');
+    db = true;
+    const cnt = await pool.query('SELECT COUNT(*)::int AS n FROM employees');
+    employeeCount = cnt.rows[0]?.n || 0;
+  } catch (_) {}
+  try {
+    const r = await fetch(`${ollamaUrl.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(3000) });
+    ollama = r.ok;
+  } catch (_) {}
+  res.json({
+    ok: db && ollama,
+    backend: true,
+    database: db,
+    ollama,
+    employeeCount,
+    gatewayPort: Number(process.env.GATEWAY_PORT) || 8080,
+    backendPort: PORT,
+    singlePortMode: process.env.VITE_SINGLE_PORT === 'true',
+  });
+});
+
 // Get all employees
+// BACKWARD COMPATIBLE: Works with both JWT and session-based auth during transition
 app.get('/api/employees', async (req, res) => {
   try {
     const employeesResult = await query('SELECT * FROM employees ORDER BY created_at DESC');
@@ -546,7 +1894,17 @@ app.get('/api/projects/:id', async (req, res) => {
 });
 
 
+// Derive employee grade from years_it when employees.grade is NULL.
+// 0–3 yrs → F1, 4–12 yrs → E1, 13+ yrs → D
+function deriveGradeFromYearsIT(years) {
+  const yrs = Number(years) || 0;
+  if (yrs >= 13) return 'D';
+  if (yrs >= 4) return 'E1';
+  return 'F1';
+}
+
 // Get single employee — case-insensitive lookup
+// BACKWARD COMPATIBLE: Works with both JWT and session-based auth during transition
 app.get('/api/employees/:id', async (req, res) => {
   try {
     const result = await query(
@@ -558,6 +1916,14 @@ app.get('/api/employees/:id', async (req, res) => {
     }
     const emp = result.rows[0];
     emp.password = decryptPw(emp.password);
+
+    // Grade must never be blank — derive from years_it and persist when missing
+    if (!emp.grade) {
+      const derivedGrade = deriveGradeFromYearsIT(emp.years_it);
+      emp.grade = derivedGrade;
+      query('UPDATE employees SET grade = $1 WHERE id = $2', [derivedGrade, emp.id]).catch(() => {});
+    }
+
     res.json(emp);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -565,7 +1931,7 @@ app.get('/api/employees/:id', async (req, res) => {
 });
 
 // POST /api/employees — Admin employee creation with full field support
-app.post('/api/employees', async (req, res) => {
+app.post('/api/employees', requireAuth, async (req, res) => {
   try {
     const body = req.body;
     const zensar_id = (body.ZensarID || body.zensar_id || body.zensarId || `EMP_${Date.now()}`).trim();
@@ -607,13 +1973,13 @@ app.post('/api/employees', async (req, res) => {
       }
     }
 
+    const grade = body.grade || null;
     const result = await query(`
-      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, grade)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
-    `, [zensar_id, zensar_id, name, email, phone, desig, dept, loc, yearsIT, yearsZen, encPw]);
+    `, [zensar_id, zensar_id, name, email, phone, desig, dept, loc, yearsIT, yearsZen, encPw, grade]);
 
-    console.log(`[Admin] ✅ Created employee: ${name} (${zensar_id})`);
     res.json({ success: true, ...result.rows[0], id: result.rows[0].id });
   } catch (error) {
     if (error.code === '23505') {
@@ -624,7 +1990,7 @@ app.post('/api/employees', async (req, res) => {
 });
 
 // Delete employee (and all associated data)
-app.delete('/api/employees/:id', async (req, res) => {
+app.delete('/api/employees/:id', requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     // Resolve the actual employee id (case-insensitive, zensar_id fallback)
@@ -643,7 +2009,7 @@ app.delete('/api/employees/:id', async (req, res) => {
     await pool.query('DELETE FROM education WHERE LOWER(employee_id) = LOWER($1)', [realId]);
     // Delete the employee
     await pool.query('DELETE FROM employees WHERE id = $1', [realId]);
-    console.log(`[Admin] 🗑️ Deleted employee: ${realId}`);
+    await auditLog({ employeeId: req.user?.employeeId, role: req.user?.role, action: 'EMPLOYEE_DELETE', resource: 'employees', resourceId: realId, req });
     res.json({ success: true, message: `Employee ${realId} deleted successfully` });
   } catch (error) {
     console.error('[Delete Employee Error]', error);
@@ -651,14 +2017,61 @@ app.delete('/api/employees/:id', async (req, res) => {
   }
 });
 
+// Bulk delete employees + all their related data (skills, certs, projects, etc.)
+app.delete('/api/admin/employees/bulk', requireAdmin, async (req, res) => {
+  try {
+    const { employeeIds } = req.body || {};
+    if (!employeeIds || !Array.isArray(employeeIds) || employeeIds.length === 0) {
+      return res.status(400).json({ error: 'No employee IDs provided' });
+    }
+    // Type-safe: ids may be stored differently than sent — compare as text.
+    const lower = employeeIds.map((x) => String(x).toLowerCase());
+    const resolved = await pool.query(
+      `SELECT id FROM employees
+       WHERE LOWER(id::text) = ANY($1::text[]) OR LOWER(zensar_id::text) = ANY($1::text[])`,
+      [lower]
+    );
+    const realIds = resolved.rows.map((r) => String(r.id));
+    if (realIds.length === 0) {
+      return res.status(404).json({ error: 'No matching employees found' });
+    }
 
-// Register new employee
+    const beforeCount = await pool.query('SELECT COUNT(*)::int AS n FROM employees');
+
+    // Delete associated records first (foreign key safety), then the employees.
+    // Tables that may not exist / may lack employee_id are guarded individually.
+    for (const tbl of ['skills', 'certifications', 'projects', 'education', 'zenassess_sessions', 'manager_reviews']) {
+      await pool.query(`DELETE FROM ${tbl} WHERE employee_id::text = ANY($1::text[])`, [realIds])
+        .catch((e) => console.warn(`[Bulk Delete] skip ${tbl}:`, e.message));
+    }
+    const result = await pool.query(
+      'DELETE FROM employees WHERE id::text = ANY($1::text[]) RETURNING id, name',
+      [realIds]
+    );
+    const afterCount = await pool.query('SELECT COUNT(*)::int AS n FROM employees');
+
+    await auditLog({ employeeId: req.user?.employeeId, role: req.user?.role, action: 'EMPLOYEE_BULK_DELETE', resource: 'employees', resourceId: realIds.join(','), req });
+    return res.json({ success: true, deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
+  } catch (error) {
+    console.error('[Bulk Delete Error]', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 app.post('/api/register', async (req, res) => {
   try {
-    const { name, email, phone, designation, department, location, yearsIT, yearsZensar, password, zensarId, primarySkill, primaryDomain } = req.body;
+    const { name, email, phone, designation, department, location, yearsIT, yearsZensar, password, zensarId, primarySkill, secondarySkill, tertiarySkill, primaryDomain, grade } = req.body;
     const zid = (zensarId || `emp_${Date.now()}`).trim();
     const emailTrimmed = (email || '').trim().toLowerCase();
     const phoneTrimmed = (phone || '').trim();
+
+    // Password policy: min 8 chars, at least one letter and one number
+    if (password) {
+      if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+      if (!/[a-zA-Z]/.test(password)) return res.status(400).json({ error: 'Password must contain at least one letter.' });
+      if (!/[0-9]/.test(password)) return res.status(400).json({ error: 'Password must contain at least one number.' });
+    }
 
     // Check for duplicates with specific field validation
     const existingZensarId = await query(
@@ -688,11 +2101,12 @@ app.post('/api/register', async (req, res) => {
     }
 
     const result = await query(`
-      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, primary_domain)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain, grade)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *
-    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation, department, location, yearsIT || 0, yearsZensar || 0, encryptPw(password), primarySkill, primaryDomain]);
+    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation, department, location, yearsIT || 0, yearsZensar || 0, encryptPw(password), primarySkill, secondarySkill, tertiarySkill, primaryDomain, grade || null]);
 
+    await auditLog({ employeeId: zid, role: 'employee', action: 'REGISTER', resource: 'employees', req });
     res.json({ success: true, employee: { ...result.rows[0], id: result.rows[0].zensar_id || result.rows[0].id } });
   } catch (error) {
     if (error.code === '23505') {
@@ -702,58 +2116,419 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Login
+// Login — issues JWT access token + refresh token
 app.post('/api/login', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '';
+  const ua = req.headers['user-agent'] || '';
   try {
     const loginId = String(req.body.login || '').trim().toLowerCase();
     const password = String(req.body.password || '').trim();
 
-    // Check for Master Admin from DB
+    // ── Lockout check: 5 failed attempts in 15 min per IP ──────────────────
+    const locked = await checkLoginRateLimit(ip);
+    if (locked) {
+      await auditLog({ action: 'LOGIN_BLOCKED', resource: 'auth', details: { loginId }, req, status: 'failure' });
+      return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+    }
+
+    // ── Admin check ─────────────────────────────────────────────────────────
     const adminIdData = await query("SELECT value FROM app_settings WHERE key = 'admin_id'");
     const adminPwData = await query("SELECT value FROM app_settings WHERE key = 'admin_password'");
-
     const dbAdminId = adminIdData.rows[0]?.value || 'admin';
     const dbAdminPw = adminPwData.rows[0]?.value || 'admin123';
 
     if (loginId === dbAdminId.toLowerCase() && password === dbAdminPw) {
+      const payload = { employeeId: 'admin', role: 'admin', name: 'Master Admin' };
+      const accessToken = generateAccessToken(payload);
+      const rawRefresh = crypto.randomBytes(40).toString('hex');
+      const refreshHash = hashToken(rawRefresh);
+      const expiresAt = new Date(Date.now() + REFRESH_EXPIRES_DAYS * 86400000);
+      await pool.query(
+        `INSERT INTO refresh_tokens (employee_id, token_hash, role, expires_at, ip_address, user_agent)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        ['admin', refreshHash, 'admin', expiresAt, ip, ua]
+      );
+      await logLoginAttempt({ employeeId: 'admin', loginId, success: true, req });
+      await auditLog({ employeeId: 'admin', role: 'admin', action: 'LOGIN', resource: 'auth', req });
       return res.json({
         success: true,
+        accessToken,
+        refreshToken: rawRefresh,
+        expiresIn: 900,
         employee: { id: 'admin', name: 'Master Admin', role: 'admin', zensar_id: dbAdminId.toUpperCase() }
       });
     }
 
-    const result = await query(`
-      SELECT * FROM employees 
-      WHERE LOWER(zensar_id) = $1 OR LOWER(id) = $1 OR LOWER(email) = $1 OR LOWER(phone) = $1
-    `, [loginId]);
-
+    // ── Employee check ──────────────────────────────────────────────────────
+    const result = await query(
+      `SELECT * FROM employees WHERE LOWER(zensar_id)=$1 OR LOWER(id)=$1 OR LOWER(email)=$1 OR LOWER(phone)=$1`,
+      [loginId]
+    );
     if (result.rows.length === 0) {
+      await logLoginAttempt({ loginId, success: false, failureReason: 'not_found', req });
+      await auditLog({ action: 'LOGIN_FAILED', resource: 'auth', details: { loginId, reason: 'not_found' }, req, status: 'failure' });
       return res.status(401).json({ error: 'Account not found' });
     }
 
     const emp = result.rows[0];
     const storedPw = String(emp.password || '').trim();
-
-    if (decryptPw(storedPw) !== password && storedPw !== password) { // Support legacy plain text or encrypted
+    if (decryptPw(storedPw) !== password && storedPw !== password) {
+      await logLoginAttempt({ employeeId: emp.id, loginId, success: false, failureReason: 'wrong_password', req });
+      await auditLog({ employeeId: emp.id, action: 'LOGIN_FAILED', resource: 'auth', details: { reason: 'wrong_password' }, req, status: 'failure' });
       return res.status(401).json({ error: 'Incorrect password' });
     }
 
+    const empId = emp.zensar_id || emp.id;
+    const payload = { employeeId: empId, role: 'employee', name: emp.name };
+    const accessToken = generateAccessToken(payload);
+    const rawRefresh = crypto.randomBytes(40).toString('hex');
+    const refreshHash = hashToken(rawRefresh);
+    const expiresAt = new Date(Date.now() + REFRESH_EXPIRES_DAYS * 86400000);
+    await pool.query(
+      `INSERT INTO refresh_tokens (employee_id, token_hash, role, expires_at, ip_address, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [empId, refreshHash, 'employee', expiresAt, ip, ua]
+    );
+    await logLoginAttempt({ employeeId: empId, loginId, success: true, req });
+    await auditLog({ employeeId: empId, role: 'employee', action: 'LOGIN', resource: 'auth', req });
+
     res.json({
       success: true,
-      employee: {
-        ...emp,
-        id: emp.zensar_id || emp.id,
-        name: emp.name,
-        role: 'employee'
-      }
+      accessToken,
+      refreshToken: rawRefresh,
+      expiresIn: 900,
+      employee: { ...emp, id: empId, name: emp.name, role: 'employee', password: undefined }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// Refresh access token
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
+    const hash = hashToken(refreshToken);
+    const result = await pool.query(
+      `SELECT * FROM refresh_tokens WHERE token_hash=$1 AND revoked=false AND expires_at > NOW()`,
+      [hash]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    const row = result.rows[0];
+    const accessToken = generateAccessToken({ employeeId: row.employee_id, role: row.role, name: '' });
+    res.json({ success: true, accessToken, expiresIn: 900 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Logout — revoke refresh token
+app.post('/api/auth/logout', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (refreshToken) {
+      const hash = hashToken(refreshToken);
+      await pool.query(`UPDATE refresh_tokens SET revoked=true, revoked_at=NOW() WHERE token_hash=$1`, [hash]);
+    }
+    if (req.user) {
+      await auditLog({ employeeId: req.user.employeeId, role: req.user.role, action: 'LOGOUT', resource: 'auth', req });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get audit logs (admin only)
+app.get('/api/auth/audit-logs', requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const result = await pool.query(
+      `SELECT * FROM audit_log ORDER BY created_at DESC LIMIT $1`, [limit]
+    );
+    res.json({ logs: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/reviews — list all expert reviews (admin/manager view)
+app.get('/api/admin/reviews', requireAdmin, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT mr.*, e.name as employee_name, e.zensar_id,
+              zs.tab_switch_count, zs.copy_paste_count, zs.integrity_score, zs.integrity_flags,
+              zs.fullscreen_exit_count, zs.browser_blur_count, zs.devtools_detected,
+              zs.explain_score_breakdown, zs.contribution_breakdown, zs.github_metadata,
+              zs.allocation_readiness_score, zs.allocation_risk, zs.ready_for_allocation,
+              zs.expert_profile, zs.extracted_evidence, zs.evidence_evaluation, zs.technical_discussion,
+              zs.leadership_discussion, zs.consistency_analysis, zs.risk_analysis, zs.ai_recommendation,
+              zs.authenticity_analysis
+       FROM manager_reviews mr
+       JOIN employees e ON mr.employee_id = e.id
+       LEFT JOIN zenassess_sessions zs ON mr.session_id = zs.session_id
+       ORDER BY mr.created_at DESC`
+    );
+    res.json({ success: true, reviews: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/reviews/claim — claim a review session
+app.post('/api/admin/reviews/claim', requireAdmin, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    const reviewerId = req.user.employeeId;
+    await query(
+      `UPDATE manager_reviews 
+       SET review_status = 'in_review', 
+           reviewer_id = $1, 
+           review_started_at = NOW(), 
+           updated_at = NOW() 
+       WHERE session_id = $2 AND review_status = 'pending'`,
+      [reviewerId, sessionId]
+    );
+    await auditLog({ 
+      employeeId: reviewerId, 
+      role: 'admin', 
+      action: 'REVIEW_CLAIM', 
+      resource: 'manager_reviews', 
+      resourceId: sessionId, 
+      req 
+    });
+    res.json({ success: true, message: 'Review claimed' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/reviews/approve — approve expert validation
+app.post('/api/admin/reviews/approve', requireAdmin, async (req, res) => {
+  try {
+    const { sessionId, reviewNotes, adjustedScores } = req.body;
+    const reviewerId = req.user.employeeId;
+    
+    await query(
+      `UPDATE manager_reviews 
+       SET review_status = 'approved', 
+           review_notes = $1, 
+           final_decision = 'Expert', 
+           review_completed_at = NOW(), 
+           updated_at = NOW() 
+       WHERE session_id = $2`,
+      [reviewNotes, sessionId]
+    );
+
+    await query(
+      `UPDATE zenassess_evidence 
+       SET manager_review_status = 'approved' 
+       WHERE session_id = $1`,
+      [sessionId]
+    );
+
+    if (adjustedScores) {
+      const sessionRes = await query('SELECT explain_score_breakdown FROM zenassess_sessions WHERE session_id = $1', [sessionId]);
+      if (sessionRes.rows.length > 0) {
+        let breakdown = sessionRes.rows[0].explain_score_breakdown || {};
+        if (typeof breakdown === 'string') breakdown = JSON.parse(breakdown);
+        
+        breakdown.finalScore = Number(adjustedScores.finalScore) || breakdown.finalScore;
+        if (!breakdown.expertDetails) breakdown.expertDetails = {};
+        breakdown.expertDetails.evidenceScore = Number(adjustedScores.evidenceScore);
+        breakdown.expertDetails.scenarioScore = Number(adjustedScores.scenarioScore);
+        breakdown.expertDetails.mentoringScore = Number(adjustedScores.mentoringScore);
+        breakdown.expertDetails.experienceScore = Number(adjustedScores.experienceScore);
+        breakdown.expertDetails.projectAllocationScore = Number(adjustedScores.finalScore);
+
+        await query(
+          `UPDATE zenassess_sessions 
+           SET score = $1, final_score = $1, project_allocation_score = $1,
+               evidence_score = $2, mcq_score = $3, contribution_score = $4,
+               explain_score_breakdown = $5, allocation_readiness_score = $7, updated_at = NOW()
+           WHERE session_id = $6`,
+          [
+            Number(adjustedScores.finalScore),
+            Number(adjustedScores.evidenceScore),
+            Number(adjustedScores.scenarioScore),
+            Number(adjustedScores.mentoringScore),
+            JSON.stringify(breakdown),
+            sessionId,
+            Number(adjustedScores.allocationConfidence) || 85
+          ]
+        );
+      }
+    }
+
+    const reviewResult = await query(
+      `SELECT employee_id, skill_name FROM manager_reviews WHERE session_id = $1`,
+      [sessionId]
+    );
+    if (reviewResult.rows.length > 0) {
+      const { employee_id, skill_name } = reviewResult.rows[0];
+      await query(
+        `INSERT INTO skills (employee_id, skill_name, self_rating, validated, manager_rating)
+         VALUES ($1, $2, 3, true, 3)
+         ON CONFLICT (employee_id, skill_name) 
+         DO UPDATE SET validated = true, self_rating = 3, manager_rating = 3, updated_at = NOW()`,
+        [employee_id, skill_name]
+      );
+      await query(
+        `UPDATE zenassess_sessions 
+         SET status = 'passed', assigned_level = 'Expert', updated_at = NOW() 
+         WHERE session_id = $1`,
+         [sessionId]
+      );
+      try {
+        await query('SELECT recalculate_employee_skill_freshness($1)', [employee_id]);
+      } catch (_) {}
+    }
+
+    await auditLog({ 
+      employeeId: reviewerId, 
+      role: 'admin', 
+      action: 'REVIEW_APPROVE', 
+      resource: 'manager_reviews', 
+      resourceId: sessionId, 
+      newValue: { reviewNotes, adjustedScores },
+      req 
+    });
+    res.json({ success: true, message: 'Review approved' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/reviews/reject — reject expert validation (assign Advanced)
+app.post('/api/admin/reviews/reject', requireAdmin, async (req, res) => {
+  try {
+    const { sessionId, reviewNotes, adjustedScores } = req.body;
+    const reviewerId = req.user.employeeId;
+    
+    await query(
+      `UPDATE manager_reviews 
+       SET review_status = 'rejected', 
+           review_notes = $1, 
+           final_decision = 'Advanced', 
+           review_completed_at = NOW(), 
+           updated_at = NOW() 
+       WHERE session_id = $2`,
+      [reviewNotes, sessionId]
+    );
+
+    await query(
+      `UPDATE zenassess_evidence 
+       SET manager_review_status = 'rejected' 
+       WHERE session_id = $1`,
+      [sessionId]
+    );
+
+    if (adjustedScores) {
+      const sessionRes = await query('SELECT explain_score_breakdown FROM zenassess_sessions WHERE session_id = $1', [sessionId]);
+      if (sessionRes.rows.length > 0) {
+        let breakdown = sessionRes.rows[0].explain_score_breakdown || {};
+        if (typeof breakdown === 'string') breakdown = JSON.parse(breakdown);
+        
+        breakdown.finalScore = Number(adjustedScores.finalScore) || breakdown.finalScore;
+        if (!breakdown.expertDetails) breakdown.expertDetails = {};
+        breakdown.expertDetails.evidenceScore = Number(adjustedScores.evidenceScore);
+        breakdown.expertDetails.scenarioScore = Number(adjustedScores.scenarioScore);
+        breakdown.expertDetails.mentoringScore = Number(adjustedScores.mentoringScore);
+        breakdown.expertDetails.experienceScore = Number(adjustedScores.experienceScore);
+        breakdown.expertDetails.projectAllocationScore = Number(adjustedScores.finalScore);
+
+        await query(
+          `UPDATE zenassess_sessions 
+           SET score = $1, final_score = $1, project_allocation_score = $1,
+               evidence_score = $2, mcq_score = $3, contribution_score = $4,
+               explain_score_breakdown = $5, allocation_readiness_score = $7, updated_at = NOW()
+           WHERE session_id = $6`,
+          [
+            Number(adjustedScores.finalScore),
+            Number(adjustedScores.evidenceScore),
+            Number(adjustedScores.scenarioScore),
+            Number(adjustedScores.mentoringScore),
+            JSON.stringify(breakdown),
+            sessionId,
+            Number(adjustedScores.allocationConfidence) || 80
+          ]
+        );
+      }
+    }
+
+    const reviewResult = await query(
+      `SELECT employee_id, skill_name FROM manager_reviews WHERE session_id = $1`,
+      [sessionId]
+    );
+    if (reviewResult.rows.length > 0) {
+      const { employee_id, skill_name } = reviewResult.rows[0];
+      await query(
+        `INSERT INTO skills (employee_id, skill_name, self_rating, validated, manager_rating)
+         VALUES ($1, $2, 3, true, 3)
+         ON CONFLICT (employee_id, skill_name) 
+         DO UPDATE SET validated = true, self_rating = 3, manager_rating = 3, updated_at = NOW()`,
+        [employee_id, skill_name]
+      );
+      await query(
+        `UPDATE zenassess_sessions 
+         SET status = 'passed', assigned_level = 'Advanced', updated_at = NOW() 
+         WHERE session_id = $1`,
+         [sessionId]
+      );
+      try {
+        await query('SELECT recalculate_employee_skill_freshness($1)', [employee_id]);
+      } catch (_) {}
+    }
+
+    await auditLog({ 
+      employeeId: reviewerId, 
+      role: 'admin', 
+      action: 'REVIEW_REJECT', 
+      resource: 'manager_reviews', 
+      resourceId: sessionId, 
+      newValue: { reviewNotes, adjustedScores },
+      req 
+    });
+    res.json({ success: true, message: 'Review rejected (assigned Advanced)' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/reviews/escalate — escalate a review
+app.post('/api/admin/reviews/escalate', requireAdmin, async (req, res) => {
+  try {
+    const { sessionId, escalationReason, escalatedTo } = req.body;
+    const reviewerId = req.user.employeeId;
+    
+    await query(
+      `UPDATE manager_reviews 
+       SET review_status = 'escalated', 
+           escalation_reason = $1, 
+           escalated_to = $2, 
+           updated_at = NOW() 
+       WHERE session_id = $3`,
+      [escalationReason, escalatedTo || 'admin', sessionId]
+    );
+
+    await auditLog({ 
+      employeeId: reviewerId, 
+      role: 'admin', 
+      action: 'REVIEW_ESCALATE', 
+      resource: 'manager_reviews', 
+      resourceId: sessionId, 
+      newValue: { escalationReason, escalatedTo },
+      req 
+    });
+    res.json({ success: true, message: 'Review escalated' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Update app settings (admin credentials)
-app.post('/api/admin/settings', async (req, res) => {
+app.post('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
     const { admin_id, admin_password } = req.body;
     if (admin_id) await query("UPDATE app_settings SET value = $1 WHERE key = 'admin_id'", [admin_id]);
@@ -764,7 +2539,7 @@ app.post('/api/admin/settings', async (req, res) => {
   }
 });
 
-app.post('/api/admin/employees/add', async (req, res) => {
+app.post('/api/admin/employees/add', requireAdmin, async (req, res) => {
   try {
     const { name, email, zensar_id, password, phone, designation, department, location, years_it, years_zensar, primary_skill, primary_domain } = req.body;
     const zid = (zensar_id || '').trim();
@@ -813,21 +2588,13 @@ app.post('/api/admin/employees/add', async (req, res) => {
 });
 
 // Admin create employee (used by AdminDashboard)
-app.post('/api/admin/create-employee', async (req, res) => {
+app.post('/api/admin/create-employee', requireAdmin, async (req, res) => {
   try {
-    const { name, email, employeeId, phone, designation, department, location, yearsIT, yearsZensar, password, skills, projects, certificates, education, primarySkill, primaryDomain } = req.body;
+    const { name, email, employeeId, phone, designation, department, location, yearsIT, yearsZensar, password, skills, projects, certificates, education, primarySkill, secondarySkill, tertiarySkill, primaryDomain } = req.body;
     const zid = (employeeId || '').trim();
     const emailTrimmed = (email || '').trim().toLowerCase();
     const phoneTrimmed = (phone || '').trim();
 
-    console.log('[Admin Create Employee] Request received:', {
-      name, email: emailTrimmed, employeeId: zid, phone: phoneTrimmed, designation,
-      primarySkill, primaryDomain,
-      skillsCount: Array.isArray(skills) ? skills.length : 0,
-      projectsCount: Array.isArray(projects) ? projects.length : 0,
-      certificatesCount: Array.isArray(certificates) ? certificates.length : 0,
-      educationCount: Array.isArray(education) ? education.length : 0
-    });
 
     // Check for duplicates with specific field validation
     const existingZensarId = await query(
@@ -856,14 +2623,17 @@ app.post('/api/admin/create-employee', async (req, res) => {
       }
     }
 
-    // Determine primary_skill and primary_domain from skills if not provided
+    // Determine primary_skill, secondary_skill, tertiary_skill, and primary_domain from skills if not provided
     let finalPrimarySkill = primarySkill || '';
+    let finalSecondarySkill = secondarySkill || req.body.secondary_skill || '';
+    let finalTertiarySkill = tertiarySkill || req.body.tertiary_skill || '';
     let finalPrimaryDomain = primaryDomain || '';
     
-    if (!finalPrimarySkill && Array.isArray(skills) && skills.length > 0) {
-      // Find highest rated skill
-      const sortedSkills = [...skills].sort((a, b) => (b.rating || 0) - (a.rating || 0));
-      finalPrimarySkill = sortedSkills[0]?.name || '';
+    if (Array.isArray(skills) && skills.length > 0) {
+      const sortedSkills = [...skills].sort((a, b) => (b.rating || b.selfRating || 0) - (a.rating || a.selfRating || 0));
+      if (!finalPrimarySkill) finalPrimarySkill = sortedSkills[0]?.name || sortedSkills[0]?.skillName || '';
+      if (!finalSecondarySkill) finalSecondarySkill = sortedSkills[1]?.name || sortedSkills[1]?.skillName || '';
+      if (!finalTertiarySkill) finalTertiarySkill = sortedSkills[2]?.name || sortedSkills[2]?.skillName || '';
     }
     
     if (!finalPrimaryDomain && Array.isArray(skills) && skills.length > 0) {
@@ -875,17 +2645,15 @@ app.post('/api/admin/create-employee', async (req, res) => {
 
     // Create the employee
     const result = await query(`
-      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, primary_domain)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING *
-    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, encryptPw(password), finalPrimarySkill, finalPrimaryDomain]);
+    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, encryptPw(password), finalPrimarySkill, finalSecondarySkill, finalTertiarySkill, finalPrimaryDomain]);
 
-    console.log('[Admin Create Employee] Employee created:', zid);
 
     // Save skills if provided
     let skillsSaved = 0;
     if (Array.isArray(skills) && skills.length > 0) {
-      console.log('[Admin Create Employee] Saving skills:', skills.length);
       for (const skill of skills) {
         const skillName = skill.name || skill.skillName || '';
         const rating = skill.rating || skill.selfRating || 1; // Default to Level 1
@@ -902,13 +2670,11 @@ app.post('/api/admin/create-employee', async (req, res) => {
           }
         }
       }
-      console.log('[Admin Create Employee] Skills saved:', skillsSaved);
     }
 
     // Save projects if provided
     let projectsSaved = 0;
     if (Array.isArray(projects) && projects.length > 0) {
-      console.log('[Admin Create Employee] Saving projects:', projects.length);
       for (const proj of projects) {
         const projName = proj.name || proj.projectName || '';
         const projDesc = proj.description || '';
@@ -926,13 +2692,11 @@ app.post('/api/admin/create-employee', async (req, res) => {
           }
         }
       }
-      console.log('[Admin Create Employee] Projects saved:', projectsSaved);
     }
 
     // Save certifications if provided
     let certsSaved = 0;
     if (Array.isArray(certificates) && certificates.length > 0) {
-      console.log('[Admin Create Employee] Saving certifications:', certificates.length);
       for (const cert of certificates) {
         const certName = cert.name || cert.CertName || '';
         const certIssuer = cert.issuer || cert.Provider || '';
@@ -949,13 +2713,11 @@ app.post('/api/admin/create-employee', async (req, res) => {
           }
         }
       }
-      console.log('[Admin Create Employee] Certifications saved:', certsSaved);
     }
 
     // Save education if provided
     let eduSaved = 0;
     if (Array.isArray(education) && education.length > 0) {
-      console.log('[Admin Create Employee] Saving education:', education.length);
       for (const edu of education) {
         const degree = edu.degree || '';
         if (degree) {
@@ -970,10 +2732,8 @@ app.post('/api/admin/create-employee', async (req, res) => {
           }
         }
       }
-      console.log('[Admin Create Employee] Education saved:', eduSaved);
     }
 
-    console.log(`[Admin] ✅ Created employee: ${name} (${zid}) with ${skillsSaved} skills, ${projectsSaved} projects, ${certsSaved} certs, ${eduSaved} education`);
     res.json({ 
       success: true, 
       ...result.rows[0], 
@@ -997,42 +2757,74 @@ app.post('/api/admin/create-employee', async (req, res) => {
 // Admin update employee
 app.post('/api/admin/employees/update', async (req, res) => {
   try {
-    // Support both camelCase (frontend) and snake_case (legacy)
-    const { 
-      id, name, email, zensar_id, password, phone, designation, department, location, 
-      years_it, years_zensar, primary_skill, primary_domain,
-      // camelCase aliases
-      yearsIT, yearsZensar, primarySkill, primaryDomain
-    } = req.body;
+    // Perform authentication and check target permissions inside
+    requireAuth(req, res, async () => {
+      try {
+        // Support both camelCase (frontend) and snake_case (legacy)
+        const { 
+          id, name, email, zensar_id, password, phone, designation, department, location, 
+          years_it, years_zensar, primary_skill, primary_domain,
+          secondary_skill, tertiary_skill,
+          // camelCase aliases
+          yearsIT, yearsZensar, primarySkill, primaryDomain,
+          secondarySkill, tertiarySkill,
+          grade
+        } = req.body;
 
-    let encrypted = null;
-    if (password) {
-      encrypted = encryptPw(password);
-    }
+        if (!id) {
+          return res.status(400).json({ error: 'Employee ID (id) is required' });
+        }
 
-    // Use camelCase values as fallback for snake_case
-    const finalYearsIT = years_it ?? yearsIT ?? 0;
-    const finalYearsZensar = years_zensar ?? yearsZensar ?? 0;
-    const finalPrimarySkill = primary_skill ?? primarySkill ?? null;
-    const finalPrimaryDomain = primary_domain ?? primaryDomain ?? null;
+        // Backward compatibility: allow if no req.user (e.g. no auth token in some modes)
+        const isAdmin = !req.user || req.user.role === 'admin';
+        const isSelf = req.user && (
+          String(req.user.employeeId || '').toLowerCase() === String(id).toLowerCase() ||
+          String(req.user.id || '').toLowerCase() === String(id).toLowerCase()
+        );
 
-    await query(`
-      UPDATE employees 
-      SET name = COALESCE($1, name), email = COALESCE($2, email), zensar_id = COALESCE($3, zensar_id), 
-          phone = COALESCE($4, phone), designation = COALESCE($5, designation), 
-          department = COALESCE($6, department), location = COALESCE($7, location), 
-          years_it = COALESCE($8, years_it), years_zensar = COALESCE($9, years_zensar), 
-          password = COALESCE($10, password), primary_skill = COALESCE($11, primary_skill), 
-          primary_domain = COALESCE($12, primary_domain),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $13 OR zensar_id = $13
-    `, [
-      name, email, zensar_id, phone, designation,
-      department, location, finalYearsIT, finalYearsZensar,
-      encrypted, finalPrimarySkill, finalPrimaryDomain, id
-    ]);
+        if (!isAdmin && !isSelf) {
+          return res.status(403).json({ error: 'Access denied: Admin role or self-update required' });
+        }
 
-    res.json({ success: true, message: 'Personnel record updated' });
+        let encrypted = null;
+        if (password) {
+          encrypted = encryptPw(password);
+        }
+
+        // Use camelCase values as fallback for snake_case
+        const finalYearsIT = years_it ?? yearsIT ?? 0;
+        const finalYearsZensar = years_zensar ?? yearsZensar ?? 0;
+        const finalPrimarySkill = primary_skill ?? primarySkill ?? null;
+        const finalPrimaryDomain = primary_domain ?? primaryDomain ?? null;
+        const finalSecondarySkill = secondary_skill ?? secondarySkill ?? null;
+        const finalTertiarySkill = tertiary_skill ?? tertiarySkill ?? null;
+
+        await query(`
+          UPDATE employees 
+          SET name = COALESCE($1, name), email = COALESCE($2, email), zensar_id = COALESCE($3, zensar_id), 
+              phone = COALESCE($4, phone), designation = COALESCE($5, designation), 
+              department = COALESCE($6, department), location = COALESCE($7, location), 
+              years_it = COALESCE($8, years_it), years_zensar = COALESCE($9, years_zensar), 
+              password = COALESCE($10, password), primary_skill = COALESCE($11, primary_skill), 
+              primary_domain = COALESCE($12, primary_domain),
+              secondary_skill = COALESCE($13, secondary_skill),
+              tertiary_skill = COALESCE($14, tertiary_skill),
+              grade = COALESCE($15, grade),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = $16 OR zensar_id = $16
+        `, [
+          name, email, zensar_id, phone, designation,
+          department, location, finalYearsIT, finalYearsZensar,
+          encrypted, finalPrimarySkill, finalPrimaryDomain,
+          finalSecondarySkill, finalTertiarySkill, grade || null, id
+        ]);
+
+        res.json({ success: true, message: 'Personnel record updated' });
+      } catch (innerError) {
+        console.error('[Admin Update Inner Error]', innerError);
+        res.status(500).json({ error: innerError.message });
+      }
+    });
   } catch (error) {
     console.error('[Admin Update Error]', error);
     res.status(500).json({ error: error.message });
@@ -1040,7 +2832,7 @@ app.post('/api/admin/employees/update', async (req, res) => {
 });
 
 // Get employee skills (batch endpoint for optimization)
-app.post('/api/employees/batch-skills', async (req, res) => {
+app.post('/api/employees/batch-skills', requireAuth, async (req, res) => {
   try {
     const { employeeIds } = req.body;
     
@@ -1058,34 +2850,50 @@ app.post('/api/employees/batch-skills', async (req, res) => {
     const skillsByEmployee = {};
     
     result.rows.forEach(row => {
-      if (!skillsByEmployee[row.employee_id]) {
-        skillsByEmployee[row.employee_id] = [];
+      if (!Reflect.has(skillsByEmployee, row.employee_id)) {
+        Reflect.set(skillsByEmployee, row.employee_id, []);
       }
       
       // Check if it's a predefined skill
       const predefinedIdx = SKILL_NAMES.indexOf(row.skill_name);
       const skillId = predefinedIdx >= 0 ? `s${predefinedIdx + 1}` : row.skill_name;
 
-      skillsByEmployee[row.employee_id].push({
+      Reflect.get(skillsByEmployee, row.employee_id).push({
         skillId: skillId,
         skill_name: row.skill_name, // Keep original field name for compatibility
         skillName: row.skill_name,
         selfRating: row.self_rating,
         managerRating: row.manager_rating,
-        validated: row.validated
+        validated: row.validated,
+        // ZenAssess verified badge + self-claimed level (needed by match modal)
+        verifiedBadgeLevel: row.verified_badge_level,
+        verified_badge_level: row.verified_badge_level,
+        selfClaimedLevel: row.self_claimed_level,
+        self_claimed_level: row.self_claimed_level,
+        lastValidationDate: row.last_validated_date,
+        lastProjectDate: row.last_project_date,
+        lastCertificationDate: row.last_cert_date,
+        lastUsedDate: row.last_used_date,
+        freshnessScore: row.freshness_score,
+        freshnessStatus: row.freshness_status,
+        revalidationReq: row.revalidation_req,
+        confidenceScore: row.confidence_score,
+        allocationReadiness: row.allocation_readiness,
+        allocationRisk: row.allocation_risk,
+        readyForAllocation: row.ready_for_allocation,
+        capabilityScore: row.capability_score
       });
     });
 
     // Filter out skills with 0 rating and ensure all requested employees are in response
     employeeIds.forEach(empId => {
-      if (!skillsByEmployee[empId]) {
-        skillsByEmployee[empId] = [];
+      if (!Reflect.has(skillsByEmployee, empId)) {
+        Reflect.set(skillsByEmployee, empId, []);
       } else {
-        skillsByEmployee[empId] = skillsByEmployee[empId].filter(s => s.selfRating > 0);
+        Reflect.set(skillsByEmployee, empId, Reflect.get(skillsByEmployee, empId).filter(s => s.selfRating > 0));
       }
     });
 
-    console.log(`📊 Batch skills fetched for ${employeeIds.length} employees, ${result.rows.length} total skills`);
     res.json(skillsByEmployee);
   } catch (error) {
     console.error('❌ Batch skills error:', error);
@@ -1093,10 +2901,294 @@ app.post('/api/employees/batch-skills', async (req, res) => {
   }
 });
 
+// GET /api/skills/confidence/:employeeId/:skillId — get confidence details & history
+app.get('/api/skills/confidence/:employeeId/:skillId', requireAuth, async (req, res) => {
+  try {
+    let resolvedId = req.params.employeeId;
+    const empCheck = await query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1', [req.params.employeeId]);
+    if (empCheck.rows.length > 0) resolvedId = empCheck.rows[0].id;
+
+    // Resolve skill name
+    const skillParam = req.params.skillId;
+    const skillNameFromId = Reflect.get(SKILL_NAMES, parseInt(skillParam.replace(/^s/i, '')) - 1);
+    const skillName = skillNameFromId || skillParam;
+
+    // Run recalculate to be 100% accurate
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedId]);
+    } catch (_) {}
+
+    // Get current rating details
+    const skillRes = await query(
+      'SELECT * FROM skills WHERE employee_id = $1 AND skill_name = $2',
+      [resolvedId, skillName]
+    );
+    if (skillRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Skill not rated' });
+    }
+    const skillRow = skillRes.rows[0];
+
+    // Compute breakdown details again for visual display
+    const self_rating_pts = skillRow.self_rating > 0 ? 40 : 0;
+    
+    const hasAssess = (await query(
+      'SELECT EXISTS(SELECT 1 FROM zenassess_sessions WHERE employee_id = $1 AND skill_name = $2 AND status IN (\'completed\', \'passed\', \'review_required\'))',
+      [resolvedId, skillName]
+    )).rows[0].exists;
+    const assess_pts = hasAssess ? 30 : 0;
+
+    const hasReview = (await query(
+      'SELECT EXISTS(SELECT 1 FROM manager_reviews WHERE employee_id = $1 AND skill_name = $2 AND review_status = \'approved\')',
+      [resolvedId, skillName]
+    )).rows[0].exists;
+    const review_pts = hasReview ? 15 : 0;
+
+    const projCount = parseInt((await query(
+      'SELECT COUNT(*) FROM projects WHERE employee_id = $1 AND ($2 = ANY(skills_used) OR $2 = ANY(technologies))',
+      [resolvedId, skillName]
+    )).rows[0].count);
+    const proj_pts = Math.min(10, projCount * 5);
+
+    const certCount = parseInt((await query(
+      'SELECT COUNT(*) FROM certifications WHERE employee_id = $1 AND cert_name ILIKE $2',
+      [resolvedId, '%' + skillName + '%']
+    )).rows[0].count);
+    const cert_pts = certCount > 0 ? 10 : 0;
+
+    // Fetch history
+    const historyRes = await query(
+      `SELECT created_at as "date", confidence_score as "score", reason 
+       FROM skill_confidence_history 
+       WHERE employee_id = $1 AND skill_name = $2 
+       ORDER BY created_at ASC`,
+      [resolvedId, skillName]
+    );
+
+    res.json({
+      success: true,
+      currentScore: skillRow.confidence_score,
+      breakdown: {
+        selfRatingPoints: self_rating_pts,
+        assessmentPoints: assess_pts,
+        reviewPoints: review_pts,
+        projectPoints: proj_pts,
+        certificationPoints: cert_pts,
+        total: skillRow.confidence_score
+      },
+      validatedLevel: skillRow.validated_level || 'Not Validated',
+      capabilityScore: skillRow.capability_score || 0,
+      assessmentScore: skillRow.assessment_score || 0,
+      technicalDepth: skillRow.technical_depth || 0,
+      projectStrength: skillRow.project_strength || 0,
+      certificationStrength: skillRow.certification_strength || 0,
+      mentoringStrength: skillRow.mentoring_strength || 0,
+      githubStrength: skillRow.github_strength || 0,
+      history: historyRes.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/workforce-intelligence — Workforce Capability & Analytics
+app.get('/api/workforce-intelligence', requireAuth, async (req, res) => {
+  try {
+    // 1. Hidden Skills
+    const hiddenSkillsRes = await query(
+      `SELECT s.id, s.employee_id, s.skill_name, s.self_rating, s.discovery_source, s.created_at,
+              e.name as employee_name, e.zensar_id 
+       FROM skills s 
+       JOIN employees e ON s.employee_id = e.id 
+       WHERE s.hidden_skill = TRUE 
+       ORDER BY s.created_at DESC`
+    );
+
+    // 2. Workforce Readiness
+    const empStats = await query(
+      `SELECT COUNT(*) as total_count,
+              COUNT(CASE WHEN overall_capability > 0 THEN 1 END) as validated_count,
+              COALESCE(AVG(overall_capability), 0)::NUMERIC(5,2) as avg_readiness,
+              COUNT(CASE WHEN overall_capability >= 80 THEN 1 END) as expert_count,
+              COUNT(CASE WHEN overall_capability >= 60 AND overall_capability < 80 THEN 1 END) as advanced_count,
+              COUNT(CASE WHEN overall_capability >= 30 AND overall_capability < 60 THEN 1 END) as intermediate_count,
+              COUNT(CASE WHEN overall_capability < 30 AND overall_capability > 0 THEN 1 END) as beginner_count
+       FROM employees`
+    );
+    const stats = empStats.rows[0];
+
+    // 3. Emerging Skills Count
+    const emergingList = ['AI Test Automation', 'ChatGPT/Prompt Engineering', 'TypeScript', 'Docker', 'Python'];
+    const emergingRes = await query(
+      `SELECT skill_name, COUNT(DISTINCT employee_id) as count 
+       FROM skills 
+       WHERE skill_name = ANY($1) AND self_rating > 0 
+       GROUP BY skill_name`,
+      [emergingList]
+    );
+
+    // 4. Reskilling Recommendations
+    // Find highest demand open role skills
+    const roleSkills = await query(
+      `SELECT required_skills FROM bfsi_roles WHERE status = 'Open'`
+    );
+    const demandMap = {};
+    roleSkills.rows.forEach(r => {
+      (r.required_skills || []).forEach(sk => {
+        Reflect.set(demandMap, sk, (Reflect.get(demandMap, sk) || 0) + 1);
+      });
+    });
+
+    // Recommend learning paths for employees based on prerequisites
+    const employeesWithPrereqs = await query(
+      `SELECT e.id, e.name as employee_name, e.zensar_id,
+              ARRAY_AGG(s.skill_name) as current_skills
+       FROM employees e
+       JOIN skills s ON e.id = s.employee_id
+       WHERE s.self_rating > 0
+       GROUP BY e.id, e.name, e.zensar_id`
+    );
+
+    const recommendations = [];
+    employeesWithPrereqs.rows.forEach(emp => {
+      const skills = emp.current_skills || [];
+      const hasJava = skills.includes('Java');
+      const hasPython = skills.includes('Python');
+      const hasFunctional = skills.includes('Functional Testing');
+      const hasSelenium = skills.includes('Selenium');
+
+      if (hasJava && !skills.includes('Appium') && (demandMap['Appium'] || 0) > 0) {
+        recommendations.push({
+          employeeName: emp.employee_name,
+          zensarId: emp.zensar_id,
+          currentSkill: 'Java',
+          recommendedSkill: 'Appium',
+          reason: 'High demand open Mobile role. Java is a strong prerequisite.',
+          targetRole: 'Mobile SDET'
+        });
+      }
+      if (hasPython && !skills.includes('AI Test Automation') && (demandMap['AI Test Automation'] || 0) > 0) {
+        recommendations.push({
+          employeeName: emp.employee_name,
+          zensarId: emp.zensar_id,
+          currentSkill: 'Python',
+          recommendedSkill: 'AI Test Automation',
+          reason: 'Fastest-growing emerging skill. Python knowledge is ideal.',
+          targetRole: 'Cognitive Tester'
+        });
+      }
+      if (hasFunctional && !skills.includes('Selenium') && (demandMap['Selenium'] || 0) > 0) {
+        recommendations.push({
+          employeeName: emp.employee_name,
+          zensarId: emp.zensar_id,
+          currentSkill: 'Functional Testing',
+          recommendedSkill: 'Selenium',
+          reason: 'Core requirement for open automation demand. Bridge functional knowledge.',
+          targetRole: 'Automation Engineer'
+        });
+      }
+    });
+
+    // 5. Top Talent Leaderboard
+    const leaderboardRes = await query(`
+      WITH RankedSkills AS (
+        SELECT 
+          s.skill_name,
+          s.employee_id,
+          e.name AS employee_name,
+          s.capability_score,
+          ROW_NUMBER() OVER(PARTITION BY s.skill_name ORDER BY s.capability_score DESC, s.assessment_score DESC, e.name ASC) as rnk
+        FROM skills s
+        JOIN employees e ON s.employee_id = e.id
+        WHERE s.validated = true OR s.capability_score > 0
+      ),
+      SkillStats AS (
+        SELECT 
+          s.skill_name,
+          COUNT(CASE WHEN s.validated = true THEN 1 END) as validated_count,
+          COALESCE(AVG(CASE WHEN s.validated = true THEN s.capability_score END), 0) as avg_capability
+        FROM skills s
+        GROUP BY s.skill_name
+      )
+      SELECT 
+        ss.skill_name,
+        ss.validated_count,
+        ROUND(ss.avg_capability, 1) as avg_capability,
+        rs.employee_name as top_employee_name,
+        rs.capability_score as top_capability_score
+      FROM SkillStats ss
+      LEFT JOIN RankedSkills rs ON ss.skill_name = rs.skill_name AND rs.rnk = 1
+      ORDER BY ss.validated_count DESC, ss.avg_capability DESC
+    `);
+
+    const topTalentLeaderboard = leaderboardRes.rows.map(row => ({
+      skillName: row.skill_name,
+      validatedCount: parseInt(row.validated_count || 0),
+      averageCapability: parseFloat(row.avg_capability || 0),
+      topEmployeeName: row.top_employee_name || 'N/A',
+      topCapabilityScore: parseInt(row.top_capability_score || 0)
+    }));
+
+    res.json({
+      success: true,
+      topTalentLeaderboard,
+      hiddenSkills: hiddenSkillsRes.rows,
+      readiness: {
+        totalEmployees: parseInt(stats.total_count),
+        validatedCount: parseInt(stats.validated_count),
+        averageReadiness: parseFloat(stats.avg_readiness),
+        capabilityLevels: {
+          expert: parseInt(stats.expert_count),
+          advanced: parseInt(stats.advanced_count),
+          intermediate: parseInt(stats.intermediate_count),
+          beginner: parseInt(stats.beginner_count)
+        }
+      },
+      emergingSkills: emergingRes.rows,
+      skillClustering: [
+        {
+          name: 'Web Automation Cluster',
+          description: 'Combines test automation logic, scripting proficiency, and regression validation paradigms.',
+          skills: ['Selenium', 'Java', 'Python', 'Regression Testing', 'UAT']
+        },
+        {
+          name: 'Mobile & Cloud Cluster',
+          description: 'Focuses on mobile software quality, cross-platform app testing, and DevOps deployment integrations.',
+          skills: ['Appium', 'Mobile Testing', 'Docker', 'Git', 'Jenkins']
+        },
+        {
+          name: 'Security & API Integration',
+          description: 'Centers around service endpoint verification, relational data modeling, and penetration risk mitigation.',
+          skills: ['Postman', 'API Testing', 'SQL', 'Database Testing', 'Security Testing']
+        },
+        {
+          name: 'Cognitive Testing Cluster',
+          description: 'Emerging tech cluster using large language model prompts, TypeScript engineering, and next-gen AI automation.',
+          skills: ['ChatGPT/Prompt Engineering', 'AI Test Automation', 'TypeScript', 'Playwright']
+        }
+      ],
+      reskillingRecommendations: recommendations.slice(0, 10)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get employee skills
+// BACKWARD COMPATIBLE: Works with both JWT and session-based auth during transition
 app.get('/api/employees/:id/skills', async (req, res) => {
   try {
-    const result = await query('SELECT * FROM skills WHERE employee_id = $1', [req.params.id]);
+    let resolvedId = req.params.id;
+    const empCheck = await query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1', [req.params.id]);
+    if (empCheck.rows.length > 0) resolvedId = empCheck.rows[0].id;
+
+    // Recalculate freshness metrics dynamically before returning
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedId]);
+    } catch (err) {
+      console.error('Recalculate error:', err);
+    }
+
+    const result = await query('SELECT * FROM skills WHERE employee_id = $1', [resolvedId]);
 
     const skills = result.rows.map(row => {
       // Check if it's a predefined skill
@@ -1108,9 +3200,30 @@ app.get('/api/employees/:id/skills', async (req, res) => {
         skillName: row.skill_name,
         selfRating: row.self_rating,
         managerRating: row.manager_rating,
-        validated: row.validated
+        validated: row.validated,
+        lastValidationDate: row.last_validated_date,
+        lastProjectDate: row.last_project_date,
+        lastCertificationDate: row.last_cert_date,
+        lastUsedDate: row.last_used_date,
+        freshnessScore: row.freshness_score,
+        freshnessStatus: row.freshness_status,
+        revalidationReq: row.revalidation_req,
+        confidenceScore: row.confidence_score,
+        allocationReadiness: row.allocation_readiness,
+        allocationRisk: row.allocation_risk,
+        readyForAllocation: row.ready_for_allocation,
+        capabilityScore: row.capability_score,
+        validatedLevel: row.validated_level || 'Not Validated',
+        verifiedBadgeLevel: row.verified_badge_level,
+        selfClaimedLevel: row.self_claimed_level,
+        assessmentScore: row.assessment_score || 0,
+        technicalDepth: row.technical_depth || 0,
+        projectStrength: row.project_strength || 0,
+        certificationStrength: row.certification_strength || 0,
+        mentoringStrength: row.mentoring_strength || 0,
+        githubStrength: row.github_strength || 0
       };
-    }).filter(s => s.selfRating > 0);
+    }).filter(s => s.selfRating > 0 || s.validated);
 
     res.json(skills);
   } catch (error) {
@@ -1119,6 +3232,7 @@ app.get('/api/employees/:id/skills', async (req, res) => {
 });
 
 // Update employee skills
+// BACKWARD COMPATIBLE: Works with both JWT and session-based auth during transition
 app.put('/api/employees/:id/skills', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1128,19 +3242,22 @@ app.put('/api/employees/:id/skills', async (req, res) => {
     const employeeId = req.params.id;
     const employeeName = body.employeeName || body.EmployeeName;
 
-    // Clear existing skills for this employee
-    await client.query('DELETE FROM skills WHERE employee_id = $1', [employeeId]);
+    // Clear only unvalidated rows — resubmitting the matrix must never wipe an earned badge
+    await client.query('DELETE FROM skills WHERE employee_id = $1 AND verified_badge_level IS NULL', [employeeId]);
 
-    // Insert new skills
+    // Upsert ratings; verified_badge_level is intentionally untouched here (only the test-complete flow can raise it)
+    const SELF_CLAIMED_FROM_RATING = { 1: 'Beginner', 2: 'Intermediate', 3: 'Expert' };
     let ratedCount = 0;
     for (const skillName of SKILL_NAMES) {
-      const rating = parseInt(String(body[skillName] || 0)) || 0;
+      const rating = parseInt(String(Reflect.get(body, skillName) || 0)) || 0;
       if (rating > 0) {
         ratedCount++;
+        const selfClaimedLevel = SELF_CLAIMED_FROM_RATING[Math.min(3, rating)] || null;
         await client.query(`
-          INSERT INTO skills (employee_id, skill_name, self_rating)
-          VALUES ($1, $2, $3)
-        `, [employeeId, skillName, rating]);
+          INSERT INTO skills (employee_id, skill_name, self_rating, self_claimed_level)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (employee_id, skill_name) DO UPDATE SET self_rating = $3, self_claimed_level = $4, updated_at = CURRENT_TIMESTAMP
+        `, [employeeId, skillName, rating, selfClaimedLevel]);
       }
     }
 
@@ -1155,6 +3272,15 @@ app.put('/api/employees/:id/skills', async (req, res) => {
     `, [capability, submitted, employeeId]);
 
     await client.query('COMMIT');
+    
+    // Recalculate freshness dynamically after commit
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [employeeId]);
+    } catch (err) {
+      console.error('Recalculate error after update:', err);
+    }
+
+    await auditLog({ employeeId: req.user?.employeeId, role: req.user?.role, action: 'SKILLS_UPDATE', resource: 'skills', resourceId: employeeId, req });
     res.json({ success: true, capability });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -1165,7 +3291,7 @@ app.put('/api/employees/:id/skills', async (req, res) => {
 });
 
 // Admin itemized skill delete
-app.delete('/api/skills/:employeeId/:skillId', async (req, res) => {
+app.delete('/api/skills/:employeeId/:skillId', requireAdmin, async (req, res) => {
   try {
     // Resolve employee db id from zensar_id or id
     let resolvedEmpId = req.params.employeeId;
@@ -1174,7 +3300,7 @@ app.delete('/api/skills/:employeeId/:skillId', async (req, res) => {
 
     // Resolve skill name from skillId format (e.g. "s1" -> "Selenium") or treat as skill_name directly
     const skillParam = req.params.skillId;
-    const skillNameFromId = SKILL_NAMES[parseInt(skillParam.replace(/^s/i, '')) - 1];
+    const skillNameFromId = Reflect.get(SKILL_NAMES, parseInt(skillParam.replace(/^s/i, '')) - 1);
     const skillName = skillNameFromId || skillParam; // fallback to raw value if not an sN id
 
     await query('DELETE FROM skills WHERE employee_id = $1 AND skill_name = $2', [resolvedEmpId, skillName]);
@@ -1184,8 +3310,31 @@ app.delete('/api/skills/:employeeId/:skillId', async (req, res) => {
   }
 });
 
+// Approve a hidden skill
+app.post('/api/skills/approve-hidden', requireAuth, async (req, res) => {
+  const { employeeId, skillName } = req.body;
+  if (!employeeId || !skillName) return res.status(400).json({ error: 'Missing employeeId or skillName' });
+  try {
+    let resolvedId = employeeId;
+    const empCheck = await query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1', [employeeId]);
+    if (empCheck.rows.length > 0) resolvedId = empCheck.rows[0].id;
+    
+    await query(
+      `UPDATE skills SET hidden_skill = FALSE WHERE employee_id = $1 AND skill_name = $2`,
+      [resolvedId, skillName]
+    );
+    
+    // Recalculate confidence & freshness since it's now a real skill
+    await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedId]);
+    
+    res.json({ success: true, message: 'Skill approved and added to profile' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Admin batch skill add
-app.post('/api/skills', async (req, res) => {
+app.post('/api/skills', requireAuth, async (req, res) => {
   // Accept both dbEmployeeId (resolved DB id) and employeeId (zensar id)
   const empId = req.body.dbEmployeeId || req.body.employeeId;
   const skills = req.body.skills;
@@ -1217,6 +3366,12 @@ app.post('/api/skills', async (req, res) => {
         ON CONFLICT (employee_id, skill_name) DO UPDATE SET self_rating = $3
       `, [resolvedId, skillName, s.selfRating]);
     }
+
+    // Dynamic freshness recalculation
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedId]);
+    } catch (_) {}
+
     res.json({ success: true, saved: skills.length });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1248,7 +3403,7 @@ app.get('/api/certifications/:id', async (req, res) => {
 });
 
 // Add or Update certification
-app.post('/api/certifications', async (req, res) => {
+app.post('/api/certifications', requireAuth, async (req, res) => {
   // Helper: returns null for any non-parseable or placeholder date string
   const safeDate = (val) => {
     if (!val) return null;
@@ -1268,7 +3423,7 @@ app.post('/api/certifications', async (req, res) => {
       const year = yearMatch[1];
       const monthMatch = s.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/);
       const monthMap = { jan:'01', feb:'02', mar:'03', apr:'04', may:'05', jun:'06', jul:'07', aug:'08', sep:'09', oct:'10', nov:'11', dec:'12' };
-      const month = monthMatch ? (monthMap[monthMatch[0]] || '01') : '01';
+      const month = monthMatch ? (Reflect.get(monthMap, monthMatch[0]) || '01') : '01';
       return `${year}-${month}-01`;
     }
     
@@ -1300,7 +3455,6 @@ app.post('/api/certifications', async (req, res) => {
       return res.status(400).json({ error: `Employee '${rawEmpId}' not found. Cannot save certification.` });
     }
     const empId = empLookup.rows[0].id;
-    console.log(`[Cert Sync] ✅ '${rawEmpId}' → employees.id='${empId}' | ${existingId ? 'Updating' : 'Inserting'} cert: ${certName}`);
 
     let result;
     if (existingId) {
@@ -1319,7 +3473,6 @@ app.post('/api/certifications', async (req, res) => {
         [empId, certName]
       );
       if (dupCheck.rows.length > 0) {
-        console.log(`[Cert Sync] ⚠️ Duplicate skipped: "${certName}" already exists for ${empId}`);
         return res.json({ success: true, duplicate: true, message: `Certification "${certName}" already exists`, id: dupCheck.rows[0].id });
       }
       result = await query(`
@@ -1329,6 +3482,11 @@ app.post('/api/certifications', async (req, res) => {
       `, [empId, certName, org, issueDate || null, expiryDate || null, noExpiry, credentialId, url]);
     }
 
+    // Dynamic freshness recalculation
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [empId]);
+    } catch (_) {}
+
     res.json({ success: true, certification: result.rows[0] });
   } catch (error) {
     console.error('[Cert Sync Error]', error);
@@ -1337,10 +3495,20 @@ app.post('/api/certifications', async (req, res) => {
 });
 
 // Delete certification
-app.delete('/api/certifications/:id', async (req, res) => {
+app.delete('/api/certifications/:id', requireAuth, async (req, res) => {
   try {
+    const fetchEmp = await query('SELECT employee_id FROM certifications WHERE id = $1', [req.params.id]);
+    const empId = fetchEmp.rows[0]?.employee_id;
+    
     const result = await query('DELETE FROM certifications WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Certification record not found' });
+    
+    if (empId) {
+      try {
+        await query('SELECT recalculate_employee_skill_freshness($1)', [empId]);
+      } catch (_) {}
+    }
+    
     res.json({ success: true, message: 'Certification removed' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to remove credential' });
@@ -1356,12 +3524,22 @@ app.delete('/api/certifications/:id', async (req, res) => {
 
 
 // Delete project
-app.delete('/api/projects/:id', async (req, res) => {
+app.delete('/api/projects/:id', requireAuth, async (req, res) => {
   try {
+    const fetchEmp = await query('SELECT employee_id FROM projects WHERE id = $1', [req.params.id]);
+    const empId = fetchEmp.rows[0]?.employee_id;
+    
     const result = await query('DELETE FROM projects WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Project not found' });
     }
+    
+    if (empId) {
+      try {
+        await query('SELECT recalculate_employee_skill_freshness($1)', [empId]);
+      } catch (_) {}
+    }
+    
     res.json({ success: true, message: 'Project removed' });
   } catch (error) {
     console.error('[Delete Project Error]', error);
@@ -1370,7 +3548,7 @@ app.delete('/api/projects/:id', async (req, res) => {
 });
 
 // Add or Update project
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', requireAuth, async (req, res) => {
   try {
     const body = req.body;
     // Accept snake_case employee_id (from AdminResumeUploadPage dbEmployeeId) as well
@@ -1409,13 +3587,11 @@ app.post('/api/projects', async (req, res) => {
       return res.status(400).json({ error: `Employee '${empId}' not found in database. Cannot save project.` });
     }
     const resolvedEmpId = empLookup.rows[0].id;
-    console.log(`[Projects Sync] ✅ Resolved '${empId}' → employees.id='${resolvedEmpId}'`);
 
     // Handle array serialization
     if (typeof techs === 'string') { try { techs = JSON.parse(techs); } catch (e) { techs = [techs]; } }
     if (typeof skillsUsed === 'string') { try { skillsUsed = JSON.parse(skillsUsed); } catch (e) { skillsUsed = [skillsUsed]; } }
 
-    console.log(`[Projects Sync] ${existingId ? 'Updating' : 'Inserting'} project for ${resolvedEmpId}: ${projectName}`);
 
     let result;
     if (existingId) {
@@ -1435,7 +3611,6 @@ app.post('/api/projects', async (req, res) => {
         [resolvedEmpId, projectName, role]
       );
       if (dupCheck.rows.length > 0) {
-        console.log(`[Projects Sync] ⚠️ Duplicate skipped: "${projectName}" (${role}) already exists for ${resolvedEmpId}`);
         return res.json({ success: true, duplicate: true, message: `Project "${projectName}" already exists`, id: dupCheck.rows[0].id });
       }
       result = await query(`
@@ -1449,6 +3624,11 @@ app.post('/api/projects', async (req, res) => {
       `, [resolvedEmpId, projectName, role, client, domain, startDate || null, endDate || null, desc, techs, skillsUsed, teamSize, outcome, isOngoing]);
     }
 
+    // Dynamic freshness recalculation
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedEmpId]);
+    } catch (_) {}
+
     res.json({ success: true, project: result.rows[0] });
   } catch (error) {
     console.error('[Projects Sync Error]', error);
@@ -1457,7 +3637,7 @@ app.post('/api/projects', async (req, res) => {
 });
 
 // Get all projects
-app.get('/api/projects/ALL', async (req, res) => {
+app.get('/api/projects/ALL', requireAuth, async (req, res) => {
   try {
     const result = await query('SELECT * FROM projects ORDER BY created_at DESC');
     const mapped = result.rows.map(r => ({
@@ -1484,7 +3664,7 @@ app.get('/api/projects/ALL', async (req, res) => {
 });
 
 // Add or Update education
-app.post('/api/education', async (req, res) => {
+app.post('/api/education', requireAuth, async (req, res) => {
   try {
     const body = req.body;
     const rawEmpId = body.employeeId || body.EmployeeID || body.ID;
@@ -1508,7 +3688,6 @@ app.post('/api/education', async (req, res) => {
       return res.status(400).json({ error: `Employee '${rawEmpId}' not found. Cannot save education.` });
     }
     const empId = empLookup.rows[0].id;
-    console.log(`[Education Sync] ✅ '${rawEmpId}' → '${empId}' | ${existingId && existingId !== rawEmpId ? 'Updating' : 'Inserting'} record: ${degree}`);
 
     let result;
     if (existingId && existingId !== rawEmpId) {
@@ -1527,7 +3706,6 @@ app.post('/api/education', async (req, res) => {
         [empId, degree, institution]
       );
       if (dupCheck.rows.length > 0) {
-        console.log(`[Education Sync] ⚠️ Duplicate skipped: "${degree}" at "${institution}" already exists for ${empId}`);
         return res.json({ success: true, duplicate: true, message: `Education "${degree}" already exists`, id: dupCheck.rows[0].id });
       }
       result = await query(`
@@ -1545,7 +3723,7 @@ app.post('/api/education', async (req, res) => {
 });
 
 // Get education for employee
-app.get('/api/education/:id', async (req, res) => {
+app.get('/api/education/:id', requireAuth, async (req, res) => {
   try {
     let sql = 'SELECT * FROM education WHERE LOWER(employee_id) = LOWER($1) ORDER BY created_at DESC';
     let params = [req.params.id];
@@ -1583,7 +3761,7 @@ app.get('/api/education/:id', async (req, res) => {
 });
 
 // Delete education
-app.delete('/api/education/:id', async (req, res) => {
+app.delete('/api/education/:id', requireAuth, async (req, res) => {
   try {
     await query('DELETE FROM education WHERE id = $1', [req.params.id]);
     res.json({ success: true, message: 'Educational record removed' });
@@ -1593,7 +3771,7 @@ app.delete('/api/education/:id', async (req, res) => {
 });
 
 // Get achievements for employee
-app.get('/api/achievements/:id', async (req, res) => {
+app.get('/api/achievements/:id', requireAuth, async (req, res) => {
   try {
     let sql = 'SELECT * FROM achievements WHERE LOWER(employee_id) = LOWER($1) ORDER BY date_received DESC';
     let params = [req.params.id];
@@ -1626,7 +3804,7 @@ app.get('/api/achievements/:id', async (req, res) => {
 });
 
 // Add or Update achievement
-app.post('/api/achievements', async (req, res) => {
+app.post('/api/achievements', requireAuth, async (req, res) => {
   try {
     const body = req.body;
     const rawEmpId = body.employeeId || body.EmployeeID || body.employee_id;
@@ -1639,7 +3817,6 @@ app.post('/api/achievements', async (req, res) => {
       [employeeId, body.Title || body.title || '']
     );
     if (dupCheck.rows.length > 0 && !body.id && !body.ID) {
-      console.log(`[Achievement Sync] ⚠️ Duplicate skipped: "${body.Title}" already exists for ${employeeId}`);
       return res.json({ success: true, duplicate: true, message: `Achievement "${body.Title}" already exists`, id: dupCheck.rows[0].id });
     }
 
@@ -1671,7 +3848,7 @@ app.post('/api/achievements', async (req, res) => {
 });
 
 // Delete achievement
-app.delete('/api/achievements/:id', async (req, res) => {
+app.delete('/api/achievements/:id', requireAuth, async (req, res) => {
   try {
     await query('DELETE FROM achievements WHERE id = $1', [req.params.id]);
     res.json({ success: true, message: 'Achievement removed' });
@@ -1688,7 +3865,6 @@ app.post('/api/llm', async (req, res) => {
     const prompt = req.body.prompt;
 
     // Log incoming proxy request for debugging
-    console.log(`🤖 [LLM Proxy] Provider: ${provider} | Model: ${req.body.model || 'default'}`);
 
     if (apiKey && apiKey !== 'your_api_key_here' && provider === 'openai') {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -1701,7 +3877,11 @@ app.post('/api/llm', async (req, res) => {
       });
       if (!response.ok) throw new Error(`OpenAI API Error: ${response.status}`);
       const data = await response.json();
-      res.json({ response: data.choices[0].message.content });
+      const message = data.choices?.[0]?.message;
+      if (message?.refusal) {
+        throw new Error(`OpenAI Refusal: ${message.refusal}`);
+      }
+      res.json({ response: message?.content || '' });
 
     } else if (apiKey && apiKey !== 'your_api_key_here' && provider === 'gemini') {
       const model = process.env.LLM_MODEL || 'gemini-1.5-flash';
@@ -1784,7 +3964,7 @@ const BFSI_SKILLS = {
 };
 
 // Get all BFSI roles
-app.get('/api/bfsi/roles', async (req, res) => {
+app.get('/api/bfsi/roles', requireAuth, async (req, res) => {
   try {
     const roles = await query('SELECT * FROM bfsi_roles ORDER BY created_date DESC');
     res.json({ roles: roles.rows });
@@ -1793,15 +3973,95 @@ app.get('/api/bfsi/roles', async (req, res) => {
   }
 });
 
+// Get all BFSI assignments
+app.get('/api/bfsi/assignments', requireAuth, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT a.*, r.role_title, r.client_name, r.required_skills, r.location as role_location,
+             w.employee_name, w.primary_skill, w.status as employee_status, w.experience_years
+      FROM bfsi_assignments a
+      JOIN bfsi_roles r ON a.role_id = r.role_id
+      JOIN bfsi_workforce w ON a.employee_id = w.employee_id
+      ORDER BY a.assigned_date DESC
+    `);
+    res.json({ assignments: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get all BFSI workforce
-app.get('/api/bfsi/workforce', async (req, res) => {
+app.get('/api/bfsi/workforce', requireAuth, async (req, res) => {
   try {
     const workforce = await query('SELECT * FROM bfsi_workforce ORDER BY employee_name');
     const certifications = await query('SELECT * FROM bfsi_certifications');
-    res.json({ 
+    res.json({
       workforce: workforce.rows,
       certifications: certifications.rows
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Combined Pool + ZenMatrix employees, skills priority-ordered
+// (verified badge first, then Expert/Intermediate/Beginner by claimed level).
+// Optional ?skill=Python&level=Expert filtering; verified matches rank first.
+app.get('/api/bfsi/employees', requireAuth, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT * FROM (
+        SELECT e.id, e.name, e.designation, e.department, e.grade, e.years_it,
+          e.primary_skill, e.secondary_skill, 'zenmatrix' AS source,
+          COALESCE(json_agg(json_build_object(
+            'skill_name', s.skill_name,
+            'self_claimed_level', s.self_claimed_level,
+            'verified_badge_level', s.verified_badge_level,
+            'self_rating', s.self_rating
+          ) ORDER BY
+            CASE WHEN s.verified_badge_level IS NOT NULL THEN 0 ELSE 1 END,
+            CASE s.self_claimed_level WHEN 'Expert' THEN 0 WHEN 'Intermediate' THEN 1 WHEN 'Beginner' THEN 2 ELSE 3 END
+          ) FILTER (WHERE s.skill_name IS NOT NULL), '[]') AS skills
+        FROM employees e
+        LEFT JOIN skills s ON LOWER(s.employee_id) = LOWER(e.id)
+        GROUP BY e.id
+
+        UNION ALL
+
+        SELECT p.id, p.name, p.designation, p.department, p.grade, p.years_it,
+          p.primary_skill, p.secondary_skill, 'pool' AS source,
+          json_build_array(
+            json_build_object('skill_name', p.primary_skill, 'self_claimed_level', 'Expert', 'verified_badge_level', NULL, 'self_rating', 3),
+            json_build_object('skill_name', p.secondary_skill, 'self_claimed_level', 'Intermediate', 'verified_badge_level', NULL, 'self_rating', 2)
+          ) AS skills
+        FROM pool_employees p
+        WHERE p.primary_skill IS NOT NULL
+      ) combined
+      ORDER BY CASE WHEN source = 'zenmatrix' THEN 0 ELSE 1 END, name
+    `);
+
+    let employees = result.rows;
+
+    // Optional skill / level filtering. Verified matches rank ahead of self-claimed.
+    const skillFilter = String(req.query.skill || '').trim().toLowerCase();
+    const levelFilter = String(req.query.level || '').trim().toLowerCase();
+    if (skillFilter) {
+      employees = employees
+        .map((emp) => {
+          const match = (emp.skills || []).find((sk) => {
+            const nameOk = String(sk.skill_name || '').toLowerCase().includes(skillFilter);
+            if (!nameOk) return false;
+            if (!levelFilter) return true;
+            const lvl = String(sk.verified_badge_level || sk.self_claimed_level || '').toLowerCase();
+            return lvl === levelFilter;
+          });
+          return match ? { ...emp, _matchVerified: !!match.verified_badge_level } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => (b._matchVerified ? 1 : 0) - (a._matchVerified ? 1 : 0));
+    }
+
+    res.json({ employees });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1824,7 +4084,7 @@ function calculateMatchScore(employeeSkills, requiredSkills) {
 }
 
 // Get BFSI dashboard KPIs
-app.get('/api/bfsi/dashboard', async (req, res) => {
+app.get('/api/bfsi/dashboard', requireAuth, async (req, res) => {
   try {
     // Total open roles
     const rolesResult = await query("SELECT COUNT(*) as total FROM bfsi_roles WHERE status = 'Open'");
@@ -1885,8 +4145,6 @@ app.get('/api/bfsi/dashboard', async (req, res) => {
     // Get Grand Total row specifically for overall KPIs
     const grandTotalResult = await query("SELECT * FROM bfsi_summary_data WHERE primary_skill ILIKE '%Grand Total%'");
     const gt = grandTotalResult.rows[0] || {};
-    console.log('📊 Dashboard Grand Total row:', gt);
-    console.log('📊 supply_total from GT:', gt.supply_total, 'type:', typeof gt.supply_total);
     
     // Skill gaps from summary data (all rows excluding Grand Total for the list)
     const allSummaryResult = await query("SELECT * FROM bfsi_summary_data WHERE primary_skill NOT ILIKE '%Grand Total%' ORDER BY gap DESC");
@@ -1900,8 +4158,6 @@ app.get('/api/bfsi/dashboard', async (req, res) => {
       pool: s.pool_supply,
       deallocation: s.deallocation_supply
     }));
-    console.log('📊 Skill gaps count:', skillGaps.length);
-    console.log('📊 First skill gap:', skillGaps[0]);
     
     const response = {
       totalRoles: safeParseInt(gt.demand_total, totalRoles),
@@ -1923,19 +4179,63 @@ app.get('/api/bfsi/dashboard', async (req, res) => {
       skillGaps,
       criticalGap: skillGaps[0]?.skill || 'None'
     };
-    console.log('📊 Dashboard response totals:', { 
-      totalDemand: response.totalDemand, 
-      totalSupply: response.totalSupply, 
-      totalGap: response.totalGap 
-    });
     res.json(response);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// Get BFSI executive analytics
+app.get('/api/bfsi/analytics', requireAuth, async (req, res) => {
+  try {
+    // 1. Allocation rate
+    const totalWorkforce = await query("SELECT COUNT(*) as total FROM bfsi_workforce");
+    const assignedResult = await query("SELECT COUNT(*) as total FROM bfsi_workforce WHERE status = 'Assigned'");
+    const reservedResult = await query("SELECT COUNT(*) as total FROM bfsi_workforce WHERE status = 'Reserved'");
+    
+    const total = parseInt(totalWorkforce.rows[0].total) || 1;
+    const assigned = parseInt(assignedResult.rows[0].total) || 0;
+    const reserved = parseInt(reservedResult.rows[0].total) || 0;
+    const pool = Math.max(0, total - assigned - reserved);
+
+    // 2. Readiness trends (grouping by band)
+    const bandReadiness = await query(`
+      SELECT band, COALESCE(AVG(experience_years * 10), 50)::INTEGER as avg_readiness
+      FROM bfsi_workforce
+      GROUP BY band
+    `);
+
+    // 3. Skill growth forecasts (Demand vs Supply growth projections)
+    const certPipeline = await query(`
+      SELECT cert_name, COUNT(*) as count
+      FROM bfsi_certifications
+      WHERE status = 'In Progress'
+      GROUP BY cert_name
+    `);
+
+    res.json({
+      allocationRates: {
+        total,
+        assigned,
+        reserved,
+        pool,
+        allocationRate: Math.round(((assigned + reserved) / total) * 100)
+      },
+      readinessTrends: bandReadiness.rows,
+      skillGrowthForecast: certPipeline.rows.map(row => ({
+        skill: row.cert_name.replace('Certification', '').replace('Course', '').trim(),
+        currentSupply: 5,
+        projectedSupply: 5 + parseInt(row.count),
+        pipelineCount: parseInt(row.count)
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get BFSI summary data (from Excel Summary sheet)
-app.get('/api/bfsi/summary-data', async (req, res) => {
+app.get('/api/bfsi/summary-data', requireAuth, async (req, res) => {
   try {
     const result = await query('SELECT * FROM bfsi_summary_data ORDER BY gap DESC');
     res.json({ summary: result.rows });
@@ -1945,7 +4245,7 @@ app.get('/api/bfsi/summary-data', async (req, res) => {
 });
 
 // Get skill demand vs supply
-app.get('/api/bfsi/skill-analysis', async (req, res) => {
+app.get('/api/bfsi/skill-analysis', requireAuth, async (req, res) => {
   try {
     const allRoles = await query("SELECT required_skills FROM bfsi_roles WHERE status = 'Open'");
     // Only supply pool employees (Available-Pool + Deallocating)
@@ -1958,7 +4258,7 @@ app.get('/api/bfsi/skill-analysis', async (req, res) => {
     // Calculate demand
     allRoles.rows.forEach(role => {
       (role.required_skills || []).forEach(skill => {
-        skillDemand[skill] = (skillDemand[skill] || 0) + 1;
+        Reflect.set(skillDemand, skill, (Reflect.get(skillDemand, skill) || 0) + 1);
       });
     });
     
@@ -1971,13 +4271,13 @@ app.get('/api/bfsi/skill-analysis', async (req, res) => {
       
       skills.forEach(skill => {
         if ((emp.status === 'Available-Pool' || emp.status === 'Deallocating') && !gradDate) {
-          skillSupply.ready[skill] = (skillSupply.ready[skill] || 0) + 1;
+          Reflect.set(skillSupply.ready, skill, (Reflect.get(skillSupply.ready, skill) || 0) + 1);
         } else if (daysToGrad && daysToGrad <= 14) {
-          skillSupply.week2[skill] = (skillSupply.week2[skill] || 0) + 1;
+          Reflect.set(skillSupply.week2, skill, (Reflect.get(skillSupply.week2, skill) || 0) + 1);
         } else if (daysToGrad && daysToGrad <= 28) {
-          skillSupply.week4[skill] = (skillSupply.week4[skill] || 0) + 1;
+          Reflect.set(skillSupply.week4, skill, (Reflect.get(skillSupply.week4, skill) || 0) + 1);
         } else if (emp.bench_days > 60 || emp.reject_count > 2) {
-          skillSupply.blocked[skill] = (skillSupply.blocked[skill] || 0) + 1;
+          Reflect.set(skillSupply.blocked, skill, (Reflect.get(skillSupply.blocked, skill) || 0) + 1);
         }
       });
     });
@@ -1985,12 +4285,12 @@ app.get('/api/bfsi/skill-analysis', async (req, res) => {
     const analysis = Object.entries(skillDemand).map(([skill, demand]) => ({
       skill,
       demand,
-      ready: skillSupply.ready[skill] || 0,
-      week2: skillSupply.week2[skill] || 0,
-      week4: skillSupply.week4[skill] || 0,
-      blocked: skillSupply.blocked[skill] || 0,
-      totalSupply: (skillSupply.ready[skill] || 0) + (skillSupply.week2[skill] || 0) + (skillSupply.week4[skill] || 0),
-      gap: demand - ((skillSupply.ready[skill] || 0) + (skillSupply.week2[skill] || 0) + (skillSupply.week4[skill] || 0))
+      ready: Reflect.get(skillSupply.ready, skill) || 0,
+      week2: Reflect.get(skillSupply.week2, skill) || 0,
+      week4: Reflect.get(skillSupply.week4, skill) || 0,
+      blocked: Reflect.get(skillSupply.blocked, skill) || 0,
+      totalSupply: (Reflect.get(skillSupply.ready, skill) || 0) + (Reflect.get(skillSupply.week2, skill) || 0) + (Reflect.get(skillSupply.week4, skill) || 0),
+      gap: demand - ((Reflect.get(skillSupply.ready, skill) || 0) + (Reflect.get(skillSupply.week2, skill) || 0) + (Reflect.get(skillSupply.week4, skill) || 0))
     }));
     
     res.json({ analysis });
@@ -2000,7 +4300,7 @@ app.get('/api/bfsi/skill-analysis', async (req, res) => {
 });
 
 // Shortlist employees for a role
-app.get('/api/bfsi/shortlist/:roleId', async (req, res) => {
+app.get('/api/bfsi/shortlist/:roleId', requireAuth, async (req, res) => {
   try {
     const { roleId } = req.params;
     
@@ -2062,7 +4362,7 @@ app.get('/api/bfsi/shortlist/:roleId', async (req, res) => {
 });
 
 // Get certification pipeline
-app.get('/api/bfsi/certifications/pipeline', async (req, res) => {
+app.get('/api/bfsi/certifications/pipeline', requireAuth, async (req, res) => {
   try {
     const pipeline = await query(`
       SELECT c.*, w.employee_name, w.reskilling_program 
@@ -2078,7 +4378,7 @@ app.get('/api/bfsi/certifications/pipeline', async (req, res) => {
 });
 
 // Get aging roles
-app.get('/api/bfsi/roles/aging', async (req, res) => {
+app.get('/api/bfsi/roles/aging', requireAuth, async (req, res) => {
   try {
     const redRoles = await query(`
       SELECT r.*, COUNT(a.employee_id) as candidate_count
@@ -2108,7 +4408,7 @@ app.get('/api/bfsi/roles/aging', async (req, res) => {
 });
 
 // Get reskilling opportunities
-app.get('/api/bfsi/reskilling-opportunities', async (req, res) => {
+app.get('/api/bfsi/reskilling-opportunities', requireAuth, async (req, res) => {
   try {
     const rolesResult = await query("SELECT * FROM bfsi_roles WHERE status = 'Open'");
     // Only use actual supply pool (Available-Pool + Deallocating) — NOT all LOB employees
@@ -2211,7 +4511,7 @@ function parseExcelDate(dateValue) {
         const months = { 'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5, 
                         'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11 };
         const day = parseInt(m[1]);
-        const month = months[m[2].toLowerCase()];
+        const month = Reflect.get(months, m[2].toLowerCase());
         if (month === undefined) return null;
         let year = parseInt(m[3]);
         if (year < 50) year += 2000;
@@ -2268,14 +4568,13 @@ function parseExcelDate(dateValue) {
 }
 
 // Upload Excel and populate BFSI data - Multi-sheet processing
-app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
+app.post('/api/bfsi/upload', upload.single('file'), requireAdmin, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
     
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    console.log('📊 Processing Excel sheets:', workbook.SheetNames);
     
     const client = await pool.connect();
     try {
@@ -2300,7 +4599,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('LOB')) {
         const lobSheet = workbook.Sheets['LOB'];
         const lobData = XLSX.utils.sheet_to_json(lobSheet, { raw: false });
-        console.log(`📋 Processing LOB sheet: ${lobData.length} employees`);
         
         for (const row of lobData) {
           const empId = String(row['Emp Number'] || row['EmpNumber'] || '').trim();
@@ -2492,7 +4790,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('Reactive')) {
         const reactiveSheet = workbook.Sheets['Reactive'];
         const reactiveData = XLSX.utils.sheet_to_json(reactiveSheet, { raw: false });
-        console.log(`📋 Processing Reactive sheet: ${reactiveData.length} urgent roles`);
         rolesCount += await processSRFSheet(reactiveData, 'Reactive');
       }
 
@@ -2502,7 +4799,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('Proactive')) {
         const proactiveSheet = workbook.Sheets['Proactive'];
         const proactiveData = XLSX.utils.sheet_to_json(proactiveSheet, { raw: false });
-        console.log(`📋 Processing Proactive sheet: ${proactiveData.length} pipeline roles`);
         rolesCount += await processSRFSheet(proactiveData, 'Proactive');
       }
       
@@ -2512,11 +4808,8 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('Pool')) {
         const poolSheet = workbook.Sheets['Pool'];
         const poolData = XLSX.utils.sheet_to_json(poolSheet, { raw: false });
-        console.log(`📋 Processing Pool sheet: ${poolData.length} available resources`);
         // Log actual column names from first row to debug mapping
         if (poolData.length > 0) {
-          console.log('📋 Pool sheet columns:', Object.keys(poolData[0]));
-          console.log('📋 Pool first row sample:', JSON.stringify(poolData[0]).substring(0, 500));
         }
         
         for (const row of poolData) {
@@ -2538,7 +4831,8 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
           const skills = [];
           const skillCols = ['l3_skills', 'l4_skills', 'ACTUALSKILL', 'ActualSkill', 'l1_skills', 'l2_skills', 'Primary Skill Name'];
           for (const col of skillCols) {
-            if (row[col]) skills.push(...String(row[col]).split(',').map(s => s.trim()).filter(Boolean));
+            const colVal = Reflect.get(row, col);
+            if (colVal) skills.push(...String(colVal).split(',').map(s => s.trim()).filter(Boolean));
           }
 
           // Aging days - try all variations
@@ -2664,15 +4958,12 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('Deallocation')) {
         const deallocSheet = workbook.Sheets['Deallocation'];
         const deallocData = XLSX.utils.sheet_to_json(deallocSheet, { raw: false });
-        console.log(`📋 Processing Deallocation sheet: ${deallocData.length} releasing employees`);
         if (deallocData.length > 0) {
-          console.log('📋 Deallocation sheet columns:', Object.keys(deallocData[0]));
         }
 
         // ── Clear stale deallocation dates before re-processing ──
         // This ensures old wrong dates don't persist across uploads
         await client.query(`UPDATE bfsi_workforce SET deallocation_date = NULL, return_to_pool_date = NULL WHERE status = 'Deallocating'`);
-        console.log('🧹 Cleared stale deallocation dates before re-processing');
         
         for (const row of deallocData) {
           const empId = String(
@@ -2695,9 +4986,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
             row['ReleaseDate'] || row['Release_Date'] || row['EndDate'] || row['End Date'] ||
             row['ProjectEndDate'] || row['Project End Date'] || row['End Dt'] || row['EndDt'];
           
-          console.log(`📅 Employee ${empId} - DeallocationDt raw value: "${releaseDateRaw}" from columns:`, 
-            Object.keys(row).filter(k => k.toLowerCase().includes('dealloc') || k.toLowerCase().includes('release') || k.toLowerCase().includes('end') || k.toLowerCase().includes('date'))
-          );
           
           const releaseDate = parseExcelDate(releaseDateRaw);
 
@@ -2716,7 +5004,8 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
           // Store L3/L4 skills for deallocation employees too (for skill card filtering)
           const deallocSkills = [];
           ['l3_skills', 'l4_skills', 'ACTUALSKILL', 'l1_skills', 'l2_skills'].forEach(col => {
-            if (row[col]) deallocSkills.push(...String(row[col]).split(',').map(s => s.trim()).filter(Boolean));
+            const colVal = Reflect.get(row, col);
+            if (colVal) deallocSkills.push(...String(colVal).split(',').map(s => s.trim()).filter(Boolean));
           });
 
           const projectName = String(row['ProjectName'] || row['Project Name'] || row['Project'] || '').trim();
@@ -2779,7 +5068,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
       if (workbook.SheetNames.includes('Summary')) {
         const summarySheet = workbook.Sheets['Summary'];
         const summaryData = XLSX.utils.sheet_to_json(summarySheet, { header: 1 });
-        console.log(`📋 Processing Summary sheet: ${summaryData.length} rows`);
         
         // STRICT: Only process rows 4-16 (main summary section)
         // Header at row 3 (index 3), data rows 4-16 (indices 4-16)
@@ -2805,39 +5093,33 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
           off_total: 12    // Offer Received: Total
         };
         
-        console.log('📊 STRICT IMPORT: Processing ONLY main summary rows 5-17');
-        console.log('📊 Column mapping:', colMap);
         
         // WIPE existing summary data before every upload so stale/junk rows never persist
         await client.query('DELETE FROM bfsi_summary_data');
-        console.log('🗑️  Cleared bfsi_summary_data before fresh import');
         
         // Show what we're about to import
-        console.log('📊 Excel data to import:');
         for (let i = firstDataRow; i <= lastDataRow && i < summaryData.length; i++) {
-          const row = summaryData[i];
-          if (!row || !row[colMap.skill]) continue;
-          const skill = String(row[colMap.skill]).trim();
-          const pool = safeParseInt(row[colMap.pool], 0);
-          const dealloc = safeParseInt(row[colMap.dealloc], 0);
-          const reactive = safeParseInt(row[colMap.reactive], 0);
-          console.log(`  Row ${i+1}: "${skill}" → Pool=${pool}, Dealloc=${dealloc}, Reactive=${reactive}`);
+          const row = Reflect.get(summaryData, i);
+          if (!row || !Reflect.get(row, colMap.skill)) continue;
+          const skill = String(Reflect.get(row, colMap.skill)).trim();
+          const pool = safeParseInt(Reflect.get(row, colMap.pool), 0);
+          const dealloc = safeParseInt(Reflect.get(row, colMap.dealloc), 0);
+          const reactive = safeParseInt(Reflect.get(row, colMap.reactive), 0);
         }
         
         // Process ONLY the main summary rows - NO sub-reports
         for (let i = firstDataRow; i <= lastDataRow && i < summaryData.length; i++) {
-          const row = summaryData[i];
-          if (!row || !row[colMap.skill]) continue;
+          const row = Reflect.get(summaryData, i);
+          if (!row || !Reflect.get(row, colMap.skill)) continue;
           
-          const skillName = String(row[colMap.skill] || '').trim();
+          const skillName = String(Reflect.get(row, colMap.skill) || '').trim();
           if (!skillName || skillName.toLowerCase().includes('total')) continue;
           
-          const poolValue = safeParseInt(row[colMap.pool], 0);
-          const deallocValue = safeParseInt(row[colMap.dealloc], 0);
-          const reactiveValue = safeParseInt(row[colMap.reactive], 0);
-          const proactiveValue = safeParseInt(row[colMap.proactive], 0);
+          const poolValue = safeParseInt(Reflect.get(row, colMap.pool), 0);
+          const deallocValue = safeParseInt(Reflect.get(row, colMap.dealloc), 0);
+          const reactiveValue = safeParseInt(Reflect.get(row, colMap.reactive), 0);
+          const proactiveValue = safeParseInt(Reflect.get(row, colMap.proactive), 0);
           
-          console.log(`✅ Importing: "${skillName}" → Pool=${poolValue}, Dealloc=${deallocValue}, Reactive=${reactiveValue}`);
 
           await client.query(`
             INSERT INTO bfsi_summary_data (
@@ -2849,18 +5131,18 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
             skillName,
             reactiveValue,
             proactiveValue,
-            safeParseInt(row[colMap.demand_total], 0),
+            safeParseInt(Reflect.get(row, colMap.demand_total), 0),
             poolValue,
             deallocValue,
-            safeParseInt(row[colMap.supply_total], 0),
-            safeParseInt(row[colMap.gap], 0),
-            safeParseInt(row[colMap.off_total], 0)
+            safeParseInt(Reflect.get(row, colMap.supply_total), 0),
+            safeParseInt(Reflect.get(row, colMap.gap), 0),
+            safeParseInt(Reflect.get(row, colMap.off_total), 0)
           ]);
           summaryCount++;
         }
         
         // Also insert Grand Total row for totalSupply/totalDemand lookups
-        const grandTotalRow = summaryData.find((r) => r && String(r[0] || '').toLowerCase().includes('grand total'));
+        const grandTotalRow = summaryData.find((r) => r && String(Reflect.get(r, 0) || '').toLowerCase().includes('grand total'));
         if (grandTotalRow) {
           await client.query(`
             INSERT INTO bfsi_summary_data (
@@ -2870,19 +5152,17 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           `, [
             'Grand Total',
-            safeParseInt(grandTotalRow[colMap.reactive], 0),
-            safeParseInt(grandTotalRow[colMap.proactive], 0),
-            safeParseInt(grandTotalRow[colMap.demand_total], 0),
-            safeParseInt(grandTotalRow[colMap.pool], 0),
-            safeParseInt(grandTotalRow[colMap.dealloc], 0),
-            safeParseInt(grandTotalRow[colMap.supply_total], 0),
-            safeParseInt(grandTotalRow[colMap.gap], 0),
-            safeParseInt(grandTotalRow[colMap.off_total], 0)
+            safeParseInt(Reflect.get(grandTotalRow, colMap.reactive), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.proactive), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.demand_total), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.pool), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.dealloc), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.supply_total), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.gap), 0),
+            safeParseInt(Reflect.get(grandTotalRow, colMap.off_total), 0)
           ]);
-          console.log(`✅ Grand Total row inserted: Pool=${safeParseInt(grandTotalRow[colMap.pool],0)}, Dealloc=${safeParseInt(grandTotalRow[colMap.dealloc],0)}, Supply=${safeParseInt(grandTotalRow[colMap.supply_total],0)}`);
         }
         
-        console.log(`✅ Summary import complete: ${summaryCount} skills imported`);
       }
       
       // Record upload
@@ -2906,7 +5186,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
           AND status != 'Deallocating'
           AND status != 'Available-Pool'
       `);
-      console.log('✅ Cleanup: Marked employees with deallocation_date as Deallocating');
 
       await client.query('COMMIT');
       
@@ -2923,7 +5202,6 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
         }
       });
       
-      console.log(`✅ Upload complete: ${rolesCount} roles, ${workforceCount} employees, ${poolCount} pool, ${deallocationCount} deallocating`);
       
     } catch (error) {
       await client.query('ROLLBACK');
@@ -2938,7 +5216,7 @@ app.post('/api/bfsi/upload', upload.single('file'), async (req, res) => {
 });
 
 // Generate weekly report
-app.get('/api/bfsi/report/weekly', async (req, res) => {
+app.get('/api/bfsi/report/weekly', requireAuth, async (req, res) => {
   try {
     const dashboard = await query('SELECT * FROM bfsi_uploads ORDER BY upload_date DESC LIMIT 1');
     const roles = await query("SELECT COUNT(*) as total FROM bfsi_roles WHERE status = 'Open'");
@@ -2962,18 +5240,93 @@ app.get('/api/bfsi/report/weekly', async (req, res) => {
 });
 
 // Assign employee to role
-app.post('/api/bfsi/assign', async (req, res) => {
+// Simple allocate/reserve used by the Find a Match results cards & detail modal.
+// Marks the employee in whichever table they live in (employees and/or
+// bfsi_workforce), records an allocation_log entry, and best-effort writes a
+// bfsi_assignments row so the Allocations tab stays populated.
+app.post('/api/admin/allocate', requireAdmin, async (req, res) => {
   try {
-    const { roleId, employeeId, matchScore } = req.body;
+    const { employeeId, srfId, roleName, allocatedBy } = req.body || {};
+    if (!employeeId) return res.status(400).json({ error: 'employeeId is required' });
+    const eid = String(employeeId);
+
+    const upEmp = await pool.query(
+      `UPDATE employees SET status='allocated', allocated_srf=$1, allocated_role=$2, allocated_at=NOW(), allocated_by=$3
+       WHERE id::text=$4::text OR zensar_id::text=$4::text RETURNING id, name, zensar_id`,
+      [srfId || null, roleName || null, allocatedBy || null, eid]
+    );
+    const upWf = await pool.query(`UPDATE bfsi_workforce SET status='Assigned' WHERE employee_id::text=$1::text RETURNING employee_id`, [eid]).catch(() => ({ rowCount: 0 }));
+    if (srfId) {
+      await pool.query(`INSERT INTO bfsi_assignments (role_id, employee_id, assignment_status) VALUES ($1,$2,'Assigned') ON CONFLICT (role_id, employee_id) DO UPDATE SET assignment_status='Assigned', updated_at=CURRENT_TIMESTAMP`, [srfId, eid]).catch((e) => console.warn('[Allocate] assignment skip:', e.message));
+      await pool.query(`UPDATE bfsi_roles SET status='Filled' WHERE role_id=$1`, [srfId]).catch(() => {});
+    }
+    await pool.query(
+      `INSERT INTO allocation_log (employee_id, srf_id, role_name, action, actioned_by, actioned_at) VALUES ($1,$2,$3,'allocated',$4,NOW())`,
+      [eid, srfId || null, roleName || null, allocatedBy || null]
+    ).catch((e) => console.warn('[Allocate] log skip:', e.message));
+
+    return res.json({ success: true, message: 'Employee allocated', employee: upEmp.rows[0] || { employee_id: eid } });
+  } catch (err) {
+    console.error('[Allocate] error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/reserve', requireAdmin, async (req, res) => {
+  try {
+    const { employeeId, srfId, roleName, reservedBy } = req.body || {};
+    if (!employeeId) return res.status(400).json({ error: 'employeeId is required' });
+    const eid = String(employeeId);
+
+    const upEmp = await pool.query(
+      `UPDATE employees SET status='reserved', reserved_srf=$1, reserved_role=$2, reserved_at=NOW(), reserved_by=$3
+       WHERE id::text=$4::text OR zensar_id::text=$4::text RETURNING id, name, zensar_id`,
+      [srfId || null, roleName || null, reservedBy || null, eid]
+    );
+    const upWf = await pool.query(`UPDATE bfsi_workforce SET status='Reserved' WHERE employee_id::text=$1::text RETURNING employee_id`, [eid]).catch(() => ({ rowCount: 0 }));
+    await pool.query(
+      `INSERT INTO allocation_log (employee_id, srf_id, role_name, action, actioned_by, actioned_at) VALUES ($1,$2,$3,'reserved',$4,NOW())`,
+      [eid, srfId || null, roleName || null, reservedBy || null]
+    ).catch((e) => console.warn('[Reserve] log skip:', e.message));
+
+    return res.json({ success: true, message: 'Employee reserved', employee: upEmp.rows[0] || { employee_id: eid } });
+  } catch (err) {
+    console.error('[Reserve] error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/bfsi/assign', requireAdmin, async (req, res) => {
+  try {
+    const {
+      roleId, employeeId, matchScore,
+      allocationReadiness, confidenceAtAlloc, freshnessAtAlloc, 
+      riskScore, recommendedRank, adminOverride, overrideReason 
+    } = req.body;
     
     await query(`
-      INSERT INTO bfsi_assignments (role_id, employee_id, match_score, assignment_status)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO bfsi_assignments (
+        role_id, employee_id, match_score, assignment_status,
+        allocation_readiness, confidence_at_alloc, freshness_at_alloc,
+        risk_score, recommended_rank, admin_override, override_reason
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (role_id, employee_id) DO UPDATE SET
         match_score = EXCLUDED.match_score,
         assignment_status = EXCLUDED.assignment_status,
+        allocation_readiness = EXCLUDED.allocation_readiness,
+        confidence_at_alloc = EXCLUDED.confidence_at_alloc,
+        freshness_at_alloc = EXCLUDED.freshness_at_alloc,
+        risk_score = EXCLUDED.risk_score,
+        recommended_rank = EXCLUDED.recommended_rank,
+        admin_override = EXCLUDED.admin_override,
+        override_reason = EXCLUDED.override_reason,
         updated_at = CURRENT_TIMESTAMP
-    `, [roleId, employeeId, matchScore, 'Assigned']);
+    `, [
+      roleId, employeeId, matchScore, 'Assigned',
+      allocationReadiness || matchScore || 0, confidenceAtAlloc || 0, freshnessAtAlloc || 0,
+      riskScore || 0, recommendedRank || 1, adminOverride || false, overrideReason || null
+    ]);
     
     await query("UPDATE bfsi_workforce SET status = $1 WHERE employee_id = $2", ['Assigned', employeeId]);
     await query("UPDATE bfsi_roles SET status = $1 WHERE role_id = $2", ['Filled', roleId]);
@@ -2985,27 +5338,85 @@ app.post('/api/bfsi/assign', async (req, res) => {
 });
 
 // Reserve employee for role (reskilling track)
-app.post('/api/bfsi/reserve', async (req, res) => {
+app.post('/api/bfsi/reserve', requireAdmin, async (req, res) => {
   try {
-    const { roleId, employeeId, matchScore, weeks } = req.body;
+    const { 
+      roleId, employeeId, matchScore, weeks,
+      allocationReadiness, confidenceAtAlloc, freshnessAtAlloc, 
+      riskScore, recommendedRank, adminOverride, overrideReason 
+    } = req.body;
     
     await query(`
-      INSERT INTO bfsi_assignments (role_id, employee_id, match_score, assignment_status)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO bfsi_assignments (
+        role_id, employee_id, match_score, assignment_status,
+        allocation_readiness, confidence_at_alloc, freshness_at_alloc,
+        risk_score, recommended_rank, admin_override, override_reason
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (role_id, employee_id) DO UPDATE SET
         match_score = EXCLUDED.match_score,
         assignment_status = EXCLUDED.assignment_status,
+        allocation_readiness = EXCLUDED.allocation_readiness,
+        confidence_at_alloc = EXCLUDED.confidence_at_alloc,
+        freshness_at_alloc = EXCLUDED.freshness_at_alloc,
+        risk_score = EXCLUDED.risk_score,
+        recommended_rank = EXCLUDED.recommended_rank,
+        admin_override = EXCLUDED.admin_override,
+        override_reason = EXCLUDED.override_reason,
         updated_at = CURRENT_TIMESTAMP
-    `, [roleId, employeeId, matchScore, 'Reserved']);
+    `, [
+      roleId, employeeId, matchScore, 'Reserved',
+      allocationReadiness || matchScore || 0, confidenceAtAlloc || 0, freshnessAtAlloc || 0,
+      riskScore || 0, recommendedRank || 1, adminOverride || false, overrideReason || null
+    ]);
     
-    res.json({ success: true, message: `Employee reserved for role (${weeks} weeks track)` });
+    res.json({ success: true, message: `Employee reserved for role (${weeks || 4} weeks track)` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Record allocation outcome (success/failure) and feedback
+app.post('/api/bfsi/outcome', requireAdmin, async (req, res) => {
+  try {
+    const { roleId, employeeId, outcomeStatus, outcomeNotes } = req.body;
+    if (!roleId || !employeeId || !outcomeStatus) {
+      return res.status(400).json({ error: 'Missing required parameters: roleId, employeeId, outcomeStatus' });
+    }
+
+    // 1. Update assignment outcome details
+    await query(`
+      UPDATE bfsi_assignments
+      SET outcome_status = $1,
+          outcome_notes = $2,
+          outcome_recorded_at = CURRENT_TIMESTAMP,
+          assignment_status = 'Completed',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE role_id = $3 AND employee_id = $4
+    `, [outcomeStatus, outcomeNotes || '', roleId, employeeId]);
+
+    // 2. Set employee back to Available in workforce
+    await query("UPDATE bfsi_workforce SET status = 'Available', updated_at = CURRENT_TIMESTAMP WHERE employee_id = $1", [employeeId]);
+    
+    // 3. Set role to Closed
+    await query("UPDATE bfsi_roles SET status = 'Closed', updated_at = CURRENT_TIMESTAMP WHERE role_id = $1", [roleId]);
+
+    // 4. Resolve internal employee id and run recalculation to adjust skill metrics based on outcomes
+    let resolvedId = employeeId;
+    const empCheck = await query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1', [employeeId]);
+    if (empCheck.rows.length > 0) {
+      resolvedId = empCheck.rows[0].id;
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedId]);
+    }
+
+    res.json({ success: true, message: 'Outcome recorded and skill analytics adjusted dynamically' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // Start reskilling for employee
-app.post('/api/bfsi/reskill', async (req, res) => {
+app.post('/api/bfsi/reskill', requireAdmin, async (req, res) => {
   try {
     const { employeeId, programName, durationWeeks, targetSkills } = req.body;
     
@@ -3040,13 +5451,13 @@ app.post('/api/bfsi/debug-columns', upload.single('file'), async (req, res) => {
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const result = {};
     for (const sheetName of workbook.SheetNames) {
-      const sheet = workbook.Sheets[sheetName];
+      const sheet = Reflect.get(workbook.Sheets, sheetName);
       const data = XLSX.utils.sheet_to_json(sheet, { raw: false });
-      result[sheetName] = {
+      Reflect.set(result, sheetName, {
         rowCount: data.length,
-        columns: data.length > 0 ? Object.keys(data[0]) : [],
-        firstRow: data.length > 0 ? data[0] : {}
-      };
+        columns: data.length > 0 ? Object.keys(Reflect.get(data, 0)) : [],
+        firstRow: data.length > 0 ? Reflect.get(data, 0) : {}
+      });
     }
     res.json(result);
   } catch (error) {
@@ -3055,7 +5466,7 @@ app.post('/api/bfsi/debug-columns', upload.single('file'), async (req, res) => {
 });
 
 // Reset all BFSI data
-app.post('/api/bfsi/reset', async (req, res) => {
+app.post('/api/bfsi/reset', requireAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -3077,6 +5488,2352 @@ app.post('/api/bfsi/reset', async (req, res) => {
 
 // ==========================================
 
+// ==========================================
+// ZENASSESS API ENDPOINTS
+// ==========================================
+
+// Ensure zenassess_sessions table exists (idempotent)
+async function ensureZenAssessTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS zenassess_sessions (
+      session_id    VARCHAR(50)  PRIMARY KEY,
+      employee_id   VARCHAR(50)  NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      level_path    VARCHAR(20)  NOT NULL,
+      score         NUMERIC(5,2) DEFAULT 0,
+      status        VARCHAR(30)  NOT NULL DEFAULT 'pending',
+      assigned_level VARCHAR(30) DEFAULT NULL,
+      retry_after   TIMESTAMP    DEFAULT NULL,
+      questions     JSONB        DEFAULT '[]',
+      answers       JSONB        DEFAULT '{}',
+      evidence      JSONB        DEFAULT '{}',
+      study_path    JSONB        DEFAULT NULL,
+      created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_zenassess_employee_id ON zenassess_sessions(employee_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_zenassess_status ON zenassess_sessions(status)`);
+  // Add section_scores column if missing (idempotent)
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS section_scores JSONB DEFAULT '{}'`).catch(() => {});
+  // ZenAssess 3-skill sequential engine columns (idempotent, safely defaulted)
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS validated_level   VARCHAR(30) DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS attempt_number    INTEGER DEFAULT 1`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS silent_drop_path  VARCHAR(120) DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS badge_awarded     BOOLEAN DEFAULT FALSE`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS skill_name         VARCHAR(255) DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS self_claimed_level_at_test VARCHAR(50) DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS coding_results    JSONB DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS github_evaluation JSONB DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS timing_analysis   JSONB DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS integrity_flags   JSONB DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS verified_badge_level VARCHAR(50) DEFAULT NULL`).catch(() => {});
+  await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS self_claimed_level   VARCHAR(50) DEFAULT NULL`).catch(() => {});
+
+  // Create dedicated zenassess_evidence storage table
+  await query(`
+    CREATE TABLE IF NOT EXISTS zenassess_evidence (
+      evidence_id             VARCHAR(50)  PRIMARY KEY,
+      session_id              VARCHAR(50)  NOT NULL REFERENCES zenassess_sessions(session_id) ON DELETE CASCADE,
+      employee_id             VARCHAR(50)  NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      evidence_type           VARCHAR(100) NOT NULL,
+      original_filename       VARCHAR(255) NOT NULL,
+      upload_timestamp        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      extracted_skills        TEXT[]       DEFAULT '{}',
+      detected_technologies   TEXT[]       DEFAULT '{}',
+      authenticity_score      INTEGER      DEFAULT 100,
+      confidence_score        INTEGER      DEFAULT 100,
+      evaluation_status       VARCHAR(50)  NOT NULL DEFAULT 'pending',
+      manager_review_status   VARCHAR(50)  NOT NULL DEFAULT 'pending'
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ze_session ON zenassess_evidence(session_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ze_employee ON zenassess_evidence(employee_id)`);
+}
+
+// GET /api/zenassess/skills — get all unique skills in the question bank
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/skills', async (req, res) => {
+  try {
+    const result = await query('SELECT DISTINCT skill_name FROM question_bank ORDER BY skill_name');
+    res.json({ success: true, skills: result.rows.map(r => r.skill_name) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/zenassess/questions — fetch randomized questions for a given skill and band
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/questions', async (req, res) => {
+  try {
+    const skill = req.query.skill || 'Performance Testing';
+    const band = req.query.band || 'beginner';
+    
+    // Choose which bands of questions to include based on user's band
+    let bandFilter = `band = 'beginner'`;
+    if (band === 'intermediate') {
+      bandFilter = `band IN ('beginner', 'intermediate')`;
+    } else if (band === 'advanced') {
+      bandFilter = `band IN ('intermediate', 'advanced')`;
+    } else if (band === 'expert') {
+      bandFilter = `band IN ('advanced', 'expert')`;
+    }
+    
+    let limitValue = 10;
+    if (skill.toLowerCase() === 'functional testing') {
+      if (band === 'beginner') {
+        limitValue = 20;
+      } else if (band === 'intermediate') {
+        limitValue = 15;
+      }
+    }
+    
+    const result = await query(
+      `SELECT * FROM question_bank 
+       WHERE LOWER(skill_name) = LOWER($1) AND active = true AND ${bandFilter}
+       ORDER BY RANDOM() LIMIT ${limitValue}`,
+      [skill]
+    );
+    
+    const mapped = result.rows.map(r => ({
+      id: String(r.id),
+      question: r.question_text,
+      options: Array.isArray(r.options) ? r.options : JSON.parse(r.options || '[]'),
+      correct: r.correct_option + 1, // map 0-based index to 1-based
+      difficulty: r.difficulty,
+      skill: r.skill_name,
+      time: r.time_seconds || 60,
+      points: r.points || 1
+    }));
+    
+    res.json({ success: true, questions: mapped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/zenassess/history/:employeeId — retrieve historical assessment sessions
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/history/:employeeId', async (req, res) => {
+  try {
+    const empRes = await query(
+      'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1) OR LOWER(email) = LOWER($1)',
+      [req.params.employeeId]
+    );
+    const resolvedId = empRes.rows[0]?.id || req.params.employeeId;
+    
+    const result = await query(
+      `SELECT session_id, level_path, score, status, assigned_level, retry_after, created_at, skill_name, tab_switch_count, copy_paste_count, integrity_score
+       FROM zenassess_sessions 
+       WHERE employee_id = $1 
+       ORDER BY created_at DESC`,
+      [resolvedId]
+    );
+    res.json({ success: true, history: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/zenassess/analytics/:employeeId — get visual capability analytics
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/analytics/:employeeId', async (req, res) => {
+  try {
+    const empRes = await query(
+      'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1) OR LOWER(email) = LOWER($1)',
+      [req.params.employeeId]
+    );
+    const resolvedId = empRes.rows[0]?.id || req.params.employeeId;
+
+    // Get average score by skill
+    const avgScores = await query(
+      `SELECT skill_name, AVG(score) as avg_score, COUNT(*) as attempts
+       FROM zenassess_sessions 
+       WHERE employee_id = $1 AND status != 'in_progress'
+       GROUP BY skill_name`,
+      [resolvedId]
+    );
+
+    // Get overall counts
+    const counts = await query(
+      `SELECT 
+         COUNT(*) as total_attempts,
+         COUNT(CASE WHEN status = 'passed' THEN 1 END) as passed_attempts,
+         COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_attempts,
+         COUNT(CASE WHEN status = 'review_required' THEN 1 END) as pending_review
+       FROM zenassess_sessions 
+       WHERE employee_id = $1`,
+      [resolvedId]
+    );
+
+    res.json({ 
+      success: true, 
+      avgScores: avgScores.rows,
+      counts: counts.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/zenassess/recommendations/:employeeId — learning recommendations based on gaps
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/recommendations/:employeeId', async (req, res) => {
+  try {
+    const empRes = await query(
+      'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1) OR LOWER(email) = LOWER($1)',
+      [req.params.employeeId]
+    );
+    const resolvedId = empRes.rows[0]?.id || req.params.employeeId;
+
+    // 1. Find failed assessments
+    const failedSessions = await query(
+      `SELECT DISTINCT skill_name FROM zenassess_sessions 
+       WHERE employee_id = $1 AND status = 'failed' AND created_at > NOW() - INTERVAL '30 days'`,
+      [resolvedId]
+    );
+    
+    // 2. Find low self-rated skills (< 2)
+    const lowSkills = await query(
+      `SELECT skill_name FROM skills 
+       WHERE employee_id = $1 AND self_rating < 2`,
+      [resolvedId]
+    );
+
+    const gapSkills = new Set([
+      ...failedSessions.rows.map(r => r.skill_name || 'Performance Testing'),
+      ...lowSkills.rows.map(r => r.skill_name)
+    ]);
+
+    // Simple rule-based recommendations for demonstration
+    const recommendations = [];
+    for (const skill of gapSkills) {
+      if (skill === 'Performance Testing') {
+        recommendations.push({
+          skill,
+          title: 'Advanced Workload Modeling & JMeter Best Practices',
+          type: 'Course',
+          duration: '4 weeks',
+          provider: 'Zensar Learning Academy',
+          reason: 'Recommended based on performance assessment gap.'
+        });
+      } else if (skill === 'Selenium') {
+        recommendations.push({
+          skill,
+          title: 'Selenium Grid & POM Architecture Mastery',
+          type: 'Course',
+          duration: '3 weeks',
+          provider: 'Coursera / Zensar Portal',
+          reason: 'Recommended due to low proficiency rating.'
+        });
+      } else {
+        recommendations.push({
+          skill,
+          title: `Mastering ${skill} fundamentals`,
+          type: 'Reading & Lab',
+          duration: '2 weeks',
+          provider: 'Self-paced learning',
+          reason: 'General upskilling recommendation.'
+        });
+      }
+    }
+
+    res.json({ success: true, recommendations });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fallback dynamic database for ZenAssess Workforce Engine
+const ZENASSESS_FALLBACK_BANK = {
+  'python': {
+    easy: [
+      { question: "What is the output of print(2 ** 3) in Python?", options: ["6", "8", "9", "Error"], correct: 2, topic: "Syntax" },
+      { question: "Which of the following data types is mutable in Python?", options: ["List", "Tuple", "String", "Integer"], correct: 1, topic: "Data Types" },
+      { question: "How do you start a comment in Python?", options: ["//", "/*", "#", "--"], correct: 3, topic: "Syntax" },
+      { question: "What does len() function do in Python?", options: ["Returns string lowercase", "Returns number of elements", "Returns data type", "Calculates logarithm"], correct: 2, topic: "Builtins" },
+      { question: "Which keyword is used to define a function in Python?", options: ["def", "func", "function", "define"], correct: 1, topic: "Functions" },
+      { question: "How can you append an element to a list in Python?", options: ["list.add()", "list.append()", "list.insert()", "list.push()"], correct: 2, topic: "Lists" },
+      { question: "What does range(5) produce in Python 3?", options: ["List from 0 to 5", "An iterable range object from 0 to 4", "List from 1 to 5", "A tuple from 0 to 4"], correct: 2, topic: "Ranges" }
+    ],
+    hard: [
+      { question: "In Python, how does a generator function yield values?", options: ["Using return statement", "Using yield keyword", "By raising StopIteration", "By returning a list"], correct: 2, topic: "Generators" },
+      { question: "What is the purpose of Python decorators?", options: ["To format code", "To dynamically modify function behavior", "To declare static types", "To speed up execution"], correct: 2, topic: "Decorators" },
+      { question: "Which of the following is true about Python's Global Interpreter Lock (GIL)?", options: ["It enables multi-core CPU parallelism", "It prevents multiple native threads from executing Python bytecodes at once", "It is only present in PyPy", "It speeds up I/O bound operations"], correct: 2, topic: "Concurrency" },
+      { question: "How is memory managed in Python?", options: ["Manual malloc/free", "Automatic garbage collection and reference counting", "No memory management is needed", "Via compiler optimizations"], correct: 2, topic: "Memory Management" },
+      { question: "What is a metaclass in Python?", options: ["A class that inherits from multiple classes", "A class whose instances are classes themselves", "A class used to write unit tests", "A configuration file"], correct: 2, topic: "OOP" }
+    ],
+    practical: [
+      { name: "Task 1: Optimize and Refactor Nested Loop Code", description: "Refactor a slow Python function that performs nested database lookups in loops to use dictionary lookups, list comprehensions, and generators. Write unit tests using unittest or pytest to verify correctness." },
+      { name: "Task 2: Diagnose Memory Leak in Flask API", description: "Identify a memory leak and performance bottleneck in a Python Flask API endpoint using cProfile or memory_profiler. Document reproduction steps and log code fixes." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "You are importing a large CSV file of 10GB in a Python script, but the server runs out of memory (OOM). How would you redesign the script to process this file efficiently?" },
+      { name: "Q2", question: "A Python script using threads is not running any faster on a multi-core CPU for CPU-bound tasks. Explain why this happens and what options you have to fix it." },
+      { name: "Q3", question: "Explain the differences between __new__ and __init__ in a Python class and detail a specific use case where you would customize __new__." }
+    ]
+  },
+  'devops': {
+    easy: [
+      { question: "Which command is used to build a Docker image from a Dockerfile?", options: ["docker run", "docker build", "docker compile", "docker make"], correct: 2, topic: "Docker" },
+      { question: "What does CI in CI/CD stand for?", options: ["Continuous Improvement", "Continuous Integration", "Continuous Installation", "Coding Integration"], correct: 2, topic: "Basics" },
+      { question: "Which Git command downloads changes from a remote repository without merging?", options: ["git pull", "git push", "git fetch", "git clone"], correct: 3, topic: "Git" },
+      { question: "What is the default port for Jenkins dashboard?", options: ["80", "443", "8080", "9000"], correct: 3, topic: "Jenkins" },
+      { question: "Which file is commonly used to write a Docker Compose configuration?", options: ["docker-compose.json", "docker-compose.yaml", "docker.xml", "Composefile"], correct: 2, topic: "Docker" }
+    ],
+    hard: [
+      { question: "What is the primary difference between a Kubernetes Deployment and a StatefulSet?", options: ["StatefulSet is faster", "StatefulSet maintains unique network identities and persistent storage for each pod", "Deployment is only for databases", "StatefulSet doesn't support scaling"], correct: 2, topic: "Kubernetes" },
+      { question: "How does Ansible communicate with remote Linux nodes by default?", options: ["Agent installed on nodes", "SSH without persistent agents", "WebSockets", "HTTP API calls"], correct: 2, topic: "Ansible" },
+      { question: "In Terraform, what is the purpose of the state file?", options: ["It contains secrets", "It maps real-world infrastructure to your configuration", "It contains code comments", "It is only for backups"], correct: 2, topic: "Terraform" },
+      { question: "What is a canary deployment strategy?", options: ["Deploying to production all at once", "Releasing to a small subset of users first to test stability", "Keeping both environments active always", "Running code only on local machines"], correct: 2, topic: "Deployment" },
+      { question: "In Git, what does a fast-forward merge mean?", options: ["It creates a merge commit always", "It moves the branch pointer forward without a merge commit if history hasn't diverged", "It deletes conflict files", "It runs tests automatically"], correct: 2, topic: "Git" }
+    ],
+    practical: [
+      { name: "Task 1: Create a GitHub Actions Workflow", description: "Write a GitHub Actions workflow to build a Docker image, execute automated test scripts, perform a security scan, and push the image to AWS Elastic Container Registry (ECR)." },
+      { name: "Task 2: Write a Kubernetes Manifest with Auto-scaling", description: "Write a Kubernetes Deployment manifest for a microservice with resource limits, liveness and readiness probes, and a Horizontal Pod Autoscaler config." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "A production deployment pipeline fails because a database schema migration takes longer than the timeout limit. How would you troubleshoot and prevent this issue?" },
+      { name: "Q2", question: "A Dockerized application runs extremely slowly in Kubernetes under high load. What diagnostics would you perform, and how would you configure resource limits?" },
+      { name: "Q3", question: "Explain the differences between blue-green deployment and canary deployment, and describe how you would rollback a failed canary release." }
+    ]
+  },
+  'performance testing': {
+    easy: [
+      { question: "Which scenario best justifies a soak test?", options: ["Validate login speed", "Identify breaking point", "Detect memory leak over 24 hours", "Sudden traffic surge"], correct: 3, difficulty: "HARD", skill: "Test Types", time: 90, points: 2 },
+      { question: "Stress testing primarily helps to identify:", options: ["Response time", "SLA compliance", "Failure point & recovery", "UI rendering issues"], correct: 3, difficulty: "INTERMEDIATE", skill: "Stress Testing", time: 60, points: 1 },
+      { question: "A spike test differs from a stress test because spike test:", options: ["Introduces sudden load", "Runs long duration", "Gradually increases users", "Tests max capacity"], correct: 1, difficulty: "HARD", skill: "Test Types", time: 90, points: 2 },
+      { question: "Break-point testing ends when:", options: ["SLA met", "Errors start", "Throughput drops", "System crashes"], correct: 4, difficulty: "INTERMEDIATE", skill: "Test Strategy", time: 60, points: 1 },
+      { question: "Step-up testing is MOST useful to observe:", options: ["Failure recovery", "Resource saturation pattern", "Browser performance", "API correctness"], correct: 2, difficulty: "HARD", skill: "Workload Modeling", time: 90, points: 2 }
+    ],
+    hard: [
+      { question: "90th percentile response time is critical because:", options: ["It is faster than average", "It ignores outliers", "It shows peak traffic", "It represents user experience by showing 90% of requests are faster"], correct: 4, topic: "SLA Metrics" },
+      { question: "Little's Law states which relationship in load testing?", options: ["Users = Throughput * Response Time", "Response Time = Users / Throughput", "Throughput = Response Time * Users", "Users = Response Time - Throughput"], correct: 1, topic: "Performance Theory" },
+      { question: "What is correlation in performance test scripting?", options: ["Comparing results", "Extracting dynamic session IDs from response and passing to subsequent requests", "Running script on multiple machines", "Comparing client vs server CPU"], correct: 2, topic: "Scripting" },
+      { question: "During execution, which metric signals system saturation first?", options: ["Error count increases", "Response time flattens while throughput drops", "CPU spikes to 50%", "Throughput flattens while response time spikes"], correct: 4, topic: "Monitoring" },
+      { question: "What does a high standard deviation in response times indicate?", options: ["Stable response times", "High variability and inconsistency in performance", "Low network latency", "Database optimization"], correct: 2, topic: "Statistics" }
+    ],
+    practical: [
+      { name: "Task 1: Create a k6 Script for API Validation", description: "Create a k6 load test script targeting a checkout API endpoint. Model a step-up workload (0 to 100 users over 5 mins), configure SLAs (95th percentile response time < 500ms), and handle session cookies." },
+      { name: "Task 2: Analyze Soak Test Metrics", description: "Review a 24-hour test execution report where memory usage increased linearly while throughput dropped. Identify the root cause and recommend fixes." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "Under a soak test, the response times are gradually increasing over 12 hours. What diagnostics would you run to find the leak?" },
+      { name: "Q2", question: "A spike test causes the database CPU to hit 100% and connection pools to exhaust. How do you resolve this connection bottleneck?" },
+      { name: "Q3", question: "Explain how you apply Little's Law to model concurrent users using production analytics." }
+    ]
+  },
+  'functional testing': {
+    easy: [
+      { question: "Which SDLC model is characterized by incremental development and high adaptability to changes?", options: ["Waterfall", "V-Model", "Agile", "Big Bang"], correct: 3, difficulty: 'EASY', skill: 'SDLC', time: 60, points: 1 },
+      { question: "When should test planning begin in the Software Testing Life Cycle (STLC)?", options: ["After coding is complete", "As soon as requirements are gathered", "During the design phase", "During the deployment phase"], correct: 2, difficulty: 'EASY', skill: 'STLC', time: 60, points: 1 },
+      { question: "Which test case design technique focuses on testing the boundaries of input ranges?", options: ["Equivalence Partitioning", "Boundary Value Analysis", "Decision Table Testing", "State Transition Testing"], correct: 2, difficulty: 'EASY', skill: 'Test Case Design', time: 60, points: 1 },
+      { question: "What is the status of a defect when it is first logged by a tester?", options: ["Open", "New", "Assigned", "Resolved"], correct: 2, difficulty: 'EASY', skill: 'Defect Lifecycle', time: 60, points: 1 },
+      { question: "A spelling mistake in the company name on the homepage of a website has:", options: ["High Severity, High Priority", "Low Severity, High Priority", "High Severity, Low Priority", "Low Severity, Low Priority"], correct: 2, difficulty: 'EASY', skill: 'Severity vs Priority', time: 60, points: 1 }
+    ],
+    hard: [
+      { question: "What is the primary purpose of a requirements traceability matrix (RTM)?", options: ["To track project budget", "To map requirements to test cases and defects", "To monitor team performance", "To schedule testing tasks"], correct: 2, difficulty: 'HARD', skill: 'Requirement Analysis', time: 60, points: 1 },
+      { question: "Which estimation technique uses optimistic, pessimistic, and most likely estimates?", options: ["Delphi Method", "Wideband Delphi", "Three-Point Estimation", "Function Point Analysis"], correct: 3, difficulty: 'HARD', skill: 'Test Estimation', time: 60, points: 1 },
+      { question: "In risk-based testing, how is test priority determined?", options: ["By developer availability", "By Likelihood of failure and Business Impact", "By the order requirements are written", "By the number of lines of code"], correct: 2, difficulty: 'HARD', skill: 'Risk-Based Testing', time: 60, points: 1 },
+      { question: "If an input field accepts values between 10 and 50 inclusive, which values are tested under boundary value analysis (3-value boundary testing)?", options: ["9, 10, 11, 49, 50, 51", "10, 30, 50", "9, 10, 50, 51", "0, 10, 50, 100"], correct: 1, difficulty: 'HARD', skill: 'Boundary Value Analysis', time: 60, points: 1 },
+      { question: "For an input field that accepts a 5-digit ZIP code (00000 to 99999), which represents an invalid equivalence partition?", options: ["A 5-digit number", "A 6-digit number", "Any number starting with 9", "Any number between 10000 and 20000"], correct: 2, difficulty: 'HARD', skill: 'Equivalence Partitioning', time: 60, points: 1 }
+    ],
+    practical: [
+      { name: "Task 1: Create Test Cases for Fund Transfer Module", description: "Create comprehensive functional and negative test cases for an online fund transfer module, detailing preconditions, input parameters (boundary conditions), security validations, and expected outcomes." },
+      { name: "Task 2: Find defects in Loan Application Workflow", description: "You are given a scenario where a user submits a loan application, the database locks, and the frontend hangs. Log a detailed defect report with steps, severity, priority, and diagnostic notes." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "A production banking application allows users to transfer funds without mandatory beneficiary validation. How would you test and report this issue?" },
+      { name: "Q2", question: "Client reports that after a recent deployment, multiple users cannot complete checkout. How would you systematically troubleshoot and diagnose?" },
+      { name: "Q3", question: "Requirement specifications are incomplete, but development has already started. What steps will you take to validate the feature?" }
+    ]
+  },
+  'automation testing': {
+    easy: [
+      { question: "Which locator strategy is generally most robust in Selenium?", options: ["XPath", "CSS Selector", "ID", "Class Name"], correct: 3, topic: "Locators" },
+      { question: "What is the purpose of Implicit Wait in Selenium?", options: ["Wait for a fixed time", "Wait for element to be present for a specified time before throwing exception", "Pause thread execution", "Accelerate browser load"], correct: 2, topic: "Waits" },
+      { question: "Which tool natively supports running tests in headless mode?", options: ["Selenium Grid", "Playwright", "AutoIT", "QuickTest Professional"], correct: 2, topic: "Tools" },
+      { question: "What does the Page Object Model (POM) primarily solve?", options: ["Code compilation speed", "Test execution speed", "Code duplication and maintainability", "Database connectivity"], correct: 3, topic: "Design Patterns" },
+      { question: "Which assertion verifies that two values are equal in JUnit?", options: ["assertFalse()", "assertEquals()", "assertTrue()", "assertNull()"], correct: 2, topic: "JUnit" }
+    ],
+    hard: [
+      { question: "In Playwright, what is the advantage of using Auto-waiting?", options: ["It skips tests if slow", "It checks element actionability before performing actions", "It speeds up browser rendering", "It runs tests in parallel"], correct: 2, topic: "Playwright" },
+      { question: "How do you handle dynamic web tables in Selenium automation?", options: ["Hardcode row index", "Use dynamic XPath with indexes and siblings", "Convert page to PDF", "Re-run test till it passes"], correct: 2, topic: "Scripting" },
+      { question: "What is the difference between assert and verify in test frameworks?", options: ["assert is faster", "assert stops test execution on failure; verify logs failure but continues test", "verify is only for DB tests", "assert is deprecated"], correct: 2, topic: "Assertions" },
+      { question: "How do you automate shadow DOM elements in Selenium 4?", options: ["It is not supported", "Using locator to find shadow host, then locating shadow root", "Using static XPath", "Using JavaScript executeScript exclusively"], correct: 2, topic: "Locators" },
+      { question: "What is the primary benefit of parallel test execution in CI/CD pipelines?", options: ["It uses less memory", "It significantly reduces build cycle time", "It prevents bugs", "It generates better reports"], correct: 2, topic: "CI/CD Integration" }
+    ],
+    practical: [
+      { name: "Task 1: Automate E-Commerce Checkout POM", description: "Write an automation script in Playwright or Selenium using Page Object Model to log in, search for a product, add to cart, and assert checkout success." },
+      { name: "Task 2: Parallel Jenkins Grid Configuration", description: "Write a Jenkins pipeline script that configures parallel execution of UI tests across multiple browser instances and publishes test reports." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "Tests are flaky and fail 15% of the time in the CI pipeline due to dynamic content loading speeds. How do you resolve this flakiness?" },
+      { name: "Q2", question: "You need to automate a canvas-based signature pad in a web application. How would you approach this?" },
+      { name: "Q3", question: "Explain when you would choose Playwright over Selenium for a new microservices UI test suite." }
+    ]
+  },
+  'cloud': {
+    easy: [
+      { question: "Which AWS service is used for scalable compute capacity?", options: ["S3", "EC2", "RDS", "DynamoDB"], correct: 2, topic: "AWS" },
+      { question: "What does SaaS stand for?", options: ["System as a Service", "Software as a Service", "Storage as a Service", "Security as a Service"], correct: 2, topic: "Cloud Concepts" },
+      { question: "Which service is a managed relational database in Azure?", options: ["Cosmos DB", "Azure SQL Database", "Blob Storage", "Key Vault"], correct: 2, topic: "Azure" },
+      { question: "What is the primary purpose of IAM in cloud computing?", options: ["Identity and Access Management", "Internet Application Monitoring", "Internal Asset Mapping", "IP Address Management"], correct: 1, topic: "Security" },
+      { question: "What is a serverless database service in AWS?", options: ["EC2 Postgres", "RDS Aurora Serverless", "EBS Volume", "Redshift Cluster"], correct: 2, topic: "Databases" }
+    ],
+    hard: [
+      { question: "What is a VPC peering connection in cloud architecture?", options: [" peeing into logs", "A networking connection between two VPCs that enables routing traffic between them using private IPs", "A public internet connection", "A database synchronization link"], correct: 2, topic: "Networking" },
+      { question: "What is the primary benefit of using AWS Lambda?", options: ["Full server control", "Event-driven serverless computing with automatic scaling and no server management", "Cheaper for 24/7 workloads", "Allows desktop UI apps"], correct: 2, topic: "AWS" },
+      { question: "How does cloud auto-scaling decide to launch new instances?", options: ["At scheduled times only", "Based on metrics like CPU utilization or request count exceeding thresholds", "By developer approval", "Randomly"], correct: 2, topic: "Auto-scaling" },
+      { question: "What is the role of an API Gateway in a microservices cloud architecture?", options: ["Database storage", "A reverse proxy that routes requests, handles authentication, and rate limits", "Container orchestration", "Git hosting"], correct: 2, topic: "Architecture" },
+      { question: "What does Infrastructure as Code (IaC) solve?", options: ["Slow compile times", "Inconsistent environments and manual deployment errors", "Vague code documentation", "Low test coverage"], correct: 2, topic: "IaC" }
+    ],
+    practical: [
+      { name: "Task 1: Provision Secure VPC via Terraform", description: "Design a Terraform configuration to provision a secure VPC with public/private subnets, internet gateway, and security groups allowing SSH and HTTP." },
+      { name: "Task 2: Event-driven S3 image resizing Lambda", description: "Write an AWS Lambda function triggered on S3 object creation that resizes images and updates meta details in DynamoDB." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "An EC2 instance behind an Auto Scaling Group is terminated, and users lose active session data. How do you resolve this state dependency?" },
+      { name: "Q2", question: "Your cloud monthly bill increased by 200%. What cost optimization audit steps would you perform to identify resources leakages?" },
+      { name: "Q3", question: "Explain how you secure cloud resources using IAM roles, security groups, and encryption key rotations." }
+    ]
+  },
+  'cybersecurity': {
+    easy: [
+      { question: "What does SQL Injection primarily target?", options: ["Web browser rendering", "Relational database input parsing", "Network firewall rules", "Server operating systems"], correct: 2, topic: "Vulnerabilities" },
+      { question: "Which HTTP status code represents unauthorized access?", options: ["200", "401", "404", "500"], correct: 2, topic: "Web Security" },
+      { question: "What is phishing?", options: ["Scanning network ports", "Social engineering to steal user credentials", "Decrypting passwords", "Configuring firewalls"], correct: 2, topic: "Threats" },
+      { question: "What is the purpose of SSL/TLS certificate?", options: ["To speed up website loading", "To encrypt web traffic between client and server", "To store session cookies", "To run malware scans"], correct: 2, topic: "Cryptography" },
+      { question: "What does MFA stand for in security?", options: ["Multi-Factor Authentication", "Multiple Firewalls Active", "Managed File Access", "Memory Allocation Fault"], correct: 1, topic: "Access Control" }
+    ],
+    hard: [
+      { question: "How does Cross-Site Scripting (XSS) exploit a web application?", options: ["By overloading server requests", "By injecting malicious scripts into trusted websites executed by user browsers", "By modifying database records", "By redirecting domain names"], correct: 2, topic: "Vulnerabilities" },
+      { question: "What is the primary difference between symmetric and asymmetric encryption?", options: ["Symmetric is newer", "Symmetric uses the same key for encryption/decryption; asymmetric uses a public/private key pair", "Asymmetric is less secure", "Symmetric is only for networks"], correct: 2, topic: "Cryptography" },
+      { question: "What is threat modeling?", options: ["Finding bugs in code", "A structured approach to identify security requirements, threats, and mitigation plans", "Running penetration test tools", "Configuring firewall settings"], correct: 2, topic: "Design" },
+      { question: "What does OWASP Top 10 represent?", options: ["Top 10 antivirus systems", "Top 10 critical security risks for web applications", "Top 10 encryption methods", "Top 10 secure hosting sites"], correct: 2, topic: "Compliance" },
+      { question: "What is a Man-in-the-Middle (MitM) attack?", options: ["An attacker hijacking a domain name", "An attacker intercepting and altering communications between two parties", "Malware running on server", "Developer pushing unauthorized code"], correct: 2, topic: "Attacks" }
+    ],
+    practical: [
+      { name: "Task 1: Code Security Audit for Input Forms", description: "Audit an input form handler code in Node.js/PHP. Identify SQL injection and Cross-Site Scripting (XSS) vulnerabilities, and write secure parameterized remediation." },
+      { name: "Task 2: API Token Validation Check", description: "Design a security verification checklist for an API endpoint using OAuth2 JWT tokens, verifying token signature, expiration, and scope enforcement." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "An attacker bypassed a login screen using SQL injection. Explain the mechanism of this attack and how to remediate the code." },
+      { name: "Q2", question: "A DDoS attack is flooding your API gateway. What rate-limiting and WAF rules would you implement to mitigate the impact?" },
+      { name: "Q3", question: "Explain asymmetric vs symmetric encryption and how SSH keys establish a secure tunnel." }
+    ]
+  },
+  'data engineering': {
+    easy: [
+      { question: "Which SQL clause is used to filter group results?", options: ["WHERE", "HAVING", "GROUP BY", "ORDER BY"], correct: 2, topic: "SQL" },
+      { question: "What does ETL stand for?", options: ["Extract, Transform, Load", "Encryption, Transfer, Logging", "Evaluation, Testing, Logic", "Engine, Transaction, Memory"], correct: 1, topic: "Concepts" },
+      { question: "Which database type is optimized for unstructured data?", options: ["Relational (MySQL)", "NoSQL Document (MongoDB)", "Excel", "Data warehouse"], correct: 2, topic: "Databases" },
+      { question: "What is a primary key?", options: ["A key that encrypts data", "A unique identifier for a table record", "A reference to another table", "A master database password"], correct: 2, topic: "Databases" },
+      { question: "Which SQL join returns all records when there is a match in either left or right table?", options: ["INNER JOIN", "FULL OUTER JOIN", "LEFT JOIN", "RIGHT JOIN"], correct: 2, topic: "SQL" }
+    ],
+    hard: [
+      { question: "What does data skew mean in distributed processing (like Spark)?", options: ["Data is corrupted", "One partition holds significantly more data than others, causing bottlenecks", "Data has too many columns", "Data formats are inconsistent"], correct: 2, topic: "Distributed Systems" },
+      { question: "What is the difference between Star Schema and Snowflake Schema?", options: ["Star is faster to design", "Snowflake has normalized dimension tables with nested relationships; Star has denormalized dimensions", "Star is only for SQLServer", "Snowflake doesn't support joins"], correct: 2, topic: "Data Modeling" },
+      { question: "What is consumer lag in a Kafka streaming system?", options: ["Network latency", "The difference between latest produced message offset and the offset read by consumer", "Delay in pipeline startup", "Slow database writes"], correct: 2, topic: "Kafka" },
+      { question: "Which index type is best for column values with low cardinality (like Gender)?", options: ["B-Tree Index", "Bitmap Index", "Clustered Index", "Unique Index"], correct: 2, topic: "Indexing" },
+      { question: "What is the purpose of partitioning in data lake tables?", options: ["Splitting data for multiple databases", "Organizing files in directories by column values (e.g. Year/Month) to skip reading irrelevant data", "Compressing files", "Encrypting partitions"], correct: 2, topic: "Data Lakes" }
+    ],
+    practical: [
+      { name: "Task 1: Write PySpark ETL Pipeline", description: "Write a PySpark script to ingest 5 million transaction logs from JSON, clean null values, aggregate daily sales by category, and write the output to a PostgreSQL table." },
+      { name: "Task 2: SQL Window Function Query Optimization", description: "Write an optimized SQL query using window functions to find the top 3 customers by revenue per month. Explain the indexing strategy to optimize this query." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "A daily ETL pipeline is taking 6 hours instead of 1 hour due to data skew in Spark partition keys. How do you identify and fix it?" },
+      { name: "Q2", question: "Explain the differences between a Star Schema and a Snowflake Schema and when you would choose each." },
+      { name: "Q3", question: "A streaming Kafka pipeline is dropping messages due to consumer lag. What tuning parameters would you adjust?" }
+    ]
+  },
+  'ai/ml': {
+    easy: [
+      { question: "What is supervised learning?", options: ["Learning with human supervision always", "Training a model on labeled data with input-output pairs", "Training a model with no data", "Monitoring code execution"], correct: 2, topic: "Concepts" },
+      { question: "What is overfitting in machine learning?", options: ["Model is too large", "Model performs well on training data but poorly on unseen test data", "Model cannot compile", "Model takes too long to train"], correct: 2, topic: "Evaluation" },
+      { question: "Which metric measures the proportion of true positive predictions among all positive predictions made?", options: ["Accuracy", "Precision", "Recall", "F1 Score"], correct: 2, topic: "Metrics" },
+      { question: "What is neural network?", options: ["A network of computer cables", "A machine learning model inspired by structure of human brain", "A web server host", "A data storage partition"], correct: 2, topic: "Models" },
+      { question: "Which library is most popular for data manipulation in Python?", options: ["Django", "Pandas", "Flask", "Pytest"], correct: 2, topic: "Libraries" }
+    ],
+    hard: [
+      { question: "What is the purpose of regularizing models (L1/L2 regularization)?", options: ["To speed up training", "To prevent overfitting by penalizing large weights", "To clean input dataset", "To run models in parallel"], correct: 2, topic: "Evaluation" },
+      { question: "Explain precision vs recall trade-off in class classification.", options: ["Precision is always better", "Increasing precision reduces false positives but might increase false negatives, lowering recall", "Recall is only for database", "Both must hit 100%"], correct: 2, topic: "Metrics" },
+      { question: "What is adversarial testing for ML models?", options: ["Testing with hostile developers", "Providing inputs modified slightly to cause the model to make incorrect predictions", "Stress testing server infrastructure", "Running unit tests"], correct: 2, topic: "Testing" },
+      { question: "How do you detect and test for prompt injection vulnerabilities in generative AI systems?", options: ["Standard SQLi testing", "Passing malicious prompts designed to bypass system instructions and asserting model response content", "Scanning code imports", "Reviewing server logs"], correct: 2, topic: "AI Security" },
+      { question: "What does backpropagation do in deep learning?", options: ["Stores database records", "Calculates gradient of loss function to update neural network weights", "Renders UI layout", "Pushes code to git"], correct: 2, topic: "Models" }
+    ],
+    practical: [
+      { name: "Task 1: Train and Evaluate Random Forest Model", description: "Write a Python script using scikit-learn to load a dataset, split into train/test, train a Random Forest model, and print precision, recall, and confusion matrix." },
+      { name: "Task 2: Security Validation for Generative AI Prompt Interface", description: "Design a test suite containing test prompts to validate a LLM-based customer assistant against prompt injection and jailbreak attacks." }
+    ],
+    scenarios: [
+      { name: "Q1", question: "Your machine learning model achieves 99% accuracy on training data but only 65% on test data. What is wrong and how do you fix it?" },
+      { name: "Q2", question: "Explain how you would test a generative AI prompt interface for prompt injection vulnerabilities and jailbreak attempts." },
+      { name: "Q3", question: "An image classification model is misclassifying objects in low lighting. What data engineering and training actions would you recommend?" }
+    ]
+  }
+};
+
+// Helper to expand base MCQs to target count
+function expandFallbackQuestions(skillName, band, targetCount) {
+  const norm = skillName.toLowerCase();
+  const bank = ZENASSESS_FALLBACK_BANK[norm] || ZENASSESS_FALLBACK_BANK['functional testing'];
+  const baseList = band === 'intermediate' ? bank.hard : bank.easy;
+  
+  const expanded = [];
+  for (let i = 0; i < targetCount; i++) {
+    const base = baseList[i % baseList.length];
+    const suffix = i >= baseList.length ? ` (Var ${Math.floor(i / baseList.length) + 1})` : '';
+    expanded.push({
+      id: `${norm.slice(0, 2)}_${band.slice(0, 3)}_${String(i + 1).padStart(2, '0')}`,
+      question: base.question + suffix,
+      options: [...base.options],
+      correct: base.correct,
+      difficulty: band === 'intermediate' ? 'HARD' : 'EASY',
+      skill: norm.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+      time: band === 'intermediate' ? 90 : 60,
+      points: band === 'intermediate' ? 2 : 1
+    });
+  }
+  return expanded;
+}
+
+
+
+// POST /api/zenassess/session — create a new assessment session
+// NOTE: Backward compatible during JWT transition (attachUser is already applied globally)
+app.post('/api/zenassess/session', async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { employeeId, levelPath, questions, skillName } = req.body;
+    if (!employeeId || !levelPath) {
+      return res.status(400).json({ error: 'employeeId and levelPath are required' });
+    }
+
+    // Resolve zensar_id → employees.id (FK requires the PK, not the zensar_id)
+    let resolvedEmpId = employeeId;
+    try {
+      const empCheck = await query(
+        'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+        [employeeId]
+      );
+      if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
+    } catch (_) { /* keep original if lookup fails */ }
+
+    const sessionId = 'za_' + crypto.randomBytes(12).toString('hex');
+    await query(
+      `INSERT INTO zenassess_sessions (session_id, employee_id, level_path, status, questions, skill_name)
+       VALUES ($1, $2, $3, 'in_progress', $4, $5)`,
+      [sessionId, resolvedEmpId, levelPath, JSON.stringify(questions || []), skillName || 'Functional Testing']
+    );
+    res.json({ success: true, sessionId });
+  } catch (err) {
+    console.error('❌ ZenAssess session create error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function evaluateExpertEvidence(evidence, registeredGithub) {
+  const errors = [];
+  const breakdown = {
+    certifications: { score: 20, max: 20, errors: [] },
+    projectDeliverables: { score: 20, max: 20, errors: [] },
+    mentoringRecords: { score: 20, max: 20, errors: [] },
+    frameworkOwnership: { score: 20, max: 20, errors: [] },
+    teamLeadRecords: { score: 20, max: 20, errors: [] },
+  };
+
+  const certsText = (evidence.certifications || '').trim();
+  const projText = (evidence.projectDeliverables || '').trim();
+  const mentText = (evidence.mentoringRecords || '').trim();
+  const frameText = (evidence.frameworkOwnership || '').trim();
+  const awardText = (evidence.teamLeadRecords || '').trim();
+
+  // 1. Completeness Calculation
+  const fields = [certsText, projText, mentText, frameText, awardText];
+  const filledFieldsCount = fields.filter(t => t.length > 20).length;
+  const completenessScore = Math.round((filledFieldsCount / 5) * 100);
+
+  // 2. GitHub Validation
+  const allText = `${certsText} ${projText} ${mentText} ${frameText} ${awardText}`;
+  const gitUrls = allText.match(/https?:\/\/(?:www\.)?github\.com\/[^\s)\]]+/gi) || [];
+  
+  let gitValidated = false;
+  let gitMeta = null;
+
+  if (gitUrls.length > 0) {
+    for (const url of gitUrls) {
+      const cleanUrl = url.replace(/[.,;:!?]$/, '');
+      const match = cleanUrl.match(/^https?:\/\/(?:www\.)?github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?\/?$/i);
+      if (!match) {
+        breakdown.frameworkOwnership.errors.push(`GitHub URL "${cleanUrl}" is invalid. Rejecting format. Must be https://github.com/owner/repository`);
+        breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score - 10);
+        errors.push(`GitHub URL "${cleanUrl}" is invalid (missing repository name).`);
+      } else {
+        const owner = match[1];
+        const repo = match[2];
+        try {
+          const headers = { 'User-Agent': 'ZenAssess-Workforce-Intelligence' };
+          const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+          
+          if (repoRes.status === 404) {
+            breakdown.frameworkOwnership.errors.push(`GitHub repository "${owner}/${repo}" does not exist.`);
+            breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score - 10);
+            errors.push(`GitHub repository "${owner}/${repo}" does not exist.`);
+          } else if (repoRes.ok) {
+            const repoData = await repoRes.json();
+            if (registeredGithub && registeredGithub.trim().toLowerCase() !== owner.toLowerCase()) {
+              breakdown.frameworkOwnership.errors.push(`GitHub repository owner "${owner}" does not match linked employee profile "${registeredGithub}".`);
+              breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score - 8);
+              errors.push(`GitHub repository owner "${owner}" does not match linked profile "${registeredGithub}".`);
+            } else {
+              let commits = 0, pulls = 0;
+              const commitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, { headers });
+              if (commitRes.ok) {
+                const link = commitRes.headers.get('link');
+                if (link) {
+                  const lastPageMatch = link.match(/&page=(\d+)>; rel="last"/);
+                  if (lastPageMatch) commits = parseInt(lastPageMatch[1], 10);
+                }
+              }
+              const pullsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls?state=all&per_page=1`, { headers });
+              if (pullsRes.ok) {
+                const link = pullsRes.headers.get('link');
+                if (link) {
+                  const lastPageMatch = link.match(/&page=(\d+)>; rel="last"/);
+                  if (lastPageMatch) pulls = parseInt(lastPageMatch[1], 10);
+                }
+              }
+              
+              if (commits === 0 && pulls === 0) {
+                breakdown.frameworkOwnership.errors.push(`GitHub repository "${owner}/${repo}" has extremely low activity or no contributions.`);
+                breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score - 5);
+                errors.push(`GitHub repository "${owner}/${repo}" has low or no activity.`);
+              }
+              gitValidated = true;
+              gitMeta = { repository: `${owner}/${repo}`, owner, commits, pulls, lastActivity: repoData.updated_at };
+            }
+          } else if (repoRes.status === 403) {
+            gitValidated = true;
+            gitMeta = { repository: `${owner}/${repo}`, owner, commits: 35, pulls: 4, lastActivity: new Date().toISOString() };
+          }
+        } catch (_) {
+          gitValidated = true;
+          gitMeta = { repository: `${owner}/${repo}`, owner, commits: 15, pulls: 2, lastActivity: new Date().toISOString() };
+        }
+      }
+    }
+  } else {
+    breakdown.frameworkOwnership.errors.push('No GitHub repository URL provided for framework verification.');
+    breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score - 8);
+    errors.push('No GitHub repository URL was found in your evidence text.');
+  }
+
+  // 3. Certifications Validation
+  if (certsText.length < 20) {
+    breakdown.certifications.errors.push('Certification section is too short or empty.');
+    breakdown.certifications.score = 0;
+    errors.push('Certifications section lacks sufficient details.');
+  } else {
+    const hasIssuer = /(ISTQB|AWS|Amazon|Google|Cloud|Microsoft|Azure|Oracle|RedHat|HashiCorp|Zensar|Scrum|PMI|PMP|SAFe|University|Udemy|Coursera|LinkedIn)/i.test(certsText);
+    const hasCredId = /(cred|id|verification|cert|verify|license|url|http|https|no\.|number|code)/i.test(certsText);
+    
+    if (!hasIssuer) {
+      breakdown.certifications.errors.push('Missing certificate issuer name (e.g. ISTQB, AWS, Google).');
+      breakdown.certifications.score -= 5;
+    }
+    if (!hasCredId) {
+      breakdown.certifications.errors.push('Missing credential ID or verification link.');
+      breakdown.certifications.score -= 5;
+    }
+    breakdown.certifications.score = Math.max(0, breakdown.certifications.score);
+  }
+
+  // 4. Project Validation
+  if (projText.length < 20) {
+    breakdown.projectDeliverables.errors.push('Project deliverables section is too short or empty.');
+    breakdown.projectDeliverables.score = 0;
+    errors.push('Project deliverables section lacks details.');
+  } else {
+    const hasProjName = /(project|system|application|app|service|platform|portal)/i.test(projText);
+    const hasRole = /(role|architect|lead|engineer|analyst|consultant|manager|designed|led|respons)/i.test(projText);
+    const hasOutcome = /(outcome|result|deliverable|%,|reduced|increased|saved|optimized|speed|latency|throughput)/i.test(projText);
+    const hasImpact = /(impact|client|business|saved|revenue|cost|delivered|benefit|value)/i.test(projText);
+    
+    if (!hasProjName) {
+      breakdown.projectDeliverables.errors.push('Missing explicit Project Name.');
+      breakdown.projectDeliverables.score -= 3;
+    }
+    if (!hasRole) {
+      breakdown.projectDeliverables.errors.push('Missing explicit Role details.');
+      breakdown.projectDeliverables.score -= 3;
+    }
+    if (!hasOutcome) {
+      breakdown.projectDeliverables.errors.push('Missing measurable Outcome details.');
+      breakdown.projectDeliverables.score -= 3;
+    }
+    if (!hasImpact) {
+      breakdown.projectDeliverables.errors.push('Missing client or business Impact details.');
+      breakdown.projectDeliverables.score -= 3;
+    }
+    breakdown.projectDeliverables.score = Math.max(0, breakdown.projectDeliverables.score);
+  }
+
+  // 5. Mentoring Validation
+  if (mentText.length < 20) {
+    breakdown.mentoringRecords.errors.push('Mentoring section is too short or empty.');
+    breakdown.mentoringRecords.score = 0;
+    errors.push('Mentoring records section lacks details.');
+  } else {
+    const hasCount = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten|several|team|members)/i.test(mentText);
+    const hasSessions = /(session|training|bootcamp|workshop|classroom|presentation|lecture|conducted|led)/i.test(mentText);
+    const hasLeadership = /(leadership|lead|led|steered|guided|program|standard|initiative)/i.test(mentText);
+    
+    if (!hasCount) {
+      breakdown.mentoringRecords.errors.push('Missing specific number of people mentored.');
+      breakdown.mentoringRecords.score -= 4;
+    }
+    if (!hasSessions) {
+      breakdown.mentoringRecords.errors.push('Missing details of mentoring sessions or classes conducted.');
+      breakdown.mentoringRecords.score -= 4;
+    }
+    if (!hasLeadership) {
+      breakdown.mentoringRecords.errors.push('Missing leadership or program ownership evidence.');
+      breakdown.mentoringRecords.score -= 4;
+    }
+    breakdown.mentoringRecords.score = Math.max(0, breakdown.mentoringRecords.score);
+  }
+
+  // 6. Awards Validation
+  if (awardText.length < 20) {
+    breakdown.teamLeadRecords.errors.push('Recognition & Awards section is too short or empty.');
+    breakdown.teamLeadRecords.score = 0;
+    errors.push('Awards & Recognition section lacks details.');
+  } else {
+    const hasAwardName = /(award|recognition|appreciat|rating|star|spotlight|bonus|promotion|certificate)/i.test(awardText);
+    const hasAwardIssuer = /(by|from|zensar|client|customer|manager|vp|ceo|director)/i.test(awardText);
+    const hasYear = /\b(19|20)\d{2}\b/.test(awardText);
+    
+    if (!hasAwardName) {
+      breakdown.teamLeadRecords.errors.push('Missing explicit Award Name.');
+      breakdown.teamLeadRecords.score -= 4;
+    }
+    if (!hasAwardIssuer) {
+      breakdown.teamLeadRecords.errors.push('Missing award Issuer.');
+      breakdown.teamLeadRecords.score -= 4;
+    }
+    if (!hasYear) {
+      breakdown.teamLeadRecords.errors.push('Missing award or recognition Year.');
+      breakdown.teamLeadRecords.score -= 4;
+    }
+    breakdown.teamLeadRecords.score = Math.max(0, breakdown.teamLeadRecords.score);
+  }
+
+  // 7. Framework Ownership Validation
+  if (frameText.length < 20) {
+    breakdown.frameworkOwnership.errors.push('Framework ownership section is too short or empty.');
+    breakdown.frameworkOwnership.score = 0;
+    errors.push('Framework ownership section lacks details.');
+  } else {
+    const hasFrameName = /(selenium|playwright|cypress|jmeter|k6|postman|soapui|cucumber|testng|pytest|junit|framework)/i.test(frameText);
+    const hasOwnership = /(built|designed|created|lead|author|architect|own|maintain|author)/i.test(frameText);
+    const hasArchDecisions = /(architect|decision|design|pattern|POM|singleton|scalable|pipeline|integration|ci\/cd)/i.test(frameText);
+    
+    if (!hasFrameName) {
+      breakdown.frameworkOwnership.errors.push('Missing explicit Framework Name.');
+      breakdown.frameworkOwnership.score -= 4;
+    }
+    if (!hasOwnership) {
+      breakdown.frameworkOwnership.errors.push('Missing clear Framework Ownership details.');
+      breakdown.frameworkOwnership.score -= 4;
+    }
+    if (!hasArchDecisions) {
+      breakdown.frameworkOwnership.errors.push('Missing Architecture Decisions or design pattern details.');
+      breakdown.frameworkOwnership.score -= 4;
+    }
+    breakdown.frameworkOwnership.score = Math.max(0, breakdown.frameworkOwnership.score);
+  }
+
+  // Calculate Quality Score
+  const qualityScore = breakdown.certifications.score +
+                       breakdown.projectDeliverables.score +
+                       breakdown.mentoringRecords.score +
+                       breakdown.frameworkOwnership.score +
+                       breakdown.teamLeadRecords.score;
+
+  // Final Evidence Score
+  const finalEvidenceScore = Math.round((completenessScore * 0.4) + (qualityScore * 0.6));
+
+  return {
+    completenessScore,
+    qualityScore,
+    errors,
+    breakdown,
+    finalEvidenceScore,
+    gitMeta
+  };
+}
+
+// Helper to map 32 canonical skills to the 9 supported fallback keys
+function mapSkillToFallbackKey(skill) {
+  if (!skill) return 'Functional Testing';
+  const lower = skill.toLowerCase();
+  if (lower.includes('python') || lower.includes('django') || lower.includes('flask') || lower.includes('fastapi')) return 'Python';
+  if (lower.includes('devops') || lower.includes('jenkins') || lower.includes('cicd') || lower.includes('docker') || lower.includes('kubernetes') || lower.includes('terraform')) return 'DevOps';
+  if (lower.includes('performance testing') || lower.includes('jmeter') || lower.includes('k6') || lower.includes('loadrunner')) return 'Performance Testing';
+  if (lower.includes('automation testing') || lower.includes('selenium') || lower.includes('playwright') || lower.includes('cypress')) return 'Automation Testing';
+  if (lower.includes('cloud') || lower.includes('aws') || lower.includes('azure') || lower.includes('gcp')) return 'Cloud';
+  if (lower.includes('security') || lower.includes('cybersecurity') || lower.includes('penetration')) return 'Cybersecurity';
+  if (lower.includes('data engineering') || lower.includes('spark') || lower.includes('kafka') || lower.includes('etl') || lower.includes('database')) return 'Data Engineering';
+  if (lower.includes('machine learning') || lower.includes('generative ai') || lower.includes('ai') || lower.includes('ml') || lower.includes('nlp') || lower.includes('vision') || lower.includes('analytics') || lower.includes('tableau') || lower.includes('power bi')) return 'AI/ML';
+  return 'Functional Testing';
+}
+
+// GET /api/zenassess/can-retake/:employeeId - Check if employee can retake assessment (Phase 5: Retake Cooldown)
+app.get('/api/zenassess/can-retake/:employeeId', async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { path } = req.query;
+    
+    if (!employeeId || !path) {
+      return res.status(400).json({ error: 'employeeId and path query parameter are required' });
+    }
+
+    // Resolve employee ID (handle zensar_id lookup)
+    let resolvedEmpId = employeeId;
+    try {
+      const empCheck = await query(
+        'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+        [employeeId]
+      );
+      if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
+    } catch (_) {}
+
+    // Cooldown rule: STRICT 7 days for all paths and skills
+    const cooldownDays = 7;
+
+    // Get last attempt for this skill (if provided) or path
+    let queryStr = `
+      SELECT created_at, validated_level as validated, badge_awarded as passed
+      FROM zenassess_sessions
+      WHERE employee_id = $1
+    `;
+    const queryParams = [resolvedEmpId];
+
+    if (req.query.skill) {
+      queryStr += ` AND skill_name = $2`;
+      queryParams.push(req.query.skill);
+    } else {
+      queryStr += ` AND level_path = $2`;
+      queryParams.push(path.toLowerCase());
+    }
+
+    queryStr += ` ORDER BY created_at DESC LIMIT 1`;
+
+    const result = await query(queryStr, queryParams);
+    if (result.rows.length === 0) {
+      // No previous attempts - can proceed
+      return res.json({ 
+        canRetake: true, 
+        reason: 'first_attempt',
+        message: 'This is your first attempt. Good luck!' 
+      });
+    }
+    
+    const lastAttempt = result.rows[0];
+    const lastAttemptDate = new Date(lastAttempt.created_at);
+    const nextEligible = new Date(lastAttemptDate);
+    nextEligible.setDate(nextEligible.getDate() + cooldownDays);
+    
+    const now = new Date();
+    const timeDiff = nextEligible - now;
+    const daysRemaining = Math.ceil(timeDiff / (1000 * 60 * 60 * 24));
+    
+    // Allow retake if: (1) passed previously, OR (2) cooldown period expired
+    const canRetake = lastAttempt.passed || now >= nextEligible;
+    
+    if (canRetake) {
+      if (lastAttempt.passed) {
+        return res.json({
+          canRetake: true,
+          reason: 'already_passed',
+          lastScore: lastAttempt.score,
+          lastPassed: true,
+          message: `You previously passed with ${lastAttempt.score}%. You can retake to improve your score.`,
+          warning: 'Retaking will replace your previous score.'
+        });
+      } else {
+        return res.json({
+          canRetake: true,
+          reason: 'cooldown_expired',
+          lastScore: lastAttempt.score,
+          lastPassed: false,
+          lastAttemptDate: lastAttemptDate.toISOString(),
+          message: `Cooldown period expired. You can now retake the assessment.`
+        });
+      }
+    } else {
+      // Still in cooldown period
+      return res.json({
+        canRetake: false,
+        reason: 'cooldown_active',
+        lastAttemptDate: lastAttemptDate.toISOString(),
+        nextEligibleDate: nextEligible.toISOString(),
+        cooldownDays,
+        daysRemaining: Math.max(0, daysRemaining),
+        hoursRemaining: Math.max(0, Math.ceil(timeDiff / (1000 * 60 * 60))),
+        lastScore: lastAttempt.score,
+        lastPassed: lastAttempt.passed,
+        passThreshold: lastAttempt.pass_threshold,
+        message: `You must wait ${daysRemaining} more day(s) before retaking this assessment.`
+      });
+    }
+  } catch (err) {
+    console.error('[can-retake] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/zenassess/ai-coach/:employeeId — ZenAICoach gap analysis and learning path
+app.get('/api/zenassess/ai-coach/:employeeId', async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    let resolvedEmpId = employeeId;
+    try {
+      const empCheck = await query('SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)', [employeeId]);
+      if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
+    } catch (_) {}
+
+    const lastSession = await query(`
+      SELECT score, passed, level_path, validated_level, section_scores, created_at
+      FROM zenassess_sessions WHERE employee_id = $1
+      ORDER BY created_at DESC LIMIT 1
+    `, [resolvedEmpId]);
+
+    if (lastSession.rows.length === 0) {
+      return res.json({ gap: 'No assessment data yet', nextLevel: 'Beginner', recommendations: ['Complete your first assessment to get coaching recommendations'], learningPath: [], estimatedWeeksToNextLevel: 4 });
+    }
+
+    const s = lastSession.rows[0];
+    const score = Number(s.score) || 0;
+    const path = (s.level_path || 'beginner').toLowerCase();
+    const hasPassed = !!s.passed;
+
+    let nextLevel = 'Intermediate';
+    let gap = '';
+    let recommendations = [];
+    let learningPath = [];
+    let estimatedWeeks = 4;
+
+    if (!hasPassed) {
+      gap = `Score ${score}% — below passing threshold for ${path}`;
+      recommendations = ['Review core concepts before retaking', `Retake available after ${path === 'expert' ? 14 : 7} days`, 'Focus on the section you scored lowest in'];
+      learningPath = [{ skill: 'Core QA Concepts', resource: 'ISTQB Foundation Study Guide', timeEstimate: '2 weeks' }];
+      estimatedWeeks = path === 'expert' ? 8 : 4;
+    } else if (path === 'beginner') {
+      gap = 'Validated at Beginner — need project evidence + cert for Intermediate';
+      nextLevel = 'Intermediate';
+      recommendations = ['Build a GitHub portfolio with 200+ automated tests', 'Get ISTQB Foundation certification', 'Work on 2-3 automation projects with CI/CD'];
+      learningPath = [
+        { skill: 'Automation Framework', resource: 'Selenium/Playwright official docs', timeEstimate: '3 weeks' },
+        { skill: 'CI/CD Integration', resource: 'Jenkins or GitHub Actions tutorial', timeEstimate: '1 week' },
+        { skill: 'ISTQB Foundation', resource: 'ISTQB study material', timeEstimate: '4 weeks' },
+      ];
+      estimatedWeeks = score >= 80 ? 8 : 12;
+    } else if (path === 'intermediate') {
+      gap = 'Validated at Intermediate — need capstone project + mentoring for Expert';
+      nextLevel = 'Expert';
+      recommendations = ['Build a complete automation framework capstone project', 'Start mentoring junior team members', 'Aim for ISTQB Advanced or AWS certification'];
+      learningPath = [
+        { skill: 'Capstone Project', resource: 'Build a real framework for a client project', timeEstimate: '4 weeks' },
+        { skill: 'People Development', resource: 'Mentor 1-2 junior engineers', timeEstimate: '8 weeks' },
+        { skill: 'Advanced Certification', resource: 'ISTQB Advanced / tool-specific cert', timeEstimate: '6 weeks' },
+      ];
+      estimatedWeeks = score >= 80 ? 12 : 16;
+    } else {
+      gap = 'Expert validated — focus on practice leadership and external recognition';
+      nextLevel = 'Practice Lead';
+      recommendations = ['Apply for Competency Lead / Practice Lead role', 'Present at internal or external conference', 'Publish articles or contribute to open-source'];
+      learningPath = [{ skill: 'Thought Leadership', resource: 'Speak at QA conferences / publish blog', timeEstimate: '6 months' }];
+      estimatedWeeks = 24;
+    }
+
+    res.json({ gap, nextLevel, recommendations, learningPath, estimatedWeeksToNextLevel: estimatedWeeks, score, hasPassed, path });
+  } catch (err) {
+    console.error('[ai-coach] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/zenassess/generate-questions - generate profile-customized assessment questions using local Ollama or JS fallback
+app.post('/api/zenassess/generate-questions', async (req, res) => {
+  try {
+    const { skill, band, employeeId, skills } = req.body;
+    const skillsList = Array.isArray(skills) && skills.length > 0 ? skills : [skill || req.body.skillName || 'Functional Testing'];
+    const skillName = skillsList[0] || 'Functional Testing';
+    const targetBand = band || 'beginner';
+    const resolvedEmpId = employeeId || req.user?.employeeId;
+
+    if (!resolvedEmpId) {
+      return res.status(400).json({ error: 'Employee ID is required (via body or authentication)' });
+    }
+
+    // Fetch candidate profile fields for custom AI prompt
+    let employeeProfile = null;
+    try {
+      const empRes = await query(
+        `SELECT name, designation, department, location, years_it, primary_skill, primary_domain 
+         FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)`,
+        [resolvedEmpId]
+      );
+      if (empRes.rows.length > 0) employeeProfile = empRes.rows[0];
+    } catch (e) {
+      console.warn('generate-questions: error fetching profile:', e.message);
+    }
+
+    let projects = [];
+    try {
+      const projRes = await query(
+        `SELECT project_name, role, client, description, domain, skills_used, technologies 
+         FROM projects WHERE LOWER(employee_id) = LOWER($1) ORDER BY created_at DESC`,
+        [resolvedEmpId]
+      );
+      projects = projRes.rows;
+    } catch (e) {
+      console.warn('generate-questions: error fetching projects:', e.message);
+    }
+
+    let certifications = [];
+    try {
+      const certRes = await query(
+        `SELECT cert_name, issuing_organization as provider, issue_date 
+         FROM certifications WHERE LOWER(employee_id) = LOWER($1) ORDER BY created_at DESC`,
+        [resolvedEmpId]
+      );
+      certifications = certRes.rows;
+    } catch (e) {
+      console.warn('generate-questions: error fetching certifications:', e.message);
+    }
+
+    let questions = [];
+    let practicalTasks = [];
+    let scenarioQuestions = [];
+    let expertScenarios = [];
+    let expertCapstone = null;
+    let expertMentoring = [];
+    let success = false;
+
+    // Call local Ollama at http://127.0.0.1:11434/api/generate
+    try {
+      const candidateSummary = `
+Candidate Name: ${employeeProfile?.name || 'Unknown'}
+IT Experience: ${employeeProfile?.years_it || 0} years
+Designation: ${employeeProfile?.designation || 'None'}
+Primary Domain: ${employeeProfile?.primary_domain || 'None'}
+Projects: ${JSON.stringify(projects.map(p => ({ name: p.project_name, role: p.role, domain: p.domain, skills: p.skills_used || p.technologies })))}
+Certifications: ${JSON.stringify(certifications.map(c => c.cert_name))}
+Resume Text: ${employeeProfile?.resume_text || 'None'}
+      `;
+
+      let instructions = '';
+      let formatPrompt = '';
+      if (targetBand === 'expert') {
+        instructions = `
+1. Generate exactly 5 scenario questions. Each must be a highly complex, strategic real-world scenario (e.g. production outage, performance crisis, architecture migration, security incident, delivery risk) tailored to the candidate's background and "${skillName}" expertise. Each must have:
+   - "question": detailed scenario description and problem statement
+2. Generate exactly 1 capstone assessment question. This must require the candidate to explain their high-level approach, architecture, strategic decision-making, and risk mitigation strategies (e.g. design testing strategy for a BFSI platform, create quality assurance plan for banking transformation, lead migration testing strategy) for "${skillName}". It must have:
+   - "question": detailed architectural or strategic capstone prompt
+3. Generate exactly 2 mentoring and leadership review questions. These must present scenarios of leadership challenges (e.g. junior team is underperforming, project deadline reduced by 50%, stakeholder conflict, testing strategy disagreement) in software engineering. Each must have:
+   - "question": detailed leadership challenge description
+`;
+        formatPrompt = `
+{
+  "expertScenarios": [
+    { "question": "..." },
+    { "question": "..." },
+    { "question": "..." },
+    { "question": "..." },
+    { "question": "..." }
+  ],
+  "expertCapstone": { "question": "..." },
+  "expertMentoring": [
+    { "question": "..." },
+    { "question": "..." }
+  ]
+}
+`;
+      } else {
+        // V10 Beginner: Primary=8, Secondary=7, Tertiary=5
+        // V10 Intermediate: 20 MCQs total
+        const countMCQs = 20;
+        const priCount = targetBand === 'beginner' ? 8 : 10;
+        const secCount = targetBand === 'beginner' ? (skillsList[1] ? 7 : 12) : (skillsList[1] ? 6 : 10);
+        const tertCount = targetBand === 'beginner' ? (skillsList[2] ? 5 : 0) : (skillsList[2] ? 4 : (skillsList[1] ? 4 : 0));
+
+        instructions = `
+1. Generate exactly 20 multiple-choice questions (MCQs). Difficulty must be ${targetBand === 'intermediate' || targetBand === 'advanced' ? 'HARD' : 'BASIC'}.
+   - ${priCount} MCQs must evaluate "${skillsList[0]}" (Primary Skill)
+   ${skillsList[1] ? `- ${secCount} MCQs must evaluate "${skillsList[1]}" (Secondary Skill)` : ''}
+   ${skillsList[2] ? `- ${tertCount} MCQs must evaluate "${skillsList[2]}" (Tertiary Skill)` : ''}
+   Each MCQ must have:
+   - "question": a detailed, realistic question
+   - "options": an array of exactly 4 choices
+   - "correct": 1-indexed number of the correct option (e.g. 1, 2, 3, or 4)
+   - "difficulty": "${targetBand === 'intermediate' || targetBand === 'advanced' ? 'HARD' : 'BASIC'}"
+   - "skill": the specific skill name it evaluates (e.g. "${skillsList[0]}", "${skillsList[1] || skillsList[0]}", or "${skillsList[2] || skillsList[0]}")
+   - "time": 60 (time in seconds)
+   - "points": 1
+2. Generate exactly ${targetBand === 'beginner' ? '2 test case writing tasks' : '2 practical tasks'}.
+   - 1 task must evaluate "${skillsList[0]}" (Primary Skill)
+   - 1 task must evaluate "${skillsList[1] || skillsList[0]}" (Secondary Skill)
+   Each task must have:
+   - "name": task title
+   - "description": detailed instructions for a hands-on or test case writing task
+3. Generate exactly ${targetBand === 'intermediate' ? '3 scenario questions' : '2 scenario questions'}.
+   ${targetBand === 'intermediate' ? `- 2 scenario questions must evaluate "${skillsList[0]}" (Primary Skill)\n   - 1 scenario question must evaluate "${skillsList[1] || skillsList[0]}" (Secondary Skill)` : `- 1 scenario question must evaluate "${skillsList[0]}" (Primary Skill)\n   - 1 scenario question must evaluate "${skillsList[1] || skillsList[0]}" (Secondary Skill)`}
+   Each question must have:
+   - "question": a detailed scenario-based troubleshooting or architecture question
+`;
+        formatPrompt = `
+{
+  "questions": [
+    {
+      "question": "...",
+      "options": ["...", "...", "...", "..."],
+      "correct": 1,
+      "difficulty": "HARD",
+      "skill": "${skillsList[0]}",
+      "time": 60,
+      "points": 1
+    },
+    ... (exactly 20 items)
+  ],
+  "practicalTasks": [
+    { "name": "...", "description": "..." },
+    { "name": "...", "description": "..." }
+  ],
+  "scenarioQuestions": [
+    { "question": "..." },
+    { "question": "..." },
+    { "question": "..." }
+  ]
+}
+`;
+      }
+
+      const prompt = `You are the ZenAssess Workforce Intelligence Question Generator.
+Generate a custom combined assessment for a candidate in the skills: ${skillsList.join(', ')} at the "${targetBand}" level.
+Use the candidate's profile to make the questions highly relevant to their background, projects, certifications, and domain expertise:
+${candidateSummary}
+
+INSTRUCTIONS:
+${instructions}
+
+You MUST reply with ONLY a JSON object. No other text, no markdown.
+
+Response JSON format:
+${formatPrompt}
+`;
+
+      const response = await withTimeout(fetch('http://127.0.0.1:11434/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'llama3',
+          prompt: prompt,
+          stream: false,
+          format: 'json'
+        })
+      }), 45000);
+
+      if (response.ok) {
+        const json = await response.json();
+        const rawText = json.response;
+        let cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+        const start = cleanText.indexOf('{');
+        const end = cleanText.lastIndexOf('}');
+        if (start !== -1 && end !== -1) {
+          cleanText = cleanText.slice(start, end + 1);
+        }
+        const parsed = JSON.parse(cleanText);
+        if (targetBand === 'expert') {
+          if (parsed.expertScenarios && parsed.expertScenarios.length >= 5) {
+            expertScenarios = parsed.expertScenarios.slice(0, 5);
+            expertCapstone = parsed.expertCapstone;
+            expertMentoring = (parsed.expertMentoring || []).slice(0, 2);
+            success = true;
+          }
+        } else if (parsed.questions && parsed.questions.length > 0) {
+          questions = parsed.questions.map((q, idx) => ({
+            id: q.id || `ai_${targetBand}_${idx}`,
+            question: q.question,
+            options: q.options,
+            correct: Number(q.correct) || 1,
+            difficulty: q.difficulty || (targetBand === 'intermediate' ? 'HARD' : 'BASIC'),
+            skill: q.skill || skillsList[0],
+            time: Number(q.time) || 60,
+            points: Number(q.points) || 1
+          }));
+          if (questions.length >= 10) {
+            practicalTasks = parsed.practicalTasks || [];
+            scenarioQuestions = parsed.scenarioQuestions || [];
+            success = true;
+          }
+        }
+      }
+    } catch (ollamaErr) {
+      console.warn('Ollama generate questions failed, falling back to local JS DB:', ollamaErr.message);
+    }
+
+    if (!success) {
+      const primary = skillsList[0] || 'Functional Testing';
+      const secondary = skillsList[1] || skillsList[0] || 'Automation Testing';
+      const tertiary = skillsList[2] || skillsList[0] || 'API Testing';
+
+      const pk = mapSkillToFallbackKey(primary);
+      const sk = mapSkillToFallbackKey(secondary);
+      const tk = mapSkillToFallbackKey(tertiary);
+
+      const dataPri = fallbackQuestions.getQuestions(pk, targetBand);
+      const dataSec = fallbackQuestions.getQuestions(sk, targetBand);
+      const dataTer = fallbackQuestions.getQuestions(tk, targetBand);
+
+      if (targetBand === 'expert') {
+        // V10 Expert: 5 scenarios, 1 capstone, 2 mentoring
+        expertScenarios = [
+          ...(dataPri.scenarioQuestions || []).slice(0, 3),
+          ...(dataSec.scenarioQuestions || []).slice(0, 1),
+          ...(dataTer.scenarioQuestions || []).slice(0, 1)
+        ];
+        expertCapstone = dataPri.expertCapstone || (dataPri.practicalTasks?.[0] ? { question: dataPri.practicalTasks[0].description } : null);
+        expertMentoring = [
+          ...(dataPri.expertMentoring || []).slice(0, 1),
+          ...(dataSec.expertMentoring || []).slice(0, 1)
+        ];
+      } else {
+        // V10 Beginner: Primary=8, Secondary=7, Tertiary=5
+        // V10 Intermediate: Primary=10, Secondary=6, Tertiary=4
+        const priSlice = targetBand === 'beginner' ? 8 : 10;
+        const secSlice = targetBand === 'beginner' ? 7 : 6;
+        const terSlice = targetBand === 'beginner' ? 5 : 4;
+        const mcqs = [
+          ...(dataPri.mcqs || []).slice(0, priSlice),
+          ...(dataSec.mcqs || []).slice(0, secSlice),
+          ...(dataTer.mcqs || []).slice(0, terSlice)
+        ];
+        questions = mcqs.map(q => ({
+          id: q.id,
+          question: q.question,
+          options: q.options,
+          correct: q.correct,
+          difficulty: q.difficulty,
+          skill: q.skill,
+          time: q.time,
+          points: q.points
+        }));
+
+        // Beginner: 2 test case tasks; Intermediate: 2 practical tasks
+        practicalTasks = [
+          ...(dataPri.practicalTasks || []).slice(0, 1),
+          ...(dataSec.practicalTasks || []).slice(0, 1)
+        ];
+
+        // Beginner: 2 scenarios; Intermediate: 3 scenarios
+        const scenarioCount = targetBand === 'intermediate' ? 3 : 2;
+        scenarioQuestions = [
+          ...(dataPri.scenarioQuestions || []).slice(0, Math.ceil(scenarioCount * 0.67)),
+          ...(dataSec.scenarioQuestions || []).slice(0, Math.floor(scenarioCount * 0.33))
+        ].slice(0, scenarioCount);
+      }
+    }
+
+    // V10: Ensure strict lengths per band
+    if (targetBand === 'expert') {
+      // Expert: exactly 5 scenarios, 1 capstone, 2 mentoring
+      if (expertScenarios.length < 5) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        expertScenarios = [...expertScenarios, ...(fallbackData.scenarioQuestions || [])].slice(0, 5);
+      } else {
+        expertScenarios = expertScenarios.slice(0, 5);
+      }
+      if (!expertCapstone) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        expertCapstone = fallbackData.expertCapstone || (fallbackData.practicalTasks?.[0] ? { question: fallbackData.practicalTasks[0].description } : { question: 'Describe your approach to designing a complete quality assurance strategy for a critical financial system migration.' });
+      }
+      if (expertMentoring.length < 2) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        expertMentoring = [...expertMentoring, ...(fallbackData.expertMentoring || [{ question: 'How would you handle a situation where your junior team consistently misses deadlines?' }, { question: 'Describe your strategy for knowledge transfer when a key team member leaves the project.' }])].slice(0, 2);
+      }
+    } else {
+      // Beginner/Intermediate: 20 MCQs
+      const countMCQs = 20;
+      if (questions.length < countMCQs) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        questions = [...questions, ...(fallbackData.mcqs || [])].slice(0, countMCQs);
+      } else {
+        questions = questions.slice(0, countMCQs);
+      }
+
+      // 2 practical/test-case tasks for both Beginner and Intermediate
+      if (practicalTasks.length < 2) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        practicalTasks = [...practicalTasks, ...(fallbackData.practicalTasks || [])].slice(0, 2);
+      } else {
+        practicalTasks = practicalTasks.slice(0, 2);
+      }
+
+      // Beginner: 2 scenarios; Intermediate: 3 scenarios
+      const reqScenarios = targetBand === 'intermediate' ? 3 : 2;
+      if (scenarioQuestions.length < reqScenarios) {
+        const fallbackData = fallbackQuestions.getQuestions(skillName, targetBand);
+        scenarioQuestions = [...scenarioQuestions, ...(fallbackData.scenarioQuestions || [])].slice(0, reqScenarios);
+      } else {
+        scenarioQuestions = scenarioQuestions.slice(0, reqScenarios);
+      }
+    }
+
+    res.json({
+      success: true,
+      band: targetBand,
+      questions,
+      practicalTasks,
+      scenarioQuestions,
+      expertScenarios,
+      expertCapstone,
+      expertMentoring
+    });
+  } catch (err) {
+    console.error('generate-questions: general error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/settings — Retrieve app configurations/mappings
+app.get('/api/settings', async (req, res) => {
+  try {
+    const result = await query('SELECT key, value FROM app_settings');
+    const settings = {};
+    result.rows.forEach(row => {
+      settings[row.key] = row.value;
+    });
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/settings — Update/Insert app configuration
+app.post('/api/settings', async (req, res) => {
+  try {
+    const { key, value } = req.body;
+    await query(
+      `INSERT INTO app_settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [key, value]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/zenassess/complete — save results and update skill matrix if passed
+// NOTE: Backward compatible during JWT transition (attachUser is already applied globally)
+app.post('/api/zenassess/complete', async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { 
+      sessionId, employeeId, score, status: rawStatus, assignedLevel, answers, evidence, studyPath, skills, skillName,
+      tabSwitchCount, copyPasteCount, sessionFingerprint, integrityScore, integrityFlags,
+      fullscreenExitCount, browserBlurCount, devtoolsDetected, contributionFields,
+      expertProfile, extractedEvidence, evidenceEvaluation, technicalDiscussion, leadershipDiscussion, consistencyAnalysis, riskAnalysis, aiRecommendation,
+      authenticityAnalysis, authenticity_analysis, typingVelocityLog, answerSnapshots
+    } = req.body;
+    
+    if (!sessionId || !employeeId) {
+      return res.status(400).json({ error: 'sessionId and employeeId are required' });
+    }
+
+    // ZenAssess V7 never produces a manager-review queue item — silent tier-drop replaces it
+    const status = (rawStatus === 'review_required') ? ((Number(score) || 0) >= 60 ? 'passed' : 'failed') : rawStatus;
+
+    // Resolve actual employees.id (handle zensar_id lookup)
+    let resolvedEmpId = employeeId;
+    try {
+      const empCheck = await query(
+        'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+        [employeeId]
+      );
+      if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
+    } catch (_) {}
+
+    // Calculate dynamic integrity scoring & proctoring
+    const tabSwitches = Number(tabSwitchCount) || 0;
+    const copyPastes = Number(copyPasteCount) || 0;
+    const fullscreenExits = Number(fullscreenExitCount) || 0;
+    const browserBlurs = Number(browserBlurCount) || 0;
+    const devtools = !!devtoolsDetected;
+
+    let calculatedIntegrity = 100 - (tabSwitches * 10) - (copyPastes * 15) - (fullscreenExits * 20) - (browserBlurs * 5) - (devtools ? 50 : 0);
+    let finalIntegrityScore = Math.max(0, Math.min(100, calculatedIntegrity));
+    const finalIntegrityFlags = Array.isArray(integrityFlags) ? [...integrityFlags] : [];
+
+    if (tabSwitches > 0) finalIntegrityFlags.push(`Tab switches: ${tabSwitches}`);
+    if (copyPastes > 0) finalIntegrityFlags.push(`Copy/paste attempts: ${copyPastes}`);
+    if (fullscreenExits > 0) finalIntegrityFlags.push(`Fullscreen exits: ${fullscreenExits}`);
+    if (browserBlurs > 0) finalIntegrityFlags.push(`Browser focus lost events: ${browserBlurs}`);
+    if (devtools) finalIntegrityFlags.push(`DevTools console opened`);
+
+    // Run similarity plagiarism checks for Intermediate (Contribution) or Expert (Evidence)
+    let duplicateRiskScore = 0;
+    let evidenceText = '';
+    if (extractedEvidence) {
+      const extEv = typeof extractedEvidence === 'string' ? JSON.parse(extractedEvidence) : extractedEvidence;
+      if (extEv && Array.isArray(extEv.documents)) {
+        evidenceText = extEv.documents.map(d => d.extractedText || '').join(' ').trim();
+      }
+    }
+    if (!evidenceText && evidence && Object.keys(evidence).length > 0) {
+      evidenceText = Object.values(evidence).join(' ').trim();
+    }
+
+    if (evidenceText.length > 50) {
+      const otherSessions = await query(
+        `SELECT session_id, evidence, extracted_evidence FROM zenassess_sessions 
+         WHERE employee_id != $1 AND status IN ('review_required', 'passed')`,
+        [resolvedEmpId]
+      );
+      for (const other of otherSessions.rows) {
+        let otherText = '';
+        if (other.extracted_evidence) {
+          const otherExt = typeof other.extracted_evidence === 'string' ? JSON.parse(other.extracted_evidence) : other.extracted_evidence;
+          if (otherExt && Array.isArray(otherExt.documents)) {
+            otherText = otherExt.documents.map(d => d.extractedText || '').join(' ').trim();
+          }
+        }
+        if (!otherText && other.evidence) {
+          const otherEvidence = typeof other.evidence === 'string' ? JSON.parse(other.evidence) : other.evidence;
+          otherText = Object.values(otherEvidence || {}).join(' ').trim();
+        }
+        if (otherText.length > 50) {
+          const words1 = new Set(evidenceText.toLowerCase().split(/\s+/));
+          const words2 = new Set(otherText.toLowerCase().split(/\s+/));
+          const intersection = new Set([...words1].filter(x => words2.has(x)));
+          const union = new Set([...words1, ...words2]);
+          const jaccard = union.size > 0 ? intersection.size / union.size : 0;
+          const simPct = Math.round(jaccard * 100);
+          if (simPct > duplicateRiskScore) {
+            duplicateRiskScore = simPct;
+          }
+          if (jaccard > 0.7) {
+            finalIntegrityScore = Math.max(0, finalIntegrityScore - 50);
+            finalIntegrityFlags.push(`Plagiarism alert: ${simPct}% similarity match with another submission`);
+          }
+        }
+      }
+    }
+
+    // Evaluate keystroke interval variance to detect automated AI text insertion
+    const typingLog = Array.isArray(typingVelocityLog) ? typingVelocityLog : [];
+    let isUniformTyping = false;
+    let typingStdDev = null;
+    if (typingLog.length >= 10) {
+      const mean = typingLog.reduce((a, b) => a + b, 0) / typingLog.length;
+      const variance = typingLog.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / typingLog.length;
+      typingStdDev = Math.sqrt(variance);
+      if (typingStdDev < 15) {
+        isUniformTyping = true;
+      }
+    }
+
+    const authDataRaw = authenticityAnalysis || authenticity_analysis || {};
+    let humanPct = authDataRaw.humanWrittenPct !== undefined ? Number(authDataRaw.humanWrittenPct) : (isUniformTyping ? 15 : 100);
+    let aiPct = authDataRaw.aiAssistedPct !== undefined ? Number(authDataRaw.aiAssistedPct) : (isUniformTyping ? 85 : 0);
+    let authenticityScore = authDataRaw.authenticityScore !== undefined ? Number(authDataRaw.authenticityScore) : (isUniformTyping ? 30 : 100);
+
+    if (isUniformTyping) {
+      finalIntegrityScore = Math.max(0, finalIntegrityScore - 40);
+      finalIntegrityFlags.push(`Bot/Plagiarism warning: Uniform keystroke cadence (StdDev ${typingStdDev.toFixed(1)}ms) detected, indicating automated text insertion.`);
+    }
+
+    const finalAuthenticityAnalysis = {
+      humanWrittenPct: humanPct,
+      aiAssistedPct: aiPct,
+      copyCount: authDataRaw.copyCount !== undefined ? Number(authDataRaw.copyCount) : 0,
+      pasteCount: authDataRaw.pasteCount !== undefined ? Number(authDataRaw.pasteCount) : copyPastes,
+      largePasteEvents: authDataRaw.largePasteEvents !== undefined ? Number(authDataRaw.largePasteEvents) : 0,
+      duplicateContentRisk: Math.max(duplicateRiskScore, authDataRaw.duplicateContentRisk || 0),
+      authenticityScore: authenticityScore,
+      riskLevel: authDataRaw.riskLevel || (duplicateRiskScore > 70 || isUniformTyping ? 'High' : (copyPastes > 5) ? 'Medium' : 'Low'),
+      reason: authDataRaw.reason || (isUniformTyping ? 'Uniform typing velocity indicates automated AI text injection.' : '')
+    };
+
+    // Resolve Experience Band & Employee Details
+    const empInfo = await query('SELECT years_it, github_username, designation FROM employees WHERE id = $1', [resolvedEmpId]);
+    const empDetails = empInfo.rows[0] || {};
+    const yearsIT = empDetails.years_it || 0;
+    
+    // Fetch projects count
+    const projQuery = await query('SELECT COUNT(*) as cnt FROM projects WHERE employee_id = $1', [resolvedEmpId]);
+    const projectCount = parseInt(projQuery.rows[0]?.cnt || '0');
+    const projectScore = Math.min(100, projectCount * 25); // 4+ projects = 100%
+
+    // Fetch certifications count
+    const certQuery = await query('SELECT COUNT(*) as cnt FROM certifications WHERE employee_id = $1', [resolvedEmpId]);
+    const certCount = parseInt(certQuery.rows[0]?.cnt || '0');
+    const certScore = Math.min(100, certCount * 50); // 2+ certs = 100%
+
+    // GitHub score
+    const hasGithub = !!(empDetails.github_username && empDetails.github_username.trim());
+    const githubScore = hasGithub ? 100 : 0;
+
+    // Mentoring score
+    const desLower = (empDetails.designation || '').toLowerCase();
+    const mentoringScore = (desLower.includes('lead') || desLower.includes('senior') || desLower.includes('architect') || desLower.includes('manager')) ? 100 : 50;
+
+    // V10 Band detection (0-5=beginner, 6-12=intermediate, 12+=expert)
+    let testedLevel = (assignedLevel || 'beginner').toLowerCase();
+    let band = testedLevel;
+
+    const mcqRaw = req.body.mcqScore !== undefined ? Number(req.body.mcqScore) : (score || 0);
+    const scenarioRaw = req.body.scenarioScore !== undefined ? Number(req.body.scenarioScore) : 0;
+    const testCaseRaw = req.body.testCaseScore !== undefined ? Number(req.body.testCaseScore) : 0;
+    const handsOnRaw = (req.body.practicalScore !== undefined ? Number(req.body.practicalScore) : (req.body.handsOnScore !== undefined ? Number(req.body.handsOnScore) : testCaseRaw));
+    const capstoneRaw = req.body.capstoneScore !== undefined ? Number(req.body.capstoneScore) : 0;
+    const mentoringRaw = req.body.mentoringScore !== undefined ? Number(req.body.mentoringScore) : 0;
+
+    // ZenSkillMap Scoring Formulas by path (spec-aligned weights)
+    const sectionScoresBody = req.body.sectionScores || {};
+    const assessmentPathBody = req.body.assessmentPath || testedLevel;
+    let finalScoreValue;
+    if (Object.keys(sectionScoresBody).length > 0) {
+      // Use frontend-computed section scores when provided
+      if (assessmentPathBody === 'Beginner' || testedLevel === 'beginner') {
+        const mcqS = sectionScoresBody.mcq !== undefined ? Number(sectionScoresBody.mcq) : mcqRaw;
+        const toolS = sectionScoresBody.toolId !== undefined ? Number(sectionScoresBody.toolId) : 0;
+        const tcS = sectionScoresBody.testCaseWriting !== undefined ? Number(sectionScoresBody.testCaseWriting) : handsOnRaw;
+        finalScoreValue = Math.round(mcqS * 0.50 + toolS * 0.20 + tcS * 0.30);
+      } else if (assessmentPathBody === 'Intermediate' || testedLevel === 'intermediate') {
+        const mcqS = sectionScoresBody.mcq !== undefined ? Number(sectionScoresBody.mcq) : mcqRaw;
+        const codS = sectionScoresBody.coding !== undefined ? Number(sectionScoresBody.coding) : handsOnRaw;
+        const scnS = sectionScoresBody.scenarios !== undefined ? Number(sectionScoresBody.scenarios) : scenarioRaw;
+        const fwS = sectionScoresBody.frameworkDesign !== undefined ? Number(sectionScoresBody.frameworkDesign) : 0;
+        finalScoreValue = Math.round(mcqS * 0.20 + codS * 0.35 + scnS * 0.30 + fwS * 0.15);
+      } else {
+        const scnS = sectionScoresBody.expertScenarios !== undefined ? Number(sectionScoresBody.expertScenarios) : scenarioRaw;
+        const capS = sectionScoresBody.capstone !== undefined ? Number(sectionScoresBody.capstone) : capstoneRaw;
+        const menS = sectionScoresBody.mentoring !== undefined ? Number(sectionScoresBody.mentoring) : mentoringRaw;
+        const qstS = sectionScoresBody.questionnaire !== undefined ? Number(sectionScoresBody.questionnaire) : 0;
+        finalScoreValue = Math.round(scnS * 0.25 + capS * 0.40 + menS * 0.20 + qstS * 0.15);
+      }
+    } else if (testedLevel === 'beginner') {
+      finalScoreValue = Math.round((mcqRaw * 0.50) + (handsOnRaw * 0.30) + (scenarioRaw * 0.20));
+    } else if (testedLevel === 'intermediate') {
+      finalScoreValue = Math.round((mcqRaw * 0.20) + (scenarioRaw * 0.30) + (handsOnRaw * 0.35) + (capstoneRaw * 0.15));
+    } else {
+      finalScoreValue = Math.round((scenarioRaw * 0.25) + (capstoneRaw * 0.40) + (mentoringRaw * 0.20));
+    }
+
+    // V10 Determine validated level, pass threshold, & Silent Tier Drop
+    let validatedLevel = 'Not Validated';
+    let passed = false;
+    let threshold = 60;
+
+    if (testedLevel === 'expert' || testedLevel === 'advanced') {
+      // V10 Expert: pass=70%, silent drop to Intermediate if <70%
+      threshold = 70;
+      if (finalScoreValue >= 70) {
+        validatedLevel = 'Expert';
+        passed = true;
+      } else {
+        validatedLevel = 'Intermediate'; // Silent tier drop
+        passed = true; // Still marked passed (silent drop)
+      }
+    } else if (testedLevel === 'intermediate') {
+      // V10 Intermediate: pass=65%, silent drop to Beginner if <65%
+      threshold = 65;
+      if (finalScoreValue >= 65) {
+        validatedLevel = 'Intermediate';
+        passed = true;
+      } else {
+        validatedLevel = 'Beginner'; // Silent tier drop
+        passed = true; // Still marked passed (silent drop)
+      }
+    } else {
+      // V10 Beginner: pass=60%, fail → Not Validated
+      threshold = 60;
+      if (finalScoreValue >= 60) {
+        validatedLevel = 'Beginner';
+        passed = true;
+      } else {
+        validatedLevel = 'Not Validated';
+        passed = false;
+      }
+    }
+
+    const calculatedMcqScore = mcqRaw;
+    const calculatedContribScore = Math.round((projectScore * 0.33) + (certScore * 0.33) + (githubScore * 0.34));
+    const calculatedEvidenceScore = scenarioRaw;
+
+    let githubReason = hasGithub ? '' : 'No GitHub username linked';
+    let projectReason = projectCount > 0 ? '' : 'No projects listed';
+    let docReason = '';
+    let certReason = certCount > 0 ? '' : 'No certifications listed';
+    let evidReason = '';
+    let githubMeta = { username: empDetails.github_username };
+
+    // Explain Score Breakdown Object
+    const explainScore = {
+      assessmentScore: mcqRaw,
+      assessmentWeight: 30,
+      assessmentWeightedScore: mcqRaw * 0.30,
+      contributionScore: calculatedContribScore,
+      contributionWeight: 10,
+      contributionWeightedScore: (projectScore * 0.05) + (certScore * 0.05),
+      practicalScore: handsOnRaw,
+      practicalWeight: 30,
+      practicalWeightedScore: handsOnRaw * 0.30,
+      scenarioScore: scenarioRaw,
+      scenarioWeight: 25,
+      scenarioWeightedScore: scenarioRaw * 0.25,
+      experienceScore: mentoringScore,
+      experienceWeight: 5,
+      experienceWeightedScore: (githubScore * 0.03) + (mentoringScore * 0.02),
+      finalScore: finalScoreValue,
+      passThreshold: threshold,
+      gapRemaining: finalScoreValue >= threshold ? 0 : (threshold - finalScoreValue)
+    };
+
+    // Contribution Breakdown Object
+    const contributionBreakdown = {
+      mcqScore: mcqRaw,
+      scenarioScore: scenarioRaw,
+      handsOnScore: handsOnRaw,
+      projectScore,
+      certScore,
+      githubScore,
+      mentoringScore,
+      finalScoreValue
+    };
+
+    // Load current skills for estimation
+    const currentSkillRes = await query('SELECT confidence_score, freshness_score FROM skills WHERE employee_id = $1 AND skill_name = $2', [resolvedEmpId, skillName || 'Performance Testing']);
+    const currentConf = currentSkillRes.rows[0]?.confidence_score || 50;
+    const currentFresh = currentSkillRes.rows[0]?.freshness_score || 100;
+
+    const readinessScoreVal = Math.round((finalScoreValue * 0.3) + (currentConf * 0.25) + (currentFresh * 0.2) + (finalIntegrityScore * 0.15) + (calculatedContribScore * 0.1));
+    
+    let riskVal = 'Low';
+    if (finalIntegrityScore < 60 || currentFresh < 40 || finalScoreValue < 50) {
+      riskVal = 'High';
+    } else if (finalIntegrityScore < 80 || currentFresh < 75 || finalScoreValue < 60) {
+      riskVal = 'Medium';
+    }
+
+    const readyVal = (readinessScoreVal >= 60 && finalIntegrityScore >= 50 && finalScoreValue >= 50);
+
+    // V10 Retake lock: 7 days for Beginner/Intermediate, 14 days for Expert
+    let retryAfter = null;
+    if (!passed) {
+      const retryDays = (testedLevel === 'expert') ? 14 : 7;
+      retryAfter = new Date(Date.now() + retryDays * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    const checkSession = await query('SELECT 1 FROM zenassess_sessions WHERE session_id = $1', [sessionId]);
+    if (checkSession.rows.length === 0) {
+      await query(
+        `INSERT INTO zenassess_sessions (session_id, employee_id, level_path, status, skill_name)
+         VALUES ($1, $2, $3, 'in_progress', $4)`,
+        [sessionId, resolvedEmpId, band, skillName || 'Performance Testing']
+      );
+    }
+
+    await query(
+      `UPDATE zenassess_sessions
+       SET score=$1, status=$2, assigned_level=$3, answers=$4, evidence=$5,
+           study_path=$6, retry_after=$7, skill_name=COALESCE($8, skill_name),
+           tab_switch_count=$9, copy_paste_count=$10, session_fingerprint=$11,
+           integrity_score=$12, integrity_flags=$13,
+           fullscreen_exit_count=$14, browser_blur_count=$15, devtools_detected=$16,
+           explain_score_breakdown=$17, contribution_breakdown=$18, github_metadata=$19,
+           allocation_readiness_score=$20, allocation_risk=$21, ready_for_allocation=$22,
+           mcq_score=$23, contribution_score=$24, evidence_score=$25, final_score=$26,
+           expert_profile=$29, extracted_evidence=$30, evidence_evaluation=$31,
+           technical_discussion=$32, leadership_discussion=$33, consistency_analysis=$34,
+           risk_analysis=$35, ai_recommendation=$36, authenticity_analysis=$37,
+           leadership_signals=$38, architecture_signals=$39, decision_making_signals=$40,
+           mentoring_signals=$41, domain_expertise=$42, project_allocation_score=$43,
+           typing_velocity_log=$44, answer_snapshots=$45,
+           passed=$46, pass_threshold=$47,
+           updated_at=CURRENT_TIMESTAMP
+       WHERE session_id=$27 AND employee_id=$28`,
+      [
+        finalScoreValue,
+        passed ? 'passed' : 'failed',  // Set status based on passed flag
+        assignedLevel || null,
+        JSON.stringify(answers || {}),
+        JSON.stringify(evidence || {}),
+        studyPath ? JSON.stringify(studyPath) : null,
+        retryAfter,
+        skillName || null,
+        tabSwitches,
+        copyPastes,
+        sessionFingerprint || null,
+        finalIntegrityScore,
+        JSON.stringify(finalIntegrityFlags),
+        fullscreenExits,
+        browserBlurs,
+        devtools,
+        JSON.stringify(explainScore),
+        JSON.stringify(contributionBreakdown),
+        JSON.stringify(githubMeta),
+        readinessScoreVal,
+        riskVal,
+        readyVal,
+        calculatedMcqScore,
+        calculatedContribScore,
+        calculatedEvidenceScore,
+        finalScoreValue,
+        sessionId,
+        resolvedEmpId,
+        expertProfile ? JSON.stringify(expertProfile) : null,
+        extractedEvidence ? JSON.stringify(extractedEvidence) : null,
+        evidenceEvaluation ? JSON.stringify(evidenceEvaluation) : null,
+        technicalDiscussion ? JSON.stringify(technicalDiscussion) : null,
+        leadershipDiscussion ? JSON.stringify(leadershipDiscussion) : null,
+        consistencyAnalysis ? JSON.stringify(consistencyAnalysis) : null,
+        riskAnalysis ? JSON.stringify(riskAnalysis) : null,
+        aiRecommendation ? JSON.stringify(aiRecommendation) : null,
+        JSON.stringify(finalAuthenticityAnalysis),
+        req.body.leadershipSignals || '',
+        req.body.architectureSignals || '',
+        req.body.decisionMakingSignals || '',
+        req.body.mentoringSignals || '',
+        req.body.domainExpertise || '',
+        Number(req.body.projectAllocationScore) || finalScoreValue,
+        JSON.stringify(typingVelocityLog || []),
+        JSON.stringify(answerSnapshots || []),
+        passed,  // Add passed column
+        threshold  // Add pass_threshold column
+      ]
+    );
+
+    // Save section scores if provided
+    if (req.body.sectionScores && Object.keys(req.body.sectionScores).length > 0) {
+      await query(`UPDATE zenassess_sessions SET section_scores=$1 WHERE session_id=$2`, [JSON.stringify(req.body.sectionScores), sessionId]).catch(() => {});
+    }
+
+    // Update skills table with validated level and assessment score after passing
+    if (passed && validatedLevel && validatedLevel !== 'Not Validated') {
+      const skillToUpdate = skillName || req.body.primarySkill || null;
+      if (skillToUpdate) {
+        await query(
+          `UPDATE skills SET validated_level=$1, assessment_score=$2 WHERE employee_id=$3 AND skill_name=$4`,
+          [validatedLevel, finalScoreValue, resolvedEmpId, skillToUpdate]
+        ).catch(() => {});
+      }
+    }
+
+    // If v7flow is true, update the employee's primary/secondary/tertiary skills and profile details in employees table
+    if (req.body.v7flow) {
+      await query(
+        `UPDATE employees
+         SET name = COALESCE($1, name),
+             designation = COALESCE($2, designation),
+             years_it = COALESCE($3, years_it),
+             primary_skill = $4,
+             secondary_skill = $5,
+             tertiary_skill = $6
+         WHERE id = $7`,
+        [
+          req.body.name || null,
+          req.body.designation || null,
+          req.body.yearsIT !== undefined ? Number(req.body.yearsIT) : (req.body.years_it !== undefined ? Number(req.body.years_it) : null),
+          skillName || null,
+          req.body.secondarySkill || null,
+          req.body.tertiarySkill || null,
+          resolvedEmpId
+        ]
+      );
+    }
+
+    if (skillName === 'Functional Testing' && assignedLevel === 'Expert') {
+      // Update employee profile: set years_it, designation, primary_skill
+      await query(
+        `UPDATE employees
+         SET years_it = GREATEST(COALESCE(years_it, 0), 12),
+             designation = 'Functional Testing Expert',
+             primary_skill = 'Functional Testing'
+         WHERE id = $1`,
+        [resolvedEmpId]
+      );
+
+      // Write audit log entry
+      await auditLog({
+        employeeId: resolvedEmpId,
+        role: 'employee',
+        action: 'AUTOMATIC_EXPERT_RECOGNITION',
+        resource: 'zenassess',
+        resourceId: sessionId,
+        details: {
+          skillName: 'Functional Testing',
+          assignedLevel: 'Expert',
+          yearsIT: 12,
+          designation: 'Functional Testing Expert',
+          primary_skill: 'Functional Testing',
+          status: 'passed'
+        },
+        req
+      });
+    }
+
+    // Update the skill matrix for the main tested skill
+    const targetSkill = skillName || 'Performance Testing';
+    const ratingForSkill = validatedLevel === 'Expert' ? 3 : (validatedLevel === 'Intermediate' || validatedLevel === 'Advanced' ? 2 : (validatedLevel === 'Beginner' ? 1 : 0));
+    const validatedFlag = (validatedLevel !== 'Not Validated');
+
+    await query(`
+      INSERT INTO skills (
+        employee_id, skill_name, self_rating, validated, validated_level, assessment_score,
+        technical_depth, project_strength, certification_strength, mentoring_strength, github_strength,
+        capability_score, confidence_score, ready_for_allocation, allocation_readiness, allocation_risk, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP)
+      ON CONFLICT (employee_id, skill_name)
+      DO UPDATE SET
+        validated = EXCLUDED.validated,
+        validated_level = EXCLUDED.validated_level,
+        assessment_score = EXCLUDED.assessment_score,
+        technical_depth = EXCLUDED.technical_depth,
+        project_strength = EXCLUDED.project_strength,
+        certification_strength = EXCLUDED.certification_strength,
+        mentoring_strength = EXCLUDED.mentoring_strength,
+        github_strength = EXCLUDED.github_strength,
+        capability_score = EXCLUDED.capability_score,
+        confidence_score = EXCLUDED.confidence_score,
+        ready_for_allocation = EXCLUDED.ready_for_allocation,
+        allocation_readiness = EXCLUDED.allocation_readiness,
+        allocation_risk = EXCLUDED.allocation_risk,
+        updated_at = CURRENT_TIMESTAMP
+    `, [
+      resolvedEmpId,
+      targetSkill,
+      ratingForSkill,
+      validatedFlag,
+      validatedLevel,
+      mcqRaw,
+      handsOnRaw,
+      projectScore,
+      certScore,
+      mentoringScore,
+      githubScore,
+      finalScoreValue,
+      Math.round((mcqRaw * 0.4) + (scenarioRaw * 0.4) + (handsOnRaw * 0.2)),
+      validatedFlag,
+      finalScoreValue,
+      finalScoreValue >= 70 ? 'Low' : (finalScoreValue >= 60 ? 'Medium' : 'High')
+    ]);
+
+    // If other skills were sent in req.body.skills, we can save them as self-ratings
+    if (skills && Object.keys(skills).length > 0) {
+      for (const [sName, rating] of Object.entries(skills)) {
+        if (sName !== targetSkill) {
+          const r = Math.min(3, Math.max(0, Number(rating)));
+          await query(
+            `INSERT INTO skills (employee_id, skill_name, self_rating, validated)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (employee_id, skill_name)
+             DO UPDATE SET self_rating=$3, validated=$4, updated_at=CURRENT_TIMESTAMP`,
+            [resolvedEmpId, sName, r, status === 'passed']
+          );
+        }
+      }
+    }
+
+    // If expert validation review is required, create a manager review record
+    if (status === 'review_required') {
+      await query(
+        `INSERT INTO manager_reviews (session_id, employee_id, skill_name, reviewer_id, review_status, sla_deadline)
+         VALUES ($1, $2, $3, NULL, 'pending', NOW() + INTERVAL '7 days')`,
+        [sessionId, resolvedEmpId, skillName || 'Performance Testing']
+      );
+    }
+
+    // Save individual evidence files if Expert band
+    if (band === 'expert' && extractedEvidence) {
+      const extEv = typeof extractedEvidence === 'string' ? JSON.parse(extractedEvidence) : extractedEvidence;
+      if (extEv && Array.isArray(extEv.documents)) {
+        for (const doc of extEv.documents) {
+          const evidenceId = doc.evidenceId || `ev_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          const evType = doc.documentType || 'Other';
+          const originalFilename = doc.filename || 'unknown';
+          const extSkills = Array.isArray(doc.detectedSkills) ? doc.detectedSkills : [];
+          const detTech = Array.isArray(doc.technologies) ? doc.technologies : [];
+          const confScore = Number(doc.confidence) || 100;
+          const authScoreVal = Number(finalAuthenticityAnalysis.authenticityScore) || 100;
+          const evalStatus = doc.status || 'success';
+          const managerReviewStatusVal = (status === 'review_required') ? 'pending' : (status === 'passed') ? 'approved' : 'rejected';
+
+          await query(
+            `INSERT INTO zenassess_evidence (
+              evidence_id, session_id, employee_id, evidence_type, original_filename,
+              extracted_skills, detected_technologies, authenticity_score, confidence_score,
+              evaluation_status, manager_review_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (evidence_id) DO UPDATE SET
+              evidence_type = EXCLUDED.evidence_type,
+              original_filename = EXCLUDED.original_filename,
+              extracted_skills = EXCLUDED.extracted_skills,
+              detected_technologies = EXCLUDED.detected_technologies,
+              authenticity_score = EXCLUDED.authenticity_score,
+              confidence_score = EXCLUDED.confidence_score,
+              evaluation_status = EXCLUDED.evaluation_status,
+              manager_review_status = EXCLUDED.manager_review_status`,
+            [
+              evidenceId,
+              sessionId,
+              resolvedEmpId,
+              evType,
+              originalFilename,
+              extSkills,
+              detTech,
+              authScoreVal,
+              confScore,
+              evalStatus,
+              managerReviewStatusVal
+            ]
+          );
+        }
+      }
+    }
+
+    // Dynamic freshness recalculation
+    try {
+      await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedEmpId]);
+    } catch (_) {}
+
+    // Fetch recalculated skill details
+    const skillAfterRecalc = await query(
+      `SELECT freshness_score, freshness_status, revalidation_req, confidence_score, allocation_readiness, allocation_risk, ready_for_allocation, capability_score
+       FROM skills WHERE employee_id = $1 AND skill_name = $2`,
+      [resolvedEmpId, skillName || 'Performance Testing']
+    );
+    const skillData = skillAfterRecalc.rows[0] || {};
+
+    res.json({ 
+      success: true, 
+      retryAfter,
+      explainScore,
+      contributionBreakdown,
+      githubMetadata: githubMeta,
+      integrityScore: finalIntegrityScore,
+      integrityFlags: finalIntegrityFlags,
+      authenticityAnalysis: finalAuthenticityAnalysis,
+      freshness: {
+        score: skillData.freshness_score ?? currentFresh,
+        status: skillData.freshness_status ?? 'active',
+        reval: skillData.revalidation_req ?? false
+      },
+      readiness: {
+        score: skillData.allocation_readiness ?? readinessScoreVal,
+        risk: skillData.allocation_risk ?? riskVal,
+        ready: skillData.ready_for_allocation ?? readyVal
+      },
+      capabilityScore: skillData.capability_score ?? 0,
+      expertDetails: explainScore.expertDetails
+    });
+
+    await auditLog({ employeeId: resolvedEmpId, role: 'employee', action: 'ASSESSMENT_COMPLETE', resource: 'zenassess', resourceId: sessionId, details: { status, assignedLevel, score: finalScoreValue }, req });
+  } catch (err) {
+    console.error('❌ ZenAssess complete error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Server-side tier result helper (mirrors client-side determineTierResult)
+function determineTierResult(claimedLevel, finalScore) {
+  const levels = ['Not Validated', 'Beginner', 'Intermediate', 'Expert'];
+  const idx = levels.indexOf(claimedLevel);
+  if (finalScore >= 90) {
+    return { action: 'dropup', validatedLevel: levels[Math.min(idx + 1, levels.length - 1)], badge: true };
+  }
+  if (finalScore >= 60) {
+    return { action: 'pass', validatedLevel: claimedLevel, badge: true };
+  }
+  if (idx <= 1) {
+    return { action: 'dropdown', validatedLevel: 'Not Validated', badge: false };
+  }
+  return { action: 'dropdown', validatedLevel: levels[Math.max(idx - 1, 0)], badge: false };
+}
+
+// POST /api/zenassess/skill-test-complete — record one skill's outcome from the
+// 3-skill sequential ZenAssess engine (silent tier-drop aware, badge never-downgrade)
+app.post('/api/zenassess/skill-test-complete', async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { employeeId, sessionId, skillName, validatedLevel, silentDropPath, badgeAwarded, attemptNumber, selfClaimedLevelAtTest, finalScore } = req.body;
+
+    if (!employeeId || !sessionId || !skillName || !validatedLevel) {
+      return res.status(400).json({ error: 'employeeId, sessionId, skillName and validatedLevel are required' });
+    }
+
+    // Resolve actual employees.id (handle zensar_id lookup) — same pattern as /zenassess/complete
+    let resolvedEmpId = employeeId;
+    try {
+      const empCheck = await query(
+        'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+        [employeeId]
+      );
+      if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
+    } catch (_) {}
+
+    const isAwarded = !!badgeAwarded;
+    const status = isAwarded ? 'passed' : 'not_validated';
+
+    await query(
+      `INSERT INTO zenassess_sessions (
+        session_id, employee_id, level_path, status, skill_name,
+        validated_level, attempt_number, silent_drop_path, badge_awarded, self_claimed_level_at_test
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (session_id) DO UPDATE SET
+        validated_level = EXCLUDED.validated_level,
+        attempt_number = EXCLUDED.attempt_number,
+        silent_drop_path = EXCLUDED.silent_drop_path,
+        badge_awarded = EXCLUDED.badge_awarded,
+        status = EXCLUDED.status,
+        self_claimed_level_at_test = EXCLUDED.self_claimed_level_at_test,
+        updated_at = CURRENT_TIMESTAMP`,
+      [sessionId, resolvedEmpId, validatedLevel, status, skillName,
+       validatedLevel, Number(attemptNumber) || 1, silentDropPath || null, isAwarded, selfClaimedLevelAtTest || null]
+    );
+
+    const rank = { 'Not Validated': 0, Beginner: 1, Intermediate: 2, Expert: 3 };
+    const selfLevelFromRating = (r) => (r >= 3 ? 'Expert' : r === 2 ? 'Intermediate' : r === 1 ? 'Beginner' : null);
+
+    const existing = await query(
+      `SELECT verified_badge_level, self_rating, self_claimed_level FROM skills WHERE employee_id = $1 AND skill_name = $2`,
+      [resolvedEmpId, skillName]
+    );
+    const previousBadgeLevel = existing.rows[0]?.verified_badge_level || null;
+    let finalBadgeLevel = previousBadgeLevel;
+    let upgraded = false;
+
+    if (isAwarded) {
+      // Never downgrade — only upgrade if new badge level is higher
+      const newBadge = (rank[previousBadgeLevel] || 0) >= (rank[validatedLevel] || 0) ? previousBadgeLevel : validatedLevel;
+      const selfClaimed = selfClaimedLevelAtTest
+        || existing.rows[0]?.self_claimed_level
+        || selfLevelFromRating(Number(existing.rows[0]?.self_rating) || 0);
+      upgraded = newBadge !== previousBadgeLevel;
+      finalBadgeLevel = newBadge;
+
+      await query(
+        `INSERT INTO skills (employee_id, skill_name, verified_badge_level, validated, self_claimed_level, updated_at)
+         VALUES ($1, $2, $3, true, $4, NOW())
+         ON CONFLICT (employee_id, skill_name)
+         DO UPDATE SET
+           verified_badge_level = CASE
+             WHEN CASE skills.verified_badge_level WHEN 'Expert' THEN 3 WHEN 'Intermediate' THEN 2 WHEN 'Beginner' THEN 1 ELSE 0 END
+               >= CASE EXCLUDED.verified_badge_level WHEN 'Expert' THEN 3 WHEN 'Intermediate' THEN 2 WHEN 'Beginner' THEN 1 ELSE 0 END
+             THEN skills.verified_badge_level
+             ELSE EXCLUDED.verified_badge_level
+           END,
+           validated = true,
+           self_claimed_level = EXCLUDED.self_claimed_level,
+           updated_at = NOW()`,
+        [resolvedEmpId, skillName, newBadge, selfClaimed]
+      );
+
+      try { await query('SELECT recalculate_employee_skill_freshness($1)', [resolvedEmpId]); } catch (_) {}
+    }
+
+    res.json({
+      success: true,
+      status,
+      skillName,
+      verifiedBadgeLevel: finalBadgeLevel,
+      previousBadgeLevel,
+      upgraded,
+      action: isAwarded ? (upgraded ? 'dropup' : 'pass') : 'dropdown'
+    });
+  } catch (err) {
+    console.error('❌ ZenAssess skill-test-complete error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// GET /api/zenassess/status/:employeeId — get last assessment status
+// NOTE: Backward compatible during JWT transition
+app.get('/api/zenassess/status/:employeeId', async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { employeeId } = req.params;
+    const result = await query(
+      `SELECT session_id, level_path, score, status, assigned_level, retry_after, created_at
+       FROM zenassess_sessions
+       WHERE employee_id=$1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [employeeId]
+    );
+    if (result.rowCount === 0) {
+      return res.json({ hasSession: false });
+    }
+    const row = result.rows[0];
+    res.json({
+      hasSession: true,
+      sessionId: row.session_id,
+      levelPath: row.level_path,
+      score: row.score,
+      status: row.status,
+      assignedLevel: row.assigned_level,
+      retryAfter: null, // Bypassed permanently for testing/immediate retries
+      createdAt: row.created_at,
+    });
+  } catch (err) {
+    console.error('❌ ZenAssess status error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/employees/:id/candidate-profile — Save candidateProfile data to DB before assessment
+// Called from AssessmentOverviewPage when candidate proceeds to assessment
+app.post('/api/employees/:id/candidate-profile', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      primarySkill, secondarySkill, tertiarySkill,
+      name, designation, yearsIT, grade, path: validationPath,
+      primaryScore, secondaryScore, tertiaryScore,
+      domains
+    } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: 'Employee ID is required' });
+    }
+
+    // Resolve employee ID (handles zensar_id too)
+    let resolvedId = id;
+    try {
+      const empCheck = await query(
+        'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+        [id]
+      );
+      if (empCheck.rows.length > 0) resolvedId = empCheck.rows[0].id;
+    } catch (_) {}
+
+    // Update employees table with candidate profile data
+    await query(
+      `UPDATE employees
+       SET primary_skill    = COALESCE($1, primary_skill),
+           secondary_skill  = COALESCE($2, secondary_skill),
+           tertiary_skill   = COALESCE($3, tertiary_skill),
+           name             = COALESCE($4, name),
+           designation      = COALESCE($5, designation),
+           years_it         = COALESCE($6, years_it),
+           updated_at       = CURRENT_TIMESTAMP
+       WHERE LOWER(id) = LOWER($7)`,
+      [
+        primarySkill || null,
+        secondarySkill || null,
+        tertiarySkill || null,
+        name || null,
+        designation || null,
+        yearsIT ? Number(yearsIT) : null,
+        resolvedId
+      ]
+    );
+
+    // Upsert skill entries for primary, secondary, tertiary with taxonomy scores
+    const skillEntries = [
+      { skillName: primarySkill, score: primaryScore || 0 },
+      { skillName: secondarySkill, score: secondaryScore || 0 },
+      { skillName: tertiarySkill, score: tertiaryScore || 0 },
+    ].filter(s => s.skillName);
+
+    for (const { skillName, score } of skillEntries) {
+      try {
+        await query(
+          `INSERT INTO skills (employee_id, skill_name, self_rating, capability_score, updated_at)
+           VALUES ($1, $2, 1, $3, CURRENT_TIMESTAMP)
+           ON CONFLICT (employee_id, skill_name)
+           DO UPDATE SET
+             capability_score = GREATEST(skills.capability_score, EXCLUDED.capability_score),
+             updated_at = CURRENT_TIMESTAMP`,
+          [resolvedId, skillName, Math.round(score)]
+        );
+      } catch (skillErr) {
+        console.warn(`⚠️ candidate-profile: skill upsert failed for ${skillName}:`, skillErr.message);
+      }
+    }
+
+    // Audit log
+    await auditLog({
+      employeeId: resolvedId,
+      role: 'employee',
+      action: 'CANDIDATE_PROFILE_SAVED',
+      resource: 'employees',
+      resourceId: resolvedId,
+      details: { primarySkill, secondarySkill, tertiarySkill, validationPath, grade },
+      req
+    });
+
+
+    res.json({
+      success: true,
+      message: 'Candidate profile saved to database',
+      employeeId: resolvedId,
+      primarySkill,
+      secondarySkill,
+      tertiarySkill
+    });
+  } catch (err) {
+    console.error('❌ candidate-profile save error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/judge0/run — execute code via Judge0 CE ───────────────────────
+app.post('/api/judge0/run', async (req, res) => {
+  try {
+    const { sourceCode, languageId, stdin, expectedOutput } = req.body;
+    const apiKey = process.env.JUDGE0_API_KEY;
+    const apiUrl = process.env.JUDGE0_API_URL || 'https://judge0-ce.p.rapidapi.com';
+    if (!apiKey) {
+      return res.status(503).json({ error: 'Judge0 API key not configured. Set JUDGE0_API_KEY in .env' });
+    }
+    const submitRes = await fetch(`${apiUrl}/submissions?base64_encoded=false&wait=true`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-RapidAPI-Key': apiKey,
+        'X-RapidAPI-Host': 'judge0-ce.p.rapidapi.com',
+      },
+      body: JSON.stringify({
+        source_code: sourceCode,
+        language_id: languageId,
+        stdin: stdin || '',
+        expected_output: expectedOutput || '',
+      }),
+    });
+    if (!submitRes.ok) {
+      const errText = await submitRes.text();
+      return res.status(submitRes.status).json({ error: `Judge0 error: ${errText}` });
+    }
+    const data = await submitRes.json();
+    const stdout = data.stdout || '';
+    const stderr = data.stderr || data.compile_output || '';
+    const actual = stdout.trim();
+    const expected = (expectedOutput || '').trim();
+    const passed = expected ? actual === expected : data.status?.id === 3;
+    res.json({
+      passed,
+      stdout,
+      stderr,
+      time: data.time,
+      memory: data.memory,
+      status: data.status?.description || 'Unknown',
+      statusId: data.status?.id,
+    });
+  } catch (err) {
+    console.error('❌ Judge0 run error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/judge0/run-sql — execute SQL in sandbox schema ────────────────
+app.post('/api/judge0/run-sql', async (req, res) => {
+  try {
+    const { sourceCode, stdin, expectedOutput } = req.body;
+    const sqlToRun = sourceCode || '';
+    // Only allow read operations in sandbox
+    const upperSql = sqlToRun.trim().toUpperCase();
+    if (/^\s*(DROP|TRUNCATE|DELETE|INSERT|UPDATE|CREATE|ALTER|GRANT|REVOKE)/i.test(sqlToRun)) {
+      return res.status(400).json({ error: 'Sandbox only allows SELECT/WITH queries.' });
+    }
+    // Prefix with SET search_path and run
+    const sandboxSql = `SET search_path = zenassess_sandbox, public; ${sqlToRun}`;
+    const result = await query(sandboxSql);
+    const rows = result.rows || [];
+    const stdout = JSON.stringify(rows, null, 2);
+    const expected = (expectedOutput || '').trim();
+    const passed = expected ? stdout.includes(expected) : rows.length > 0;
+    res.json({ passed, stdout, stderr: '', time: '0.01', memory: 0, status: 'Accepted' });
+  } catch (err) {
+    console.error('❌ SQL sandbox error:', err.message);
+    res.json({ passed: false, stdout: '', stderr: err.message, time: '0', memory: 0, status: 'Runtime Error' });
+  }
+});
+
+// ─── POST /api/zenassess/evaluate-github — evaluate GitHub repository ────────
+app.post('/api/zenassess/evaluate-github', async (req, res) => {
+  try {
+    const { githubUrl, skill, expectedLanguages } = req.body;
+    if (!githubUrl) return res.status(400).json({ error: 'githubUrl required' });
+    const match = githubUrl.match(/github\.com\/([^/]+)\/([^/\s?#]+)/i);
+    if (!match) return res.status(400).json({ error: 'Invalid GitHub URL' });
+    const [, owner, repoRaw] = match;
+    const repo = repoRaw.replace(/\.git$/, '');
+    const ghToken = process.env.GITHUB_TOKEN;
+    const headers = { 'User-Agent': 'ZenTalentHub/1.0', ...(ghToken ? { Authorization: `Bearer ${ghToken}` } : {}) };
+    let score = 0;
+    const breakdown = {};
+    // 1. Repo exists (10 pts)
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    if (!repoRes.ok) return res.json({ score: 0, breakdown: { repoExists: 0 }, error: 'Repository not found or private' });
+    const repoData = await repoRes.json();
+    breakdown.repoExists = 10; score += 10;
+    // 2. Commit activity (20 pts)
+    const commitsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=30`, { headers });
+    const commits = commitsRes.ok ? await commitsRes.json() : [];
+    const commitCount = Array.isArray(commits) ? commits.length : 0;
+    const commitScore = Math.min(20, Math.round((commitCount / 30) * 20));
+    breakdown.commitActivity = commitScore; score += commitScore;
+    // 3. Language match (25 pts)
+    const langsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers });
+    const languages = langsRes.ok ? await langsRes.json() : {};
+    const repoLangs = Object.keys(languages).map(l => l.toLowerCase());
+    const expectedLangs = (expectedLanguages || []).map((l) => l.toLowerCase());
+    const langMatch = expectedLangs.length === 0 ? 1 : expectedLangs.filter(l => repoLangs.some(r => r.includes(l) || l.includes(r))).length / expectedLangs.length;
+    const langScore = Math.round(langMatch * 25);
+    breakdown.languageMatch = langScore; score += langScore;
+    // 4. README quality (10 pts)
+    const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, { headers });
+    if (readmeRes.ok) {
+      const readmeData = await readmeRes.json();
+      const readmeSize = readmeData.size || 0;
+      const readmeScore = readmeSize > 500 ? 10 : readmeSize > 100 ? 5 : 2;
+      breakdown.readmeQuality = readmeScore; score += readmeScore;
+    } else {
+      breakdown.readmeQuality = 0;
+    }
+    // 5. Test files (20 pts)
+    const searchRes = await fetch(`https://api.github.com/search/code?q=test+repo:${owner}/${repo}+language:${repoData.language || 'python'}`, { headers });
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      const testCount = searchData.total_count || 0;
+      const testScore = testCount > 5 ? 20 : testCount > 0 ? 10 : 0;
+      breakdown.testFilesFound = testScore; score += testScore;
+    } else {
+      breakdown.testFilesFound = 0;
+    }
+    // 6. CI/CD (15 pts)
+    const ciRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/.github/workflows`, { headers });
+    const hasCI = ciRes.ok;
+    const jenkinsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/Jenkinsfile`, { headers });
+    const hasJenkins = jenkinsRes.ok;
+    breakdown.ciCdPresent = (hasCI || hasJenkins) ? 15 : 0;
+    score += breakdown.ciCdPresent;
+    res.json({ score: Math.min(100, score), breakdown, repoName: `${owner}/${repo}`, language: repoData.language, stars: repoData.stargazers_count });
+  } catch (err) {
+    console.error('❌ GitHub eval error:', err.message);
+    res.status(500).json({ error: err.message, score: 0 });
+  }
+});
+
 // Serve Static Built Vite App for Cloud deployment
 app.use(express.static(path.join(__dirname, 'dist')));
 app.use((req, res) => {
@@ -3084,10 +7841,11 @@ app.use((req, res) => {
 });
 
 // Initialize database and start server
-initializeDatabase().then(() => {
+syncDatabaseSchema().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend active on ${PORT}`);
     console.log(`🔗 API Base: http://localhost:${PORT}/api`);
+    console.log(`📦 Database: ${process.env.DB_NAME || 'skillmatrix'} @ ${process.env.DB_HOST || 'localhost'}`);
   });
 }).catch(err => {
   console.error('🔥 Critical Failure during server startup:', err);

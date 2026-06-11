@@ -9,7 +9,7 @@ import { SKILLS, MOCK_EMPLOYEES } from '@/lib/mockData';
 import { useNavigate } from 'react-router-dom';
 import {
   Users, TrendingUp, AlertTriangle, Award, Download, Edit2, Plus,
-  BarChart3, CheckCircle2, Search, Eye, FileSpreadsheet, RefreshCw, Grid, X, Settings, Shield, Lock, Mail, Phone, Calendar, Briefcase, Filter, Upload, Sparkles, FileUp, Trash2, GraduationCap, Info
+  BarChart3, CheckCircle2, Search, Eye, FileSpreadsheet, RefreshCw, Grid, X, Settings, Shield, Lock, Mail, Phone, Calendar, Briefcase, Filter, Upload, Sparkles, FileUp, Trash2, GraduationCap, Info, Brain
 } from 'lucide-react';
 
 import { toast } from '@/lib/ToastContext';
@@ -41,13 +41,16 @@ ChartJS.register(
   BarController, LineController, DoughnutController, Tooltip, Legend, Title
 );
 
+// â”€â”€â”€ Internationalization Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const t = (text: string): string => text;
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { setGlobalLoading } = useApp();
   const { dark } = useDark();
   const T = mkTheme(dark);
 
-  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Certifications' | 'Achievements' | 'Education' | 'Projects'>('Overview');
+  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Workforce Intelligence'>('Overview');
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [newEmployee, setNewEmployee] = useState({
@@ -70,7 +73,193 @@ export default function AdminDashboard() {
   const [rawExtractedData, setRawExtractedData] = useState<any>(null);
   const resumeFileRef = useRef<HTMLInputElement>(null);
 
-  // ── Extract text from PDF (with proper visual line detection) ──
+  // â”€â”€ Expert Reviews Queue State & Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [selectedReview, setSelectedReview] = useState<any | null>(null);
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [escalationReason, setEscalationReason] = useState('');
+  const [escalatedTo, setEscalatedTo] = useState('admin');
+  const [showReviewActionModal, setShowReviewActionModal] = useState<'approve' | 'reject' | 'escalate' | null>(null);
+  const [isLoadingReviews, setIsLoadingReviews] = useState(false);
+
+  // ZenAssess V6 Expert Review score adjustment states
+  const [adjustedScenarioScore, setAdjustedScenarioScore] = useState<number>(80);
+  const [adjustedEvidenceScore, setAdjustedEvidenceScore] = useState<number>(80);
+  const [adjustedMentoringScore, setAdjustedMentoringScore] = useState<number>(80);
+  const [adjustedExperienceScore, setAdjustedExperienceScore] = useState<number>(75);
+
+  useEffect(() => {
+    if (selectedReview) {
+      const breakdown = typeof selectedReview.explain_score_breakdown === 'string'
+        ? JSON.parse(selectedReview.explain_score_breakdown)
+        : (selectedReview.explain_score_breakdown || {});
+      const details = breakdown.expertDetails || {};
+      
+      setAdjustedScenarioScore(details.scenarioScore !== undefined ? Number(details.scenarioScore) : Number(selectedReview.mcq_score) || 80);
+      setAdjustedEvidenceScore(details.evidenceScore !== undefined ? Number(details.evidenceScore) : Number(selectedReview.evidence_score) || 80);
+      setAdjustedMentoringScore(details.mentoringScore !== undefined ? Number(details.mentoringScore) : Number(selectedReview.contribution_score) || 80);
+      setAdjustedExperienceScore(details.experienceScore !== undefined ? Number(details.experienceScore) : 75);
+    }
+  }, [selectedReview]);
+
+  const fetchReviews = async () => {
+    setIsLoadingReviews(true);
+    try {
+      const res = await fetch(`${API_BASE}/admin/reviews`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.reviews) {
+        setReviews(data.reviews);
+      }
+    } catch (err) {
+      toast.error('Failed to load review queue');
+    } finally {
+      setIsLoadingReviews(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'Expert Reviews') {
+      fetchReviews();
+    }
+  }, [activeTab]);
+
+  // â”€â”€ Workforce Intelligence State & Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [wfIntel, setWfIntel] = useState<any | null>(null);
+  const [isLoadingWfIntel, setIsLoadingWfIntel] = useState(false);
+  const [approvingSkill, setApprovingSkill] = useState<string | null>(null);
+
+  const fetchWfIntel = async () => {
+    setIsLoadingWfIntel(true);
+    try {
+      const res = await fetch(`${API_BASE}/workforce-intelligence`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setWfIntel(data);
+      } else {
+        toast.error(data.error || 'Failed to load workforce intelligence');
+      }
+    } catch (err) {
+      toast.error('Failed to load workforce intelligence');
+    } finally {
+      setIsLoadingWfIntel(false);
+    }
+  };
+
+  const handleApproveHiddenSkill = async (employeeId: string, skillName: string) => {
+    setApprovingSkill(`${employeeId}-${skillName}`);
+    try {
+      const res = await fetch(`${API_BASE}/skills/approve-hidden`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+        },
+        body: JSON.stringify({ employeeId, skillName }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success(data.message || 'Skill approved successfully');
+        await fetchWfIntel();
+      } else {
+        toast.error(data.error || 'Failed to approve skill');
+      }
+    } catch (err) {
+      toast.error('Failed to approve skill');
+    } finally {
+      setApprovingSkill(null);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'Workforce Intelligence') {
+      fetchWfIntel();
+    }
+  }, [activeTab]);
+
+  const handleClaimReview = async (review: any) => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/reviews/claim`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+        },
+        body: JSON.stringify({ sessionId: review.session_id }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success('Review claimed successfully');
+        fetchReviews();
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to claim review');
+    }
+  };
+
+  const handleReviewAction = async (action: 'approve' | 'reject' | 'escalate') => {
+    if (!selectedReview) return;
+    try {
+      let body: any = { sessionId: selectedReview.session_id };
+      if (action === 'escalate') {
+        body.escalationReason = escalationReason;
+        body.escalatedTo = escalatedTo;
+      } else {
+        body.reviewNotes = reviewNotes;
+        
+        // Recalculate V6 final score: Scenario 25%, Evidence 40%, Mentoring 20%, Experience 15%
+        const finalScore = Math.round(
+          (adjustedScenarioScore * 0.25) +
+          (adjustedEvidenceScore * 0.40) +
+          (adjustedMentoringScore * 0.20) +
+          (adjustedExperienceScore * 0.15)
+        );
+        const allocationConfidence = Math.round(
+          (adjustedScenarioScore * 0.3) +
+          (adjustedEvidenceScore * 0.4) +
+          (adjustedMentoringScore * 0.15) +
+          (adjustedExperienceScore * 0.15)
+        );
+        body.adjustedScores = {
+          scenarioScore: adjustedScenarioScore,
+          evidenceScore: adjustedEvidenceScore,
+          mentoringScore: adjustedMentoringScore,
+          experienceScore: adjustedExperienceScore,
+          finalScore,
+          allocationConfidence
+        };
+      }
+
+      const res = await fetch(`${API_BASE}/admin/reviews/${action}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+        },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(`Review ${action}d successfully`);
+        setShowReviewActionModal(null);
+        setSelectedReview(null);
+        setReviewNotes('');
+        setEscalationReason('');
+        fetchReviews();
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      toast.error(err.message || `Failed to ${action} review`);
+    }
+  };
+
+  // â”€â”€ Extract text from PDF (with proper visual line detection) â”€â”€
   const extractPDFText = async (file: File): Promise<string> => {
     try {
       const pdfjsLib = (window as any).pdfjsLib;
@@ -89,7 +278,7 @@ export default function AdminDashboard() {
           for (const item of content.items as any[]) {
             const y = item.transform[5];
             if (lastY !== null && Math.abs(y - lastY) > 3) {
-              // Y position changed → new visual line
+              // Y position changed â†’ new visual line
               if (line.trim()) fullText += line.trim() + '\n';
               line = '';
             }
@@ -113,7 +302,7 @@ export default function AdminDashboard() {
   };
 
 
-  // ── Scan resume and auto-fill form ──
+  // â”€â”€ Scan resume and auto-fill form â”€â”€
   const handleResumeScan = async (file: File) => {
     setResumeScanLoading(true);
     setResumeScanned(false);
@@ -128,7 +317,7 @@ export default function AdminDashboard() {
       }
       console.log('[Resume Scan] Text length:', resumeText.length, '| First 120:', resumeText.slice(0, 120));
 
-      // ── Regex helpers (always reliable) ──
+      // â”€â”€ Regex helpers (always reliable) â”€â”€
       const rGet = (re: RegExp) => (resumeText.match(re)?.[1] ?? resumeText.match(re)?.[0] ?? '').trim();
 
       // Extract email & phone via regex (very reliable)
@@ -138,14 +327,14 @@ export default function AdminDashboard() {
       // Extract name: labeled field first, then heuristic scan
       const rxName = (() => {
         // First try labeled: "Name: Kishore S" or "Candidate Name: ..."
-        const labeled = rGet(/(?:^|\n)(?:candidate\s*)?name\s*[:\-–]\s*([A-Za-z][A-Za-z .'-]+)/im);
+        const labeled = rGet(/(?:^|\n)(?:candidate\s*)?name\s*[:\-â€“]\s*([A-Za-z][A-Za-z .'-]+)/im);
         if (labeled && labeled.length > 2) return labeled.trim();
         // Scan first 20 lines for a name-like line (allow single-char initials)
         const lines = resumeText.split('\n').slice(0, 20).map(l => l.trim()).filter(l => l.length > 1 && l.length < 55);
         for (const l of lines) {
           if (/[@\d|\\/#<>{}\[\]]/.test(l)) continue;
           if (/^(resume|cv|curriculum|vitae|profile|summary|contact|email|phone|mobile|address|www|http|dear|to|from|date|ref)/i.test(l)) continue;
-          // Title Case: "Kishore S" or "Rahul Kumar Sharma" — allow 1-char words (initials)
+          // Title Case: "Kishore S" or "Rahul Kumar Sharma" â€” allow 1-char words (initials)
           if (/^[A-Z][a-zA-Z'-]*(?:\s[A-Z][a-zA-Z'-]*){1,3}$/.test(l)) return l;
           // ALL CAPS: "KISHORE S" or "RAHUL KUMAR"
           if (/^[A-Z]+(?:\s[A-Z]+){1,3}$/.test(l) && !/^(QA|IT|UI|UX|HR|DB|AI|ML|DL|CI|CD)$/.test(l)) {
@@ -161,28 +350,27 @@ export default function AdminDashboard() {
       })();
 
       // Designation - check for labeled field or second prominent line
-      const rxDesig = rGet(/(?:designation|title|position|current\s*role|profile|objective)\s*[:\-–]\s*([A-Za-z][A-Za-z .\/]+)/im)
+      const rxDesig = rGet(/(?:designation|title|position|current\s*role|profile|objective)\s*[:\-â€“]\s*([A-Za-z][A-Za-z .\/]+)/im)
         || rGet(/^(?:software|senior|junior|lead|associate|principal|staff|qa|quality|devops|full.?stack|front.?end|back.?end|data|mobile|android|ios|test)\s+\w+/im);
 
-      // Location — labeled field or Indian city names
+      // Location â€” labeled field or Indian city names
       const rxLocation = (
-        rGet(/(?:location|city|address|residing|place|based(?:\s*(?:at|in|out))?|current\s*loc(?:ation)?|living\s*in)\s*[:\-–]\s*([A-Za-z][A-Za-z ,]+?)(?:\n|,\s*\d|\s{3,}|$)/im)
+        rGet(/(?:location|city|address|residing|place|based(?:\s*(?:at|in|out))?|current\s*loc(?:ation)?|living\s*in)\s*[:\-â€“]\s*([A-Za-z][A-Za-z ,]+?)(?:\n|,\s*\d|\s{3,}|$)/im)
         || (() => {
           // Scan for Indian city names directly
-          const cities = 'Chennai|Pune|Bangalore|Bengaluru|Hyderabad|Mumbai|Delhi|Noida|Gurgaon|Gurugram|Kolkata|Ahmedabad|Surat|Jaipur|Coimbatore|Madurai|Kochi|Trivandrum|Nagpur|Indore|Bhopal|Chandigarh|Lucknow|Patna|Mysore|Mysuru|Vizag|Visakhapatnam|Vadodara|Rajkot|Thane|Navi Mumbai|Greater Noida|Faridabad|Ghaziabad';
-          const m = resumeText.match(new RegExp(`((?:[A-Za-z]+[,\\s]+)?(?:${cities})(?:[,\\s]+[A-Za-z]+)?)`, 'i'));
+          const m = resumeText.match(/((?:[A-Za-z]+[,\s]+)?(?:Chennai|Pune|Bangalore|Bengaluru|Hyderabad|Mumbai|Delhi|Noida|Gurgaon|Gurugram|Kolkata|Ahmedabad|Surat|Jaipur|Coimbatore|Madurai|Kochi|Trivandrum|Nagpur|Indore|Bhopal|Chandigarh|Lucknow|Patna|Mysore|Mysuru|Vizag|Visakhapatnam|Vadodara|Rajkot|Thane|Navi Mumbai|Greater Noida|Faridabad|Ghaziabad)(?:[,\s]+[A-Za-z]+)?)/i);
           return m?.[1]?.trim() || '';
         })()
       );
 
       // Department  
-      const rxDept = rGet(/(?:department|division|team|vertical|practice|domain)\s*[:\-–]\s*([A-Za-z][A-Za-z ]+?)(?:\n|$)/im);
+      const rxDept = rGet(/(?:department|division|team|vertical|practice|domain)\s*[:\-â€“]\s*([A-Za-z][A-Za-z ]+?)(?:\n|$)/im);
 
       // Years IT - comprehensive patterns
       const rxYearsIT = (() => {
         const pats = [
           /(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?).*?(?:IT|software|technolog|develop|testing|engineer|industry|work)/i,
-          /(?:experience|exp(?:erience)?)\s*(?:of\s*)?[:\-–]?\s*(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)/i,
+          /(?:experience|exp(?:erience)?)\s*(?:of\s*)?[:\-â€“]?\s*(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)/i,
           /(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:total\s+)?(?:professional\s+)?experience/i,
           /total\s+(?:work\s+)?(?:exp|experience)[:\s]*(\d+)/i,
           /(?:having|with)\s+(\d+)(?:\.\d+)?\s*\+?\s*(?:year|yr)/i,
@@ -210,12 +398,12 @@ JSON:`;
       // Step 2b: Extract Skills, Projects, Certificates, Education, Achievements (COMPREHENSIVE)
       let detailsExtraction: any = {};
       try {
-        const detailsPrompt = `🚨 CRITICAL EXTRACTION TASK - READ CAREFULLY 🚨
+        const detailsPrompt = `ðŸš¨ CRITICAL EXTRACTION TASK - READ CAREFULLY ðŸš¨
 
 You are extracting data from a PROFESSIONAL RESUME. Extract ALL skills, projects, achievements, certifications, and education.
 
 STEP 1: EXTRACT SKILLS FROM PREDEFINED LIST ONLY (CRITICAL)
-⚠️ ONLY extract skills that EXACTLY MATCH these 32 predefined skills:
+âš ï¸ ONLY extract skills that EXACTLY MATCH these 32 predefined skills:
 
 TOOLS: Selenium, Appium, JMeter, Postman, JIRA, TestRail
 TECHNOLOGIES: Python, Java, JavaScript, TypeScript, C#, SQL
@@ -240,14 +428,14 @@ STEP 2: EXTRACT ALL PROJECTS
 - Extract: name, client, role, startDate, endDate, description, technologies, duration
 
 STEP 3: EXTRACT ALL ACHIEVEMENTS
-⚠️ STRICT RULE - Only extract REAL awards/recognitions. DO NOT extract project metrics or outcomes.
+âš ï¸ STRICT RULE - Only extract REAL awards/recognitions. DO NOT extract project metrics or outcomes.
 
-✅ VALID achievements (extract these):
+âœ… VALID achievements (extract these):
 - Named awards: Pegasus, Gold Award, Silver Award, Bronze Medal, Best Team Award, Star Award
 - External recognitions: Kaggle medals, hackathon wins, competition rankings
 - Client appreciation: "Appreciated by client for quality and timely delivery"
 
-❌ INVALID - DO NOT extract these as achievements:
+âŒ INVALID - DO NOT extract these as achievements:
 - Project metrics: "Reduced false positive rate by 20%", "Improved accuracy to 82%"
 - Project outcomes: "Data Quality Improvement", "Page Load Speed Improvement"
 - Technical improvements: "Reduced manual review time", "Experiment time reduction"
@@ -258,7 +446,7 @@ WHERE TO LOOK:
 - "Major achievements" in each project: ONLY if it is a NAMED AWARD, not a metric
 - "Any client appreciation" in each project: extract client appreciation text
 
-IF NO AWARDS EXIST IN THE RESUME → return empty achievements array []
+IF NO AWARDS EXIST IN THE RESUME â†’ return empty achievements array []
 
 STEP 4: EXTRACT ALL CERTIFICATIONS
 - Look in "Certifications" section
@@ -326,7 +514,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         }
       } catch (e) { console.warn('[Resume Scan] Details extraction failed:', e); }
 
-      // Step 3: Merge — LLM fills where regex couldn't, regex wins for email/phone
+      // Step 3: Merge â€” LLM fills where regex couldn't, regex wins for email/phone
       const final = {
         name:        (llm.name?.trim()        || rxName        || ''),
         email:       (rxEmail                 || llm.email?.trim()        || ''),
@@ -419,7 +607,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         if (extractedEducation.length > 0) allFilled.push(`${extractedEducation.length} Education`);
         const achievementsCount = Array.isArray(detailsExtraction.achievements) ? detailsExtraction.achievements.length : 0;
         if (achievementsCount > 0) allFilled.push(`${achievementsCount} Achievements`);
-        toast.success(`✅ Auto-filled: ${allFilled.join(' · ')}`);
+        toast.success(`âœ… Auto-filled: ${allFilled.join(' Â· ')}`);
       } else {
         toast.error('Could not extract details. Please fill the form manually.');
       }
@@ -463,7 +651,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [achSearch, setAchSearch] = useState('');
   const [eduSearch, setEduSearch] = useState('');
   const [projSearch, setProjSearch] = useState('');
-  // Expanded cards state (empId → boolean)
+  // Expanded cards state (empId â†’ boolean)
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
 
   const runAiSearch = (query: string, empList: any[]) => {
@@ -500,14 +688,94 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
-  // ── DELETE employee ──
+  // â”€â”€ Multi-select delete (Manage Employees) â”€â”€
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  const toggleSelectId = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      const token = localStorage.getItem('zn_access_token');
+      const res = await fetch(`${API_BASE}/admin/employees/bulk`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ employeeIds: ids }),
+      });
+      const result = await res.json().catch(() => ({}));
+      // Only treat as success if the SERVER confirms it actually deleted rows.
+      if (!res.ok || !result.success) {
+        throw new Error(result.error || `Delete failed (HTTP ${res.status})`);
+      }
+      const deleted = Number(result.deleted ?? 0);
+      if (deleted === 0) {
+        throw new Error('No employees were deleted (no matching IDs on the server).');
+      }
+      toast.success(`${deleted} employee${deleted > 1 ? 's' : ''} deleted successfully`);
+      setSelectedIds(new Set());
+      setShowBulkDeleteModal(false);
+      await loadAllData();
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to delete selected employees');
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  // Visible (filtered + sorted) employees in the Manage Employees tab.
+  // Used by the grid AND select-all so both always agree on the same rows.
+  const computeVisibleEmployees = (): any[] => {
+    return (aiSearchActive ? aiSearchResults : employees)
+      .filter((e: any) => {
+        if (aiSearchActive) return true;
+        const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
+        const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
+        const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) &&
+                           (!filters.maxExperience || (e.yearsExperience || 0) <= parseInt(filters.maxExperience));
+        const matchesSkills = !(filters.selectedSkills || []).length || (filters.selectedSkills || []).every((skillId: string) =>
+          (e.skills || []).some((s: any) => s.skillId === skillId && s.selfRating > 0));
+        const matchesProjects = !filters.minProjects || (e.projects?.length || 0) >= parseInt(filters.minProjects);
+        const matchesCerts = !filters.minCertifications || (e.certifications?.length || 0) >= parseInt(filters.minCertifications);
+        const matchesCompletion = !filters.completionRange || (() => {
+          const [min, max] = filters.completionRange.split('-').map(Number);
+          return e.completion >= min && e.completion <= max;
+        })();
+        const matchesHasProjects = !filters.hasProjects || (e.projects?.length > 0);
+        const matchesHasCerts = !filters.hasCertifications || (e.certifications?.length > 0);
+        const matchesValidated = !filters.isValidated || e.submitted;
+        return matchesSearch && matchesRole && matchesExp && matchesSkills && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
+      })
+      .sort((a: any, b: any) => {
+        if (aiSearchActive) return 0;
+        if (sortOrder === 'A-Z') return a.name?.localeCompare(b.name);
+        if (sortOrder === 'Z-A') return b.name?.localeCompare(a.name);
+        if (sortOrder === 'Newest') return (b.id || '').localeCompare(a.id || '');
+        if (sortOrder === 'Oldest') return (a.id || '').localeCompare(b.id || '');
+        return 0;
+      });
+  };
+
+  // â”€â”€ DELETE employee â”€â”€
   const handleDeleteEmployee = async (empId: string, empName: string) => {
     setGlobalLoading(`Purging ${empName} from records...`);
     try {
       const res = await fetch(`${API_BASE}/employees/${empId}`, { method: 'DELETE' });
       const d = await res.json();
       if (res.ok && d.success) {
-        toast.success(`🗑️ Account for "${empName}" permanently removed.`);
+        toast.success(`ðŸ—‘ï¸ Account for "${empName}" permanently removed.`);
         setPreviewUser(null);
         setPreviewData(null);
         setDeleteConfirming(false);
@@ -573,34 +841,37 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     setLoading(true);
     setGlobalLoading('Synchronizing Global Cloud...');
     try {
-      // ── Employees + Skills (essential) ──
+      // â”€â”€ Employees + Skills (essential) â”€â”€
       const res = await fetch(`${API_BASE}/employees`);
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status} — is the backend running on port 3001?`);
+      }
       const d = await res.json();
       const _emps = d.employees || [];
       const _skills = d.skills || [];
 
-      // ── Certifications (non-blocking) ──
+      // â”€â”€ Certifications (non-blocking) â”€â”€
       let certifications: any[] = [];
       try {
         const cRes = await fetch(`${API_BASE}/certifications/ALL`);
         if (cRes.ok) ({ certifications } = await cRes.json());
-      } catch { /* ignore — show employees without cert data */ }
+      } catch { /* ignore â€” show employees without cert data */ }
 
-      // ── Projects (non-blocking) ──
+      // â”€â”€ Projects (non-blocking) â”€â”€
       let projects: any[] = [];
       try {
         const pRes = await fetch(`${API_BASE}/projects/ALL`);
         if (pRes.ok) ({ projects } = await pRes.json());
-      } catch { /* ignore — show employees without project data */ }
+      } catch { /* ignore â€” show employees without project data */ }
 
-      // ── Achievements (non-blocking) ──
+      // â”€â”€ Achievements (non-blocking) â”€â”€
       let achievements: any[] = [];
       try {
         const aRes = await fetch(`${API_BASE}/achievements/ALL`);
         if (aRes.ok) { const aData = await aRes.json(); achievements = aData.achievements || aData || []; }
       } catch { /* ignore */ }
 
-      // ── Education (non-blocking) ──
+      // â”€â”€ Education (non-blocking) â”€â”€
       let education: any[] = [];
       try {
         const eRes = await fetch(`${API_BASE}/education/ALL`);
@@ -794,10 +1065,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       education: payload.education?.length || 0
     };
     
-    toast.success(`✅ "${newEmployee.name}" created — ${savedCounts.skills} skills, ${savedCounts.projects} projects, ${savedCounts.certificates} certs!`);
+    toast.success(`âœ… "${newEmployee.name}" created â€” ${savedCounts.skills} skills, ${savedCounts.projects} projects, ${savedCounts.certificates} certs!`);
 
     if (openDetails && rawExtractedData) {
-      // Employee now exists in DB — open comparison page with correct ID
+      // Employee now exists in DB â€” open comparison page with correct ID
       setCreatedEmployeeId(newEmployee.employeeId);
       setShowAddEmployeeModal(false);
       setEmailWarningConfirmed(false);
@@ -873,6 +1144,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
               { id: 'Achievements',      icon: Sparkles,       color: '#F59E0B' },
               { id: 'Education',         icon: GraduationCap,  color: '#8B5CF6' },
               { id: 'Projects',          icon: Briefcase,      color: '#F97316' },
+              { id: 'Expert Reviews',    icon: Shield,         color: '#8B5CF6' },
+              { id: 'Workforce Intelligence', icon: Brain,     color: '#EC4899' },
             ].map((t: any) => (
               <button
                 key={t.id}
@@ -947,7 +1220,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     gap: 6
                   }}
                 >
-                  <Filter size={14} /> Filters {(filters.role || filters.minExperience || filters.minProjects || filters.minCertifications || filters.completionRange || filters.hasProjects || filters.hasCertifications || filters.isValidated || (filters.selectedSkills || []).length > 0) ? '●' : ''}
+                  <Filter size={14} /> Filters {(filters.role || filters.minExperience || filters.minProjects || filters.minCertifications || filters.completionRange || filters.hasProjects || filters.hasCertifications || filters.isValidated || (filters.selectedSkills || []).length > 0) ? 'â—' : ''}
                 </button>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button 
@@ -1055,7 +1328,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Role Filter */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      👔 Role
+                      ðŸ‘” Role
                     </label>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {['All', 'QA', 'Senior QA', 'Lead', 'Manager', 'Dev', 'DevOps'].map(role => (
@@ -1082,7 +1355,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Experience Filter */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      📅 Experience
+                      ðŸ“… Experience
                     </label>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {['All', '0-2', '2-5', '5-8', '8+'].map(exp => (
@@ -1124,7 +1397,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Skills Filter - Checkbox List */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      🛠️ Skills
+                      ðŸ› ï¸ Skills
                     </label>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto', padding: 8, background: T.input, borderRadius: 8 }}>
                       {SKILLS.map(skill => (
@@ -1205,7 +1478,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, hasProjects: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      📁 Has Projects
+                      ðŸ“ Has Projects
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: T.text }}>
                       <input 
@@ -1214,7 +1487,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, hasCertifications: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      🏆 Has Certs
+                      ðŸ† Has Certs
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: T.text }}>
                       <input 
@@ -1223,7 +1496,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, isValidated: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      ✅ Validated
+                      âœ… Validated
                     </label>
                   </div>
                 </div>
@@ -1255,39 +1528,55 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                 })()}
               </div>
               
+              {/* Select-all + bulk delete toolbar */}
+              {(() => {
+                const vis = computeVisibleEmployees();
+                const visIds = vis.map((e: any) => String(e.id));
+                const allSelected = visIds.length > 0 && visIds.every((id: string) => selectedIds.has(id));
+                const someSelected = visIds.some((id: string) => selectedIds.has(id));
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: T.sub, fontWeight: 600 }}>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        ref={el => { if (el) el.indeterminate = !allSelected && someSelected; }}
+                        onChange={() => {
+                          setSelectedIds(prev => {
+                            const next = new Set(prev);
+                            if (allSelected) { visIds.forEach((id: string) => next.delete(id)); }
+                            else { visIds.forEach((id: string) => next.add(id)); }
+                            return next;
+                          });
+                        }}
+                        style={{ width: 16, height: 16, cursor: 'pointer' }}
+                      />
+                      Select all
+                    </label>
+                    {selectedIds.size > 0 && (
+                      <button
+                        onClick={() => setShowBulkDeleteModal(true)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 16px', borderRadius: 10, background: '#EF4444', border: 'none', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                      >
+                        <Trash2 size={14} /> Delete Selected ({selectedIds.size})
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
-                {(aiSearchActive ? aiSearchResults : employees)
-                  .filter(e => {
-                    if (aiSearchActive) return true; // AI search already filtered
-                    const matchesSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || String(e.id).includes(search);
-                    const matchesRole = !filters.role || e.designation?.toLowerCase().includes(filters.role.toLowerCase());
-                    const matchesExp = (!filters.minExperience || (e.yearsExperience || 0) >= parseInt(filters.minExperience)) && 
-                                       (!filters.maxExperience || (e.yearsExperience || 0) <= parseInt(filters.maxExperience));
-                    const matchesSkills = !(filters.selectedSkills || []).length || (filters.selectedSkills || []).every((skillId: string) => 
-                      (e.skills || []).some((s: any) => s.skillId === skillId && s.selfRating > 0)
-                    );
-                    const matchesProjects = !filters.minProjects || (e.projects?.length || 0) >= parseInt(filters.minProjects);
-                    const matchesCerts = !filters.minCertifications || (e.certifications?.length || 0) >= parseInt(filters.minCertifications);
-                    const matchesCompletion = !filters.completionRange || (() => {
-                      const [min, max] = filters.completionRange.split('-').map(Number);
-                      return e.completion >= min && e.completion <= max;
-                    })();
-                    const matchesHasProjects = !filters.hasProjects || (e.projects?.length > 0);
-                    const matchesHasCerts = !filters.hasCertifications || (e.certifications?.length > 0);
-                    const matchesValidated = !filters.isValidated || e.submitted;
-                    return matchesSearch && matchesRole && matchesExp && matchesSkills && matchesProjects && matchesCerts && matchesCompletion && matchesHasProjects && matchesHasCerts && matchesValidated;
-                  })
-                  .sort((a, b) => {
-                    if (aiSearchActive) return 0; // AI search already sorted by score
-                    if (sortOrder === 'A-Z') return a.name?.localeCompare(b.name);
-                    if (sortOrder === 'Z-A') return b.name?.localeCompare(a.name);
-                    if (sortOrder === 'Newest') return (b.id || '').localeCompare(a.id || '');
-                    if (sortOrder === 'Oldest') return (a.id || '').localeCompare(b.id || '');
-                    return 0;
-                  })
-                  .map(e => (
-                    <div key={e.id} onClick={() => handleOpenPreview(e)} style={{ background: T.bg, border: `1px solid ${aiSearchActive && e._aiScore ? '#8B5CF6' : T.bdr}`, borderRadius: 20, padding: 24, cursor: 'pointer', transition: '0.2s', display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box' }} className="hover:scale-105">
+                {computeVisibleEmployees()
+                  .map((e: any) => (
+                    <div key={e.id} onClick={() => handleOpenPreview(e)} style={{ background: T.bg, border: `1px solid ${selectedIds.has(String(e.id)) ? '#EF4444' : aiSearchActive && e._aiScore ? '#8B5CF6' : T.bdr}`, borderRadius: 20, padding: 24, cursor: 'pointer', transition: '0.2s', display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box' }} className="hover:scale-105">
                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, marginBottom: 16 }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(String(e.id))}
+                            onClick={ev => ev.stopPropagation()}
+                            onChange={() => toggleSelectId(String(e.id))}
+                            style={{ width: 16, height: 16, cursor: 'pointer', flexShrink: 0, marginTop: 4 }}
+                          />
                           <div style={{ width: 48, height: 48, flexShrink: 0, borderRadius: 14, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, color: '#fff' }}>
                             {e.name?.substring(0,2).toUpperCase()}
                           </div>
@@ -1331,8 +1620,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                        
                        <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <div style={{ display: 'flex', gap: 12, fontSize: 11, color: T.muted }}>
-                            {e.projects?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>📁 {e.projects.length}</span>}
-                            {e.certifications?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>🏆 {e.certifications.length}</span>}
+                            {e.projects?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>ðŸ“ {e.projects.length}</span>}
+                            {e.certifications?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>ðŸ† {e.certifications.length}</span>}
                           </div>
                           <Eye size={16} color={T.muted} />
                        </div>
@@ -1360,7 +1649,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* ── CERTIFICATIONS TAB ── */}
+          {/* â”€â”€ CERTIFICATIONS TAB â”€â”€ */}
           {activeTab === 'Certifications' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1399,12 +1688,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.certifications.length} 🏅</div>
+                        <div style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.certifications.length} ðŸ…</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((c: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏅</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ…</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{c.cert_name || c.name || 'Certificate'}</div>
                               {(c.issuing_organization || c.issuer) && <div style={{ fontSize: 10, color: T.sub }}>{c.issuing_organization || c.issuer}</div>}
@@ -1414,7 +1703,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.certifications.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`cert_${e.id}`]: !prev[`cert_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#10B981', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? '▲ Show Less' : `▼ See More (${e.certifications.length - 3} more)`}
+                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.certifications.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1431,7 +1720,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* ── ACHIEVEMENTS TAB ── */}
+          {/* â”€â”€ ACHIEVEMENTS TAB â”€â”€ */}
           {activeTab === 'Achievements' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1470,12 +1759,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(245,158,11,0.15)', color: '#F59E0B', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.achievements.length} 🏆</div>
+                        <div style={{ background: 'rgba(245,158,11,0.15)', color: '#F59E0B', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.achievements.length} ðŸ†</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((a: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(245,158,11,0.06)' : '#fffbeb', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏆</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ†</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{a.title || a.award_title || 'Achievement'}</div>
                               {(a.award_type || a.category) && <div style={{ fontSize: 10, color: T.sub }}>{a.award_type || a.category}</div>}
@@ -1485,7 +1774,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.achievements.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`ach_${e.id}`]: !prev[`ach_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? '▲ Show Less' : `▼ See More (${e.achievements.length - 3} more)`}
+                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.achievements.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1502,7 +1791,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* ── EDUCATION TAB ── */}
+          {/* â”€â”€ EDUCATION TAB â”€â”€ */}
           {activeTab === 'Education' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1541,22 +1830,22 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(139,92,246,0.15)', color: '#8B5CF6', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.education.length} 🎓</div>
+                        <div style={{ background: 'rgba(139,92,246,0.15)', color: '#8B5CF6', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.education.length} ðŸŽ“</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((ed: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(139,92,246,0.06)' : '#faf5ff', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>🎓</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸŽ“</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{ed.degree || ed.qualification || 'Degree'}</div>
-                              {(ed.institution || ed.university) && <div style={{ fontSize: 10, color: T.sub }}>{ed.institution || ed.university}{ed.year ? ` · ${ed.year}` : ''}</div>}
+                              {(ed.institution || ed.university) && <div style={{ fontSize: 10, color: T.sub }}>{ed.institution || ed.university}{ed.year ? ` Â· ${ed.year}` : ''}</div>}
                             </div>
                           </div>
                         ))}
                         {e.education.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`edu_${e.id}`]: !prev[`edu_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#8B5CF6', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? '▲ Show Less' : `▼ See More (${e.education.length - 3} more)`}
+                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.education.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1573,7 +1862,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* ── PROJECTS TAB ── */}
+          {/* â”€â”€ PROJECTS TAB â”€â”€ */}
           {activeTab === 'Projects' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1616,15 +1905,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(249,115,22,0.15)', color: '#F97316', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.projects.length} 📁</div>
+                        <div style={{ background: 'rgba(249,115,22,0.15)', color: '#F97316', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.projects.length} ðŸ“</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((p: any, i: number) => {
                           const title = p.ProjectName || p.project_name || p.name || '';
-                          const sub = [p.Client || p.client, p.Domain || p.domain].filter(Boolean).join(' · ');
+                          const sub = [p.Client || p.client, p.Domain || p.domain].filter(Boolean).join(' Â· ');
                           return (
                             <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(249,115,22,0.06)' : '#fff7ed', borderRadius: 8 }}>
-                              <span style={{ fontSize: 13, flexShrink: 0 }}>📁</span>
+                              <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ“</span>
                               <div style={{ minWidth: 0 }}>
                                 <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title || 'Untitled Project'}</div>
                                 {sub && <div style={{ fontSize: 10, color: T.sub }}>{sub}</div>}
@@ -1635,7 +1924,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.projects.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`proj_${e.id}`]: !prev[`proj_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F97316', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? '▲ Show Less' : `▼ See More (${e.projects.length - 3} more)`}
+                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.projects.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1649,6 +1938,1253 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* â”€â”€ EXPERT REVIEWS TAB â”€â”€ */}
+          {activeTab === 'Expert Reviews' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Shield size={20} color="#8B5CF6" /> Expert Validation Queue
+                </h3>
+                <button onClick={fetchReviews} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <RefreshCw size={13} className={isLoadingReviews ? 'animate-spin' : ''} /> Refresh Queue
+                </button>
+              </div>
+
+              {isLoadingReviews ? (
+                <p style={{ color: T.sub, fontSize: 13 }}>Loading review queue...</p>
+              ) : reviews.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 48, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16 }}>
+                  <Shield size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                  <div style={{ fontWeight: 700, color: T.sub }}>No expert validation requests pending</div>
+                </div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
+                    <thead>
+                      <tr style={{ background: T.card, borderBottom: `1px solid ${T.bdr}`, color: T.sub, textAlign: 'left' }}>
+                        <th style={{ padding: '12px 16px' }}>Employee</th>
+                        <th style={{ padding: '12px 16px' }}>Skill</th>
+                        <th style={{ padding: '12px 16px' }}>SLA Deadline</th>
+                        <th style={{ padding: '12px 16px' }}>Integrity</th>
+                        <th style={{ padding: '12px 16px' }}>Status</th>
+                        <th style={{ padding: '12px 16px' }}>Reviewer</th>
+                        <th style={{ padding: '12px 16px' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reviews.map((r) => {
+                        const isOverdue = r.sla_deadline && new Date(r.sla_deadline) < new Date() && r.review_status !== 'approved' && r.review_status !== 'rejected';
+                        return (
+                          <tr key={r.session_id} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: T.text }}>{r.employee_name}</div>
+                              <div style={{ fontSize: 11, color: T.sub }}>{r.zensar_id}</div>
+                            </td>
+                            <td style={{ padding: '14px 16px', fontWeight: 600 }}>{r.skill_name || 'Performance Testing'}</td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <span style={{ color: isOverdue ? '#EF4444' : T.text, fontWeight: isOverdue ? 700 : 500 }}>
+                                {new Date(r.sla_deadline).toLocaleDateString()} {isOverdue && 'âš ï¸ OVERDUE'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                <span style={{ 
+                                  fontWeight: 700, 
+                                  color: (r.integrity_score !== undefined && r.integrity_score < 75) ? '#EF4444' : '#10B981'
+                                }}>
+                                  Score: {r.integrity_score ?? 100}%
+                                </span>
+                                {(r.tab_switch_count > 0 || r.copy_paste_count > 0) && (
+                                  <span style={{ fontSize: 10, color: '#F59E0B', fontWeight: 600 }}>
+                                    âš ï¸ {r.tab_switch_count > 0 ? `Tab switches: ${r.tab_switch_count} ` : ''}
+                                    {r.copy_paste_count > 0 ? `Copy/Paste: ${r.copy_paste_count}` : ''}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <span style={{
+                                padding: '2px 8px',
+                                borderRadius: 6,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: r.review_status === 'approved' ? 'rgba(16,185,129,0.1)' 
+                                          : r.review_status === 'rejected' ? 'rgba(239,68,68,0.1)'
+                                          : r.review_status === 'in_review' ? 'rgba(59,130,246,0.1)'
+                                          : r.review_status === 'escalated' ? 'rgba(245,158,11,0.1)'
+                                          : 'rgba(156,163,175,0.1)',
+                                color: r.review_status === 'approved' ? '#10B981'
+                                     : r.review_status === 'rejected' ? '#EF4444'
+                                     : r.review_status === 'in_review' ? '#3B82F6'
+                                     : r.review_status === 'escalated' ? '#F59E0B'
+                                     : T.sub
+                              }}>
+                                {r.review_status.toUpperCase()}
+                              </span>
+                            </td>
+                            <td style={{ padding: '14px 16px', color: T.sub }}>{r.reviewer_id || 'Unassigned'}</td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                {r.review_status === 'pending' && (
+                                  <button onClick={() => handleClaimReview(r)} style={{ padding: '4px 10px', borderRadius: 6, background: '#3B82F6', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                                    Claim
+                                  </button>
+                                )}
+                                {r.review_status === 'in_review' && (
+                                  <>
+                                    <button onClick={() => { setSelectedReview(r); setShowReviewActionModal('approve'); }} style={{ padding: '4px 10px', borderRadius: 6, background: '#10B981', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                                      Approve
+                                    </button>
+                                    <button onClick={() => { setSelectedReview(r); setShowReviewActionModal('reject'); }} style={{ padding: '4px 10px', borderRadius: 6, background: '#EF4444', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                                      Reject
+                                    </button>
+                                    <button onClick={() => { setSelectedReview(r); setShowReviewActionModal('escalate'); }} style={{ padding: '4px 10px', borderRadius: 6, background: '#F59E0B', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                                      Escalate
+                                    </button>
+                                  </>
+                                )}
+                                {(r.review_status === 'approved' || r.review_status === 'rejected') && (
+                                  <span style={{ fontSize: 12, color: T.muted }}>
+                                    Decision: <strong>{r.final_decision}</strong>
+                                    {r.review_notes && <div style={{ fontSize: 10, fontStyle: 'italic', marginTop: 2 }}>Notes: {r.review_notes}</div>}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Action Modals */}
+              {showReviewActionModal && selectedReview && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, backdropFilter: 'blur(5px)' }}>
+                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 1000, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)' }}>
+                    
+                    {/* Modal Header */}
+                    <div style={{ padding: '20px 24px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.02)' }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, textTransform: 'capitalize', color: T.text, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Shield size={20} color="#8B5CF6" /> {showReviewActionModal} Validation Request
+                        </h3>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>
+                          Employee: <strong>{selectedReview.employee_name}</strong> Â· Zensar ID: <strong>{selectedReview.zensar_id || 'â€”'}</strong> Â· Skill: <strong>{selectedReview.skill_name || 'Performance Testing'}</strong>
+                        </div>
+                      </div>
+                      <button onClick={() => { setShowReviewActionModal(null); setSelectedReview(null); }} style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', fontSize: 20 }}>âœ•</button>
+                    </div>
+
+                    {/* Modal Content - Dual Grid Layout */}
+                    <div style={{ flex: 1, overflowY: 'auto', display: 'grid', gridTemplateColumns: '400px 1fr' }}>
+                      
+                      {/* Left Column: Decision & Action Form */}
+                      <div style={{ padding: 24, borderRight: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 20, background: dark ? 'rgba(0,0,0,0.05)' : 'transparent' }}>
+                        <div style={{ background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}` }}>
+                          <h4 style={{ margin: '0 0 12px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: T.sub }}>Decision Overview</h4>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                              <span style={{ color: T.sub }}>Assessment Result:</span>
+                              <span style={{ fontWeight: 800, color: selectedReview.explain_score_breakdown?.finalScore >= selectedReview.explain_score_breakdown?.passThreshold ? '#10B981' : '#EF4444' }}>
+                                {selectedReview.explain_score_breakdown?.finalScore ?? selectedReview.score ?? 0}%
+                                {selectedReview.explain_score_breakdown?.finalScore >= selectedReview.explain_score_breakdown?.passThreshold ? ' (PASS)' : ' (FAIL)'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                              <span style={{ color: T.sub }}>Allocation Readiness:</span>
+                              <span style={{ fontWeight: 800, color: '#3B82F6' }}>
+                                {selectedReview.allocation_readiness_score ?? 0}%
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                              <span style={{ color: T.sub }}>Allocation Risk:</span>
+                              <span style={{ fontWeight: 800, color: selectedReview.allocation_risk === 'High' ? '#EF4444' : selectedReview.allocation_risk === 'Medium' ? '#F59E0B' : '#10B981' }}>
+                                {selectedReview.allocation_risk ?? 'Low'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                              <span style={{ color: T.sub }}>Status:</span>
+                              <span style={{ fontWeight: 800, color: selectedReview.ready_for_allocation ? '#10B981' : '#EF4444' }}>
+                                {selectedReview.ready_for_allocation ? 'Ready for Allocation' : 'Blocked'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div>
+                          {showReviewActionModal === 'escalate' ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                              <div>
+                                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, marginBottom: 6, color: T.text }}>Escalate To</label>
+                                <select value={escalatedTo} onChange={e => setEscalatedTo(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 8, background: T.bg, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13 }}>
+                                  <option value="admin">Senior Administrator</option>
+                                  <option value="rmg">RMG Lead</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, marginBottom: 6, color: T.text }}>Reason for Escalation</label>
+                                <textarea value={escalationReason} onChange={e => setEscalationReason(e.target.value)} rows={4} placeholder="Provide a reason for escalation..." style={{ width: '100%', padding: 10, borderRadius: 8, background: T.bg, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, resize: 'none' }} />
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <label style={{ display: 'block', fontSize: 12, fontWeight: 700, marginBottom: 6, color: T.text }}>Reviewer Notes / Feedback</label>
+                              <textarea value={reviewNotes} onChange={e => setReviewNotes(e.target.value)} rows={6} placeholder="Enter your detailed validation review notes..." style={{ width: '100%', padding: 10, borderRadius: 8, background: T.bg, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, resize: 'none' }} />
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 10, marginTop: 'auto' }}>
+                          <button onClick={() => { setShowReviewActionModal(null); setSelectedReview(null); }} style={{ flex: 1, padding: '10px 16px', borderRadius: 8, background: 'none', border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                            Cancel
+                          </button>
+                          <button onClick={() => handleReviewAction(showReviewActionModal)} style={{ flex: 1, padding: '10px 16px', borderRadius: 8, background: showReviewActionModal === 'approve' ? '#10B981' : showReviewActionModal === 'reject' ? '#EF4444' : '#F59E0B', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                            Confirm
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Right Column: Score Verification Details */}
+                      <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20, overflowY: 'auto', maxHeight: 'calc(90vh - 80px)' }}>
+                        
+                        {/* 1. Score Explanation & Breakdown */}
+                        {(() => {
+                          const isExpertReview = !!selectedReview.expert_profile;
+
+                          const expertProfile = typeof selectedReview.expert_profile === 'string'
+                            ? JSON.parse(selectedReview.expert_profile)
+                            : (selectedReview.expert_profile || null);
+
+                          const extractedEvidence = typeof selectedReview.extracted_evidence === 'string'
+                            ? JSON.parse(selectedReview.extracted_evidence)
+                            : (selectedReview.extracted_evidence || null);
+
+                          const evidenceEval = typeof selectedReview.evidence_evaluation === 'string'
+                            ? JSON.parse(selectedReview.evidence_evaluation)
+                            : (selectedReview.evidence_evaluation || null);
+
+                          const techDiscussion = typeof selectedReview.technical_discussion === 'string'
+                            ? JSON.parse(selectedReview.technical_discussion)
+                            : (selectedReview.technical_discussion || null);
+
+                          const leadDiscussion = typeof selectedReview.leadership_discussion === 'string'
+                            ? JSON.parse(selectedReview.leadership_discussion)
+                            : (selectedReview.leadership_discussion || null);
+
+                          const consistencyAnalysis = typeof selectedReview.consistency_analysis === 'string'
+                            ? JSON.parse(selectedReview.consistency_analysis)
+                            : (selectedReview.consistency_analysis || null);
+
+                          const riskAnalysis = typeof selectedReview.risk_analysis === 'string'
+                            ? JSON.parse(selectedReview.risk_analysis)
+                            : (selectedReview.risk_analysis || null);
+
+                          const aiRec = typeof selectedReview.ai_recommendation === 'string'
+                            ? JSON.parse(selectedReview.ai_recommendation)
+                            : (selectedReview.ai_recommendation || null);
+
+                          const authenticityAnalysis = typeof selectedReview.authenticity_analysis === 'string'
+                            ? JSON.parse(selectedReview.authenticity_analysis)
+                            : (selectedReview.authenticity_analysis || null);
+
+                          // Standard MCQ/Contribution variables
+                          const sb = typeof selectedReview.explain_score_breakdown === 'string'
+                            ? JSON.parse(selectedReview.explain_score_breakdown)
+                            : (selectedReview.explain_score_breakdown || {});
+
+                          const cb = typeof selectedReview.contribution_breakdown === 'string'
+                            ? JSON.parse(selectedReview.contribution_breakdown)
+                            : (selectedReview.contribution_breakdown || {});
+
+                          const gitMeta = typeof selectedReview.github_metadata === 'string'
+                            ? JSON.parse(selectedReview.github_metadata)
+                            : (selectedReview.github_metadata || {});
+
+                          if (isExpertReview) {
+                            const allQuestionsList: any[] = [
+                              ...(Array.isArray(techDiscussion?.questions) ? techDiscussion.questions : []),
+                              ...(Array.isArray(leadDiscussion?.questions) ? leadDiscussion.questions : [])
+                            ];
+                            return (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                                
+                                {/* AI Recommendation */}
+                                {aiRec && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.3)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#8B5CF6', fontWeight: 800, fontSize: 13, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                      <Brain size={16} /> AI Capability Recommendation
+                                    </div>
+                                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Suggested Decision: <span style={{ color: aiRec.decision === 'Expert' ? '#10B981' : '#F59E0B' }}>{aiRec.decision}</span></div>
+                                    <p style={{ margin: 0, fontSize: 12, color: T.sub, lineHeight: 1.5 }}>
+                                      {aiRec.reasoning}
+                                    </p>
+                                  </div>
+                                )}
+
+                                {/* Weighted Score Breakdown Card */}
+                                 {(() => {
+                                   const finalScorePreview = Math.round(
+                                     (adjustedEvidenceScore * 0.40) +
+                                     (adjustedScenarioScore * 0.25) +
+                                     (adjustedMentoringScore * 0.20) +
+                                     (adjustedExperienceScore * 0.15)
+                                   );
+                                   const allocationConfidencePreview = Math.round(
+                                     (adjustedEvidenceScore * 0.40) +
+                                     (adjustedScenarioScore * 0.30) +
+                                     (adjustedMentoringScore * 0.15) +
+                                     (adjustedExperienceScore * 0.15)
+                                   );
+                                   const isPassedPreview = finalScorePreview >= 70;
+
+                                   return (
+                                     <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                         <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Interactive V6 Score Validation & Adjuster</h4>
+                                         <span style={{ 
+                                           padding: '4px 10px', 
+                                           borderRadius: 20, 
+                                           fontSize: 10, 
+                                           fontWeight: 800, 
+                                           background: isPassedPreview ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                                           color: isPassedPreview ? '#10B981' : '#F59E0B',
+                                           border: `1px solid ${isPassedPreview ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`
+                                         }}>
+                                           {isPassedPreview ? 'RECOMMENDED LEVEL: EXPERT' : 'RECOMMENDED LEVEL: ADVANCED'}
+                                         </span>
+                                       </div>
+
+                                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, background: T.bg, padding: 14, borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                           <div style={{ width: 48, height: 48, borderRadius: '50%', background: isPassedPreview ? 'linear-gradient(135deg,#10B981,#3B82F6)' : 'linear-gradient(135deg,#F59E0B,#EF4444)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>
+                                             <span style={{ fontSize: 15, fontWeight: 900 }}>{finalScorePreview}%</span>
+                                           </div>
+                                           <div>
+                                             <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>Overall Score</div>
+                                             <div style={{ fontSize: 9, color: T.muted }}>Weighted average of V6 components</div>
+                                           </div>
+                                         </div>
+
+                                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                           <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'linear-gradient(135deg,#8B5CF6,#60A5FA)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>
+                                             <span style={{ fontSize: 15, fontWeight: 900 }}>{allocationConfidencePreview}%</span>
+                                           </div>
+                                           <div>
+                                             <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>Workforce Confidence</div>
+                                             <div style={{ fontSize: 9, color: T.muted }}>Staffing allocation validation vector</div>
+                                           </div>
+                                         </div>
+                                       </div>
+
+                                       {/* Sliders Grid */}
+                                       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                         {[
+                                           { 
+                                             label: 'Evidence Package (40% Weight)', 
+                                             val: adjustedEvidenceScore, 
+                                             setVal: setAdjustedEvidenceScore, 
+                                             pts: (adjustedEvidenceScore * 0.40).toFixed(1),
+                                             color: '#3B82F6'
+                                           },
+                                           { 
+                                             label: 'AI Scenario Discussion (25% Weight)', 
+                                             val: adjustedScenarioScore, 
+                                             setVal: setAdjustedScenarioScore, 
+                                             pts: (adjustedScenarioScore * 0.25).toFixed(1),
+                                             color: '#8B5CF6'
+                                           },
+                                           { 
+                                             label: 'Mentoring Validation (20% Weight)', 
+                                             val: adjustedMentoringScore, 
+                                             setVal: setAdjustedMentoringScore, 
+                                             pts: (adjustedMentoringScore * 0.20).toFixed(1),
+                                             color: '#10B981'
+                                           },
+                                           { 
+                                             label: 'Experience Depth (15% Weight)', 
+                                             val: adjustedExperienceScore, 
+                                             setVal: setAdjustedExperienceScore, 
+                                             pts: (adjustedExperienceScore * 0.15).toFixed(1),
+                                             color: '#F59E0B'
+                                           }
+                                         ].map((slider, i) => (
+                                           <div key={i} style={{ padding: 10, borderRadius: 8, background: T.bg, border: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700 }}>
+                                               <span style={{ color: T.sub }}>{slider.label}</span>
+                                               <span style={{ color: slider.color }}>{slider.val}% ({slider.pts} pts)</span>
+                                             </div>
+                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                               <input 
+                                                 type="range" 
+                                                 min="0" 
+                                                 max="100" 
+                                                 value={slider.val}
+                                                 onChange={(e) => slider.setVal(Number(e.target.value))}
+                                                 style={{ flex: 1, accentColor: slider.color, cursor: 'pointer', height: 6, borderRadius: 3 }}
+                                               />
+                                               <input 
+                                                 type="number" 
+                                                 min="0" 
+                                                 max="100" 
+                                                 value={slider.val} 
+                                                 onChange={(e) => slider.setVal(Math.max(0, Math.min(100, Number(e.target.value))))}
+                                                 style={{ width: 50, padding: '2px 4px', borderRadius: 4, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 11, fontWeight: 700, textAlign: 'center' }}
+                                               />
+                                             </div>
+                                           </div>
+                                         ))}
+                                       </div>
+                                     </div>
+                                   );
+                                  })()}
+
+                                {/* Candidate Profile Summary */}
+                                {expertProfile && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Candidate Resume Summary</h4>
+                                    <p style={{ margin: '0 0 10px', fontSize: 12, color: T.text, lineHeight: 1.5 }}>{expertProfile.summary}</p>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 11, color: T.sub }}>
+                                      <div>IT Experience: <strong>{expertProfile.yearsIT} Years</strong></div>
+                                      <div>Domains: <strong>{expertProfile.domains?.join(', ')}</strong></div>
+                                      <div>Roles: <strong>{expertProfile.roles?.join(', ')}</strong></div>
+                                      <div>Technologies: <strong>{expertProfile.technologies?.slice(0, 5).join(', ')}</strong></div>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* AI Evidence Analysis */}
+                                {evidenceEval && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                      <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>AI Evidence Evaluation</h4>
+                                      <span style={{ fontSize: 14, fontWeight: 900, color: '#8B5CF6' }}>Score: {evidenceEval.evidenceScore} / 100</span>
+                                    </div>
+                                    <p style={{ margin: '0 0 12px', fontSize: 12, color: T.sub, lineHeight: 1.4 }}>{evidenceEval.summary}</p>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+                                      {Object.entries(evidenceEval.criteria || {}).map(([key, data]: [string, any]) => (
+                                        <div key={key} style={{ padding: 8, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 8, fontSize: 11 }}>
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontWeight: 700 }}>
+                                            <span style={{ textTransform: 'capitalize' }}>{key.replace(/([A-Z])/g, ' $1')}</span>
+                                            <span>{data.score}/{data.max}</span>
+                                          </div>
+                                          <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.3 }}>{data.feedback}</div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    {evidenceEval.strengths && evidenceEval.strengths.length > 0 && (
+                                      <div style={{ fontSize: 11, color: '#10B981', marginBottom: 6 }}>
+                                        <strong>Strengths:</strong> {evidenceEval.strengths.join(', ')}
+                                      </div>
+                                    )}
+                                    {evidenceEval.weaknesses && evidenceEval.weaknesses.length > 0 && (
+                                      <div style={{ fontSize: 11, color: '#EF4444', marginBottom: 6 }}>
+                                        <strong>Weaknesses:</strong> {evidenceEval.weaknesses.join(', ')}
+                                      </div>
+                                    )}
+                                    {evidenceEval.missingInformation && evidenceEval.missingInformation.length > 0 && (
+                                      <div style={{ fontSize: 11, color: T.muted, marginBottom: 12 }}>
+                                        <strong>Missing Info:</strong> {evidenceEval.missingInformation.join(', ')}
+                                      </div>
+                                    )}
+                                    {evidenceEval.improvementSuggestions && evidenceEval.improvementSuggestions.length > 0 && (
+                                      <div style={{ fontSize: 11, color: '#3B82F6', marginBottom: 12 }}>
+                                        <strong>Improvement Suggestions:</strong>
+                                        <ul style={{ margin: '4px 0 0', paddingLeft: 16 }}>
+                                          {evidenceEval.improvementSuggestions.map((s: string, idx: number) => <li key={idx}>{s}</li>)}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+
+                                {/* Universal Evidence Intelligence */}
+                                {extractedEvidence && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <h4 style={{ margin: '0 0 12px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Universal Evidence Intelligence</h4>
+
+                                    {/* Aggregated signals grid */}
+                                    {extractedEvidence.aggregated && (
+                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+                                        {[
+                                          { label: 'Skills', items: extractedEvidence.aggregated.detectedSkills, color: '#10B981' },
+                                          { label: 'Technologies', items: extractedEvidence.aggregated.technologies, color: '#3B82F6' },
+                                          { label: 'Leadership', items: extractedEvidence.aggregated.leadershipIndicators, color: '#EC4899' },
+                                          { label: 'Architecture', items: extractedEvidence.aggregated.architectureIndicators, color: '#8B5CF6' },
+                                          { label: 'Ownership', items: extractedEvidence.aggregated.ownershipIndicators, color: '#F59E0B' },
+                                          { label: 'Certifications', items: extractedEvidence.aggregated.certifications, color: '#10B981' },
+                                        ].map(({ label, items, color }) => (
+                                          <div key={label} style={{ padding: 10, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 8 }}>
+                                            <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 6, textTransform: 'uppercase' }}>{label} ({items?.length || 0})</div>
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                                              {(items || []).slice(0, 5).map((item: string, i: number) => (
+                                                <span key={i} style={{ padding: '2px 7px', borderRadius: 3, background: `${color}15`, color, fontSize: 9, fontWeight: 700, border: `1px solid ${color}25` }}>{item}</span>
+                                              ))}
+                                              {(items || []).length > 5 && <span style={{ fontSize: 9, color: T.muted }}>+{(items || []).length - 5}</span>}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Business Impact */}
+                                    {extractedEvidence.aggregated?.businessImpactSummary && (
+                                      <div style={{ padding: 10, borderRadius: 8, background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)', marginBottom: 12 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: '#10B981', marginBottom: 4 }}>BUSINESS IMPACT</div>
+                                        <p style={{ margin: 0, fontSize: 11, color: T.text, lineHeight: 1.4 }}>{extractedEvidence.aggregated.businessImpactSummary}</p>
+                                      </div>
+                                    )}
+
+                                    {/* Projects */}
+                                    {extractedEvidence.aggregated?.projectNames?.length > 0 && (
+                                      <div style={{ marginBottom: 10 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 4 }}>PROJECTS DETECTED ({extractedEvidence.aggregated.projectNames.length})</div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                          {extractedEvidence.aggregated.projectNames.map((p: string, i: number) => (
+                                            <span key={i} style={{ padding: '2px 8px', borderRadius: 4, background: 'rgba(59,130,246,0.1)', color: '#3B82F6', fontSize: 10, fontWeight: 600, border: '1px solid rgba(59,130,246,0.2)' }}>{p}</span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Per-document summaries list */}
+                                    {extractedEvidence.documents?.length > 0 && (
+                                      <div style={{ marginTop: 12 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 6 }}>DOCUMENT CLASSIFICATION & SUMMARIES ({extractedEvidence.documents.length} files)</div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                          {extractedEvidence.documents.map((doc: any, i: number) => (
+                                            <div key={i} style={{ padding: 10, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 8 }}>
+                                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                                                <span style={{ fontSize: 11, fontWeight: 700, color: T.text, wordBreak: 'break-all' }}>{doc.filename}</span>
+                                                <span style={{ padding: '2px 6px', borderRadius: 4, background: 'rgba(139,92,246,0.1)', color: '#8B5CF6', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>{doc.documentTypeLabel} (Conf: {doc.confidence}%)</span>
+                                              </div>
+                                              {doc.evidenceSummary && <p style={{ margin: '4px 0 0', fontSize: 11, color: T.sub, fontStyle: 'italic', lineHeight: 1.3 }}>{doc.evidenceSummary}</p>}
+                                              {(doc.detectedSkills || []).length > 0 && (
+                                                <div style={{ fontSize: 9, color: T.muted, marginTop: 4 }}>
+                                                  Skills: {(doc.detectedSkills || []).join(', ')}
+                                                </div>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Fallback: old certifications/projects (backwards compat) */}
+                                    {!extractedEvidence.aggregated && extractedEvidence.certifications?.length > 0 && (
+                                      <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 4 }}>CERTIFICATIONS</div>
+                                        <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11, color: T.sub }}>
+                                          {extractedEvidence.certifications.map((c: any, i: number) => (
+                                            <li key={i}><strong>{c.name}</strong> ({c.provider}) {c.credentialNumber && `ID: ${c.credentialNumber}`}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {!extractedEvidence.aggregated && extractedEvidence.projects?.length > 0 && (
+                                      <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 4 }}>PROJECTS</div>
+                                        <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11, color: T.sub }}>
+                                          {extractedEvidence.projects.map((p: any, i: number) => (
+                                            <li key={i}><strong>{p.name}</strong> Â· {p.role} ({p.duration}) Â· Team: {p.teamSize}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                
+
+                                {/* Adaptive Expert Discussion Audits (4 Questions) */}
+                                {allQuestionsList.length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                                    {allQuestionsList.map((q: any, idx: number) => {
+                                      const evalData = q.evaluation || {};
+                                      return (
+                                        <div key={idx} style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                            <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>
+                                              {t('Adaptive Discussion Q')}{idx + 1}{t(': ')}{q.type || t('Technical')}
+                                            </h4>
+                                            <span style={{ fontSize: 14, fontWeight: 900, color: '#8B5CF6' }}>
+                                              {t('Score: ')}{evalData.questionScore || 0}%
+                                            </span>
+                                          </div>
+
+                                          <div style={{ background: T.bg, padding: 10, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11 }}>
+                                            <div style={{ color: T.muted, fontWeight: 700, marginBottom: 4 }}>{t('QUESTION:')}</div>
+                                            <div style={{ color: T.text, fontWeight: 600, lineHeight: 1.4 }}>{q.question}</div>
+                                          </div>
+
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 11 }}>
+                                            <div style={{ padding: 8, background: T.bg, borderRadius: 8, borderLeft: '3px solid #8B5CF6' }}>
+                                              <div style={{ fontWeight: 700, color: T.muted, marginBottom: 2 }}>
+                                                {t('Employee Response')}{q.isVoiceUsed ? t(' (Voice Flow)') : ''}{t(':')}
+                                              </div>
+                                              <div style={{ color: T.text, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{q.response}</div>
+                                            </div>
+                                            {q.isVoiceUsed && q.rawTranscript && q.rawTranscript !== q.response && (
+                                              <div style={{ padding: 8, background: T.bg, borderRadius: 8, borderLeft: '3px solid #3B82F6' }}>
+                                                <div style={{ fontWeight: 700, color: T.muted, marginBottom: 2 }}>{t('Raw Audio Transcript:')}</div>
+                                                <div style={{ color: T.sub, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{q.rawTranscript}</div>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {/* Detail Metrics Breakdown */}
+                                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, background: T.card, padding: 10, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 10 }}>
+                                            {[
+                                              { label: t('Question Score'), val: evalData.questionScore },
+                                              { label: t('Reasoning Score'), val: evalData.reasoningScore },
+                                              { label: t('Technical Depth'), val: evalData.technicalDepth },
+                                              { label: t('Leadership Signals'), val: evalData.leadershipSignals },
+                                              { label: t('Ownership Signals'), val: evalData.ownershipSignals },
+                                              { label: t('Authenticity Score'), val: evalData.authenticityScore },
+                                              { label: t('Human Content %'), val: evalData.humanContentPct },
+                                              { label: t('AI Assisted %'), val: evalData.aiAssistedPct },
+                                              { label: t('Confidence Score'), val: evalData.confidenceScore },
+                                            ].map((m, sidx) => (
+                                              <div key={sidx} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                <span style={{ color: T.muted, fontSize: 8 }}>{m.label}</span>
+                                                <strong style={{ color: (m.val ?? 0) >= 75 ? '#10B981' : (m.val ?? 0) >= 50 ? '#F59E0B' : '#EF4444' }}>{m.val ?? 0}%</strong>
+                                              </div>
+                                            ))}
+                                          </div>
+
+                                          <div style={{ padding: 10, background: T.bg, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11 }}>
+                                            <div style={{ fontWeight: 700, color: T.sub, marginBottom: 6 }}>{t('AI Critique & Bullet Points:')}</div>
+                                            
+                                            {evalData.strengths?.length > 0 && (
+                                              <div style={{ marginBottom: 6 }}>
+                                                <div style={{ color: '#10B981', fontWeight: 700, marginBottom: 2 }}>{t('Strengths:')}</div>
+                                                <ul style={{ margin: 0, paddingLeft: 14, color: T.text }}>
+                                                  {evalData.strengths.map((str: string, i: number) => <li key={i}>{str}</li>)}
+                                                </ul>
+                                              </div>
+                                            )}
+                                            
+                                            {evalData.gaps?.length > 0 && (
+                                              <div style={{ marginBottom: 6 }}>
+                                                <div style={{ color: '#EF4444', fontWeight: 700, marginBottom: 2 }}>{t('Gaps:')}</div>
+                                                <ul style={{ margin: 0, paddingLeft: 14, color: T.text }}>
+                                                  {evalData.gaps.map((gap: string, i: number) => <li key={i}>{gap}</li>)}
+                                                </ul>
+                                              </div>
+                                            )}
+
+                                            {evalData.improvementSuggestions?.length > 0 && (
+                                              <div>
+                                                <div style={{ color: '#3B82F6', fontWeight: 700, marginBottom: 2 }}>{t('Suggestions:')}</div>
+                                                <ul style={{ margin: 0, paddingLeft: 14, color: T.sub }}>
+                                                  {evalData.improvementSuggestions.map((sug: string, i: number) => <li key={i}>{sug}</li>)}
+                                                </ul>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <>
+                                    {/* Technical Discussion Transcript & Evaluation */}
+                                    {techDiscussion && (
+                                      <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Technical Discussion Audit</h4>
+                                          <span style={{ fontSize: 14, fontWeight: 900, color: '#8B5CF6' }}>Score: {techDiscussion.evaluation?.technicalScore}%</span>
+                                        </div>
+                                        
+                                        <div style={{ background: T.bg, padding: 10, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11, marginBottom: 12 }}>
+                                          <div style={{ color: T.muted, fontWeight: 700, marginBottom: 4 }}>SCENARIO:</div>
+                                          <div style={{ color: T.text, lineHeight: 1.4, marginBottom: 6 }}>{techDiscussion.scenario?.scenario}</div>
+                                          <div style={{ color: T.muted, fontWeight: 700, marginBottom: 2 }}>QUESTION:</div>
+                                          <div style={{ color: T.text, fontWeight: 600 }}>{techDiscussion.scenario?.question}</div>
+                                        </div>
+
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 11, marginBottom: 12 }}>
+                                          <div style={{ padding: 8, background: T.bg, borderRadius: 8, borderLeft: '3px solid #8B5CF6' }}>
+                                            <div style={{ fontWeight: 700, color: T.muted, marginBottom: 2 }}>Candidate Strategy:</div>
+                                            <div style={{ color: T.text, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{techDiscussion.answers?.mainAnswer}</div>
+                                          </div>
+                                          {techDiscussion.scenario?.followUps?.map((q: string, idx: number) => (
+                                            <div key={idx} style={{ padding: 8, background: T.bg, borderRadius: 8, borderLeft: '3px solid #3B82F6' }}>
+                                              <div style={{ fontWeight: 700, color: T.muted, marginBottom: 2 }}>Follow-Up {idx+1}: {q}</div>
+                                              <div style={{ color: T.text, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{techDiscussion.answers?.followUpAnswers?.[idx]}</div>
+                                            </div>
+                                          ))}
+                                        </div>
+
+                                        <div style={{ padding: 10, background: T.bg, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11 }}>
+                                          <div style={{ fontWeight: 700, color: T.sub, marginBottom: 4 }}>AI Critique & Gaps:</div>
+                                          <div style={{ color: T.text, lineHeight: 1.4, marginBottom: 6 }}>{techDiscussion.evaluation?.feedback}</div>
+                                          {techDiscussion.evaluation?.strengths?.length > 0 && (
+                                            <div style={{ color: '#10B981', marginBottom: 2 }}><strong>Strengths:</strong> {techDiscussion.evaluation.strengths.join(', ')}</div>
+                                          )}
+                                          {techDiscussion.evaluation?.gaps?.length > 0 && (
+                                            <div style={{ color: '#EF4444' }}><strong>Gaps:</strong> {techDiscussion.evaluation.gaps.join(', ')}</div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Leadership Discussion Transcript & Evaluation */}
+                                    {leadDiscussion && (
+                                      <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Leadership Discussion Audit</h4>
+                                          <span style={{ fontSize: 14, fontWeight: 900, color: '#8B5CF6' }}>Score: {leadDiscussion.evaluation?.leadershipScore}%</span>
+                                        </div>
+
+                                        <div style={{ background: T.bg, padding: 10, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11, marginBottom: 12 }}>
+                                          <div style={{ color: T.muted, fontWeight: 700, marginBottom: 4 }}>SCENARIO:</div>
+                                          <div style={{ color: T.text, lineHeight: 1.4, marginBottom: 6 }}>{leadDiscussion.scenario?.scenario || leadDiscussion.scenario || 'Deadline reduced from 12 weeks to 6 weeks. Team size: 2 Seniors, 5 Mids, 4 Juniors. How to handle?'}</div>
+                                          {leadDiscussion.scenario?.question && (
+                                            <>
+                                              <div style={{ color: T.muted, fontWeight: 700, marginBottom: 2 }}>QUESTION:</div>
+                                              <div style={{ color: T.text, fontWeight: 600 }}>{leadDiscussion.scenario.question}</div>
+                                            </>
+                                          )}
+                                        </div>
+
+                                        <div style={{ padding: 8, background: T.bg, borderRadius: 8, borderLeft: '3px solid #8B5CF6', fontSize: 11, marginBottom: 12 }}>
+                                          <div style={{ fontWeight: 700, color: T.muted, marginBottom: 2 }}>Candidate Strategy:</div>
+                                          <div style={{ color: T.text, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{leadDiscussion.answer}</div>
+                                        </div>
+
+                                        <div style={{ padding: 10, background: T.bg, borderRadius: 8, border: `1px solid ${T.bdr}`, fontSize: 11 }}>
+                                          <div style={{ fontWeight: 700, color: T.sub, marginBottom: 4 }}>AI Critique & Dimension Ratings:</div>
+                                          <div style={{ color: T.text, lineHeight: 1.4, marginBottom: 6 }}>{leadDiscussion.evaluation?.feedback}</div>
+                                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, textAlign: 'center', marginTop: 6 }}>
+                                            {Object.entries(leadDiscussion.evaluation?.dimensions || {}).map(([dim, d]: [string, any]) => (
+                                              <div key={dim} style={{ background: T.card, padding: 4, borderRadius: 4, border: `1px solid ${T.bdr}` }}>
+                                                <div style={{ color: T.muted, fontSize: 8, textTransform: 'uppercase' }}>{dim.slice(0, 5)}</div>
+                                                <strong>{d.score}/20</strong>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+
+                                {/* Consistency Analysis */}
+                                {consistencyAnalysis && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                      <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Consistency Check</h4>
+                                      <span style={{ fontSize: 14, fontWeight: 900, color: '#8B5CF6' }}>Score: {consistencyAnalysis.consistencyScore}%</span>
+                                    </div>
+                                    <p style={{ margin: '0 0 8px', fontSize: 12, color: T.text, lineHeight: 1.4 }}>{consistencyAnalysis.explanation}</p>
+                                    {consistencyAnalysis.flaggedInconsistencies?.length > 0 ? (
+                                      <div style={{ border: '1px solid rgba(239,68,68,0.2)', padding: 10, background: 'rgba(239,68,68,0.04)', borderRadius: 8 }}>
+                                        <div style={{ fontSize: 11, fontStyle: 'italic', color: '#EF4444', marginBottom: 4 }}>Flagged Discrepancies:</div>
+                                        <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: '#EF4444' }}>
+                                          {consistencyAnalysis.flaggedInconsistencies.map((inc: string, i: number) => (
+                                            <li key={i}>{inc}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ) : (
+                                      <div style={{ color: '#10B981', fontSize: 11, fontWeight: 600 }}>âœ“ Zero discrepancies between resume claims and assessment reasoning.</div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Authenticity Analysis Card */}
+                                {authenticityAnalysis && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                      <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Authenticity Analysis</h4>
+                                      <span style={{ fontSize: 14, fontWeight: 900, color: authenticityAnalysis.riskLevel === 'High' ? '#EF4444' : authenticityAnalysis.riskLevel === 'Medium' ? '#F59E0B' : '#10B981' }}>
+                                        Risk: {authenticityAnalysis.riskLevel} (Score: {authenticityAnalysis.authenticityScore}%)
+                                      </span>
+                                    </div>
+                                    
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: 10, background: T.bg, borderRadius: 10, border: `1px solid ${T.bdr}`, textAlign: 'center', marginBottom: 12, fontSize: 11 }}>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Human Written %</div>
+                                        <strong style={{ color: '#10B981' }}>{authenticityAnalysis.humanWrittenPct}%</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>AI Assisted %</div>
+                                        <strong style={{ color: authenticityAnalysis.aiAssistedPct > 50 ? '#EF4444' : '#F59E0B' }}>{authenticityAnalysis.aiAssistedPct}%</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Copy/Paste/Large</div>
+                                        <strong>{authenticityAnalysis.copyCount || 0} / {authenticityAnalysis.pasteCount || 0} / {authenticityAnalysis.largePasteEvents || 0}</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Duplicate Risk</div>
+                                        <strong style={{ color: authenticityAnalysis.duplicateContentRisk > 40 ? '#EF4444' : T.text }}>{authenticityAnalysis.duplicateContentRisk}%</strong>
+                                      </div>
+                                    </div>
+                                    <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.4 }}>
+                                      <strong>Authenticity Evaluation:</strong> {authenticityAnalysis.reason}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Proctoring & Risk Analysis */}
+                                {riskAnalysis && (
+                                  <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                      <h4 style={{ margin: 0, fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.sub }}>Risk & Proctoring Assessment</h4>
+                                      <span style={{ fontSize: 14, fontWeight: 900, color: riskAnalysis.riskLevel === 'High' ? '#EF4444' : riskAnalysis.riskLevel === 'Medium' ? '#F59E0B' : '#10B981' }}>
+                                        Risk Level: {riskAnalysis.riskLevel} (Confidence: {riskAnalysis.confidenceScore}%)
+                                      </span>
+                                    </div>
+                                    
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: 10, background: T.bg, borderRadius: 10, border: `1px solid ${T.bdr}`, textAlign: 'center', marginBottom: 12, fontSize: 11 }}>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Tab Switches</div>
+                                        <strong>{selectedReview.tab_switch_count ?? 0}</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Browser Blurs</div>
+                                        <strong>{selectedReview.browser_blur_count ?? 0}</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Fullscreen Exits</div>
+                                        <strong>{selectedReview.fullscreen_exit_count ?? 0}</strong>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>DevTools Opened</div>
+                                        <strong>{selectedReview.devtools_detected ? 'Yes' : 'No'}</strong>
+                                      </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>Evidence Risk:</span>
+                                        <strong style={{ color: riskAnalysis.evidenceRisk?.level === 'High' ? '#EF4444' : '#10B981' }}>{riskAnalysis.evidenceRisk?.level}</strong>
+                                      </div>
+                                      <div style={{ color: T.muted, fontSize: 10, paddingLeft: 8, marginBottom: 4 }}>{riskAnalysis.evidenceRisk?.feedback}</div>
+                                      
+                                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>Consistency Risk:</span>
+                                        <strong style={{ color: riskAnalysis.consistencyRisk?.level === 'High' ? '#EF4444' : '#10B981' }}>{riskAnalysis.consistencyRisk?.level}</strong>
+                                      </div>
+                                      <div style={{ color: T.muted, fontSize: 10, paddingLeft: 8, marginBottom: 4 }}>{riskAnalysis.consistencyRisk?.feedback}</div>
+
+                                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>Validation Risk:</span>
+                                        <strong style={{ color: riskAnalysis.validationRisk?.level === 'High' ? '#EF4444' : '#10B981' }}>{riskAnalysis.validationRisk?.level}</strong>
+                                      </div>
+                                      <div style={{ color: T.muted, fontSize: 10, paddingLeft: 8 }}>{riskAnalysis.validationRisk?.feedback}</div>
+                                    </div>
+                                  </div>
+                                )}
+
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <>
+                              <div>
+                                <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: T.sub, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <Info size={14} /> Explain My Score Breakdown
+                                </h4>
+                                <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, overflow: 'hidden' }}>
+                                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left' }}>
+                                    <thead>
+                                      <tr style={{ background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderBottom: `1px solid ${T.bdr}`, color: T.sub }}>
+                                        <th style={{ padding: '8px 12px', textAlign: 'left' }}>Component</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'center' }}>Raw Score</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'center' }}>Weight</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'center' }}>Weighted Score</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      <tr style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                        <td style={{ padding: '8px 12px', color: T.text, fontWeight: 600 }}>Assessment (MCQ)</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.text }}>{sb.assessmentScore ?? selectedReview.score ?? 0}%</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.sub }}>{sb.assessmentWeight ?? 100}%</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.text, fontWeight: 600 }}>{sb.assessmentWeightedScore ?? selectedReview.score ?? 0}</td>
+                                      </tr>
+                                      <tr style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                        <td style={{ padding: '8px 12px', color: T.text, fontWeight: 600 }}>Contribution Score</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.text }}>{sb.contributionScore ?? 0}%</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.sub }}>{sb.contributionWeight ?? 0}%</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'center', color: T.text, fontWeight: 600 }}>{sb.contributionWeightedScore ?? 0}</td>
+                                      </tr>
+                                      <tr style={{ background: dark ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)' }}>
+                                        <td style={{ padding: '10px 12px', color: T.text, fontWeight: 800 }}>Final Score / Threshold</td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center', color: T.text, fontWeight: 800 }}>{sb.finalScore ?? selectedReview.score ?? 0}%</td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center', color: T.sub }}>Threshold: {sb.passThreshold ?? 60}%</td>
+                                        <td style={{ padding: '10px 12px', textAlign: 'center', color: (sb.gapRemaining ?? 0) > 0 ? '#EF4444' : '#10B981', fontWeight: 800 }}>
+                                          {(sb.gapRemaining ?? 0) > 0 ? `Gap: -${sb.gapRemaining}%` : 'Passed âœ“'}
+                                        </td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+
+                              {/* 2. Contribution Breakdown */}
+                              {cb && Object.keys(cb).length > 0 && (
+                                <div>
+                                  <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: T.sub, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <Sparkles size={14} /> Contribution Score Breakdown ({cb.total ?? 0}/100)
+                                  </h4>
+                                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                    {[
+                                      { label: 'GitHub Score', score: cb.githubScore, max: cb.githubMax || 20, reason: cb.githubDeductionReason },
+                                      { label: 'Project Score', score: cb.projectScore, max: cb.projectMax || 20, reason: cb.projectDeductionReason },
+                                      { label: 'Documentation Score', score: cb.documentationScore, max: cb.documentationMax || 20, reason: cb.documentationDeductionReason },
+                                      { label: 'Certification Score', score: cb.certificationScore, max: cb.certificationMax || 20, reason: cb.certificationDeductionReason },
+                                      { label: 'Evidence Score', score: cb.evidenceScore, max: cb.evidenceMax || 20, reason: cb.evidenceDeductionReason }
+                                    ].map((c, i) => (
+                                      <div key={i} style={{ background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)', border: `1px solid ${T.bdr}`, borderRadius: 10, padding: '10px 12px', fontSize: 11 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, marginBottom: 4, color: T.text }}>
+                                          <span>{c.label}</span>
+                                          <span style={{ color: c.score === c.max ? '#10B981' : '#F59E0B' }}>{c.score ?? 0}/{c.max}</span>
+                                        </div>
+                                        {c.reason ? (
+                                          <div style={{ color: '#EF4444', fontStyle: 'italic', fontSize: 10, marginTop: 2 }}>{c.reason}</div>
+                                        ) : (
+                                          <div style={{ color: '#10B981', fontSize: 10, marginTop: 2 }}>âœ“ Max points awarded</div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* 3. Session Integrity */}
+                              <div>
+                                <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: T.sub, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <AlertTriangle size={14} /> Session Integrity Details ({selectedReview.integrity_score ?? 100}%)
+                                </h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, padding: 12, border: `1px solid ${T.bdr}`, borderRadius: 12, background: 'rgba(239,68,68,0.02)' }}>
+                                  <div style={{ textAlign: 'center' }}>
+                                    <div style={{ color: T.sub, fontSize: 9 }}>Tab Switch</div>
+                                    <div style={{ fontWeight: 800, color: (selectedReview.tab_switch_count || 0) > 0 ? '#F59E0B' : T.text, fontSize: 13 }}>{selectedReview.tab_switch_count ?? 0}</div>
+                                  </div>
+                                  <div style={{ textAlign: 'center' }}>
+                                    <div style={{ color: T.sub, fontSize: 9 }}>Fullscreen Exit</div>
+                                    <div style={{ fontWeight: 800, color: (selectedReview.fullscreen_exit_count || 0) > 0 ? '#F59E0B' : T.text, fontSize: 13 }}>{selectedReview.fullscreen_exit_count ?? 0}</div>
+                                  </div>
+                                  <div style={{ textAlign: 'center' }}>
+                                    <div style={{ color: T.sub, fontSize: 9 }}>Browser Blur</div>
+                                    <div style={{ fontWeight: 800, color: (selectedReview.browser_blur_count || 0) > 0 ? '#F59E0B' : T.text, fontSize: 13 }}>{selectedReview.browser_blur_count ?? 0}</div>
+                                  </div>
+                                  <div style={{ textAlign: 'center' }}>
+                                    <div style={{ color: T.sub, fontSize: 9 }}>DevTools Opened</div>
+                                    <div style={{ fontWeight: 800, color: selectedReview.devtools_detected ? '#EF4444' : T.text, fontSize: 13 }}>{selectedReview.devtools_detected ? 'Yes' : 'No'}</div>
+                                  </div>
+                                  <div style={{ textAlign: 'center' }}>
+                                    <div style={{ color: T.sub, fontSize: 9 }}>Copy Attempts</div>
+                                    <div style={{ fontWeight: 800, color: (selectedReview.copy_paste_count || 0) > 0 ? '#EF4444' : T.text, fontSize: 13 }}>{selectedReview.copy_paste_count ?? 0}</div>
+                                  </div>
+                                </div>
+                                {selectedReview.integrity_flags && Array.isArray(selectedReview.integrity_flags) && selectedReview.integrity_flags.length > 0 ? (
+                                  <div style={{ marginTop: 8, padding: 8, border: `1px solid rgba(239,68,68,0.2)`, borderRadius: 8, background: 'rgba(239,68,68,0.05)', fontSize: 11 }}>
+                                    <div style={{ fontWeight: 700, color: '#EF4444', marginBottom: 4 }}>System Proctor Flags:</div>
+                                    <ul style={{ margin: 0, paddingLeft: 16, color: '#EF4444' }}>
+                                      {selectedReview.integrity_flags.map((flag: string, idx: number) => (
+                                        <li key={idx}>{flag}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : (
+                                  <div style={{ color: '#10B981', fontSize: 11, fontWeight: 600, marginTop: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    âœ“ No proctor violations flagged.
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* 4. GitHub Validation Evidence */}
+                              {gitMeta && Object.keys(gitMeta).length > 0 && gitMeta.repository && (
+                                <div>
+                                  <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 1, color: T.sub, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <Briefcase size={14} /> GitHub Repository Ownership Evidence
+                                  </h4>
+                                  <div style={{ padding: 12, border: `1px solid ${T.bdr}`, borderRadius: 12, background: dark ? 'rgba(0,0,0,0.1)' : 'rgba(0,0,0,0.01)', fontSize: 11, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                      <span style={{ color: T.sub }}>Repository:</span>
+                                      <a href={`https://github.com/${gitMeta.repository}`} target="_blank" rel="noopener noreferrer" style={{ color: '#3B82F6', fontWeight: 600, textDecoration: 'underline' }}>{gitMeta.repository}</a>
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                      <span style={{ color: T.sub }}>Verified Owner:</span>
+                                      <span style={{ color: T.text, fontWeight: 600 }}>{gitMeta.owner}</span>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, borderTop: `1px solid ${T.bdr}`, paddingTop: 8, marginTop: 4, textAlign: 'center' }}>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Commits</div>
+                                        <div style={{ fontWeight: 800, color: T.text }}>{gitMeta.commits ?? 0}</div>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>PRs</div>
+                                        <div style={{ fontWeight: 800, color: T.text }}>{gitMeta.pulls ?? 0}</div>
+                                      </div>
+                                      <div>
+                                        <div style={{ color: T.sub, fontSize: 9 }}>Issues</div>
+                                        <div style={{ fontWeight: 800, color: T.text }}>{gitMeta.issues ?? 0}</div>
+                                      </div>
+                                    </div>
+                                    {gitMeta.lastActivity && (
+                                      <div style={{ borderTop: `1px solid ${T.bdr}`, paddingTop: 8, display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.sub }}>
+                                        <span>Last Activity:</span>
+                                        <span>{new Date(gitMeta.lastActivity).toLocaleString()}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* â”€â”€ WORKFORCE INTELLIGENCE TAB â”€â”€ */}
+          {activeTab === 'Workforce Intelligence' && (
+            <div style={{ animation: 'fadeIn 0.4s ease', display: 'flex', flexDirection: 'column', gap: 24 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Brain size={20} color="#EC4899" /> Workforce Capability & Intelligence
+                </h3>
+                <button onClick={fetchWfIntel} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <RefreshCw size={13} className={isLoadingWfIntel ? 'animate-spin' : ''} /> Refresh Intelligence
+                </button>
+              </div>
+
+              {isLoadingWfIntel || !wfIntel ? (
+                <p style={{ color: T.sub, fontSize: 13 }}>Loading workforce intelligence data...</p>
+              ) : (
+                <>
+                  {/* 1. Readiness Capability Distribution */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text }}>Readiness Capability Distribution</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16 }}>
+                      <div style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, fontWeight: 800, color: '#EC4899' }}>{wfIntel.readiness.averageReadiness}%</div>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>Avg Workforce Readiness</div>
+                      </div>
+                      <div style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, fontWeight: 800, color: '#10B981' }}>{wfIntel.readiness.capabilityLevels.expert}</div>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>Expert Tier (&gt;=80%)</div>
+                      </div>
+                      <div style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, fontWeight: 800, color: '#3B82F6' }}>{wfIntel.readiness.capabilityLevels.advanced}</div>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>Advanced Tier (60-79%)</div>
+                      </div>
+                      <div style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, fontWeight: 800, color: '#F59E0B' }}>{wfIntel.readiness.capabilityLevels.intermediate}</div>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>Intermediate Tier (30-59%)</div>
+                      </div>
+                      <div style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, fontWeight: 800, color: '#EF4444' }}>{wfIntel.readiness.capabilityLevels.beginner}</div>
+                        <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>Beginner Tier (&lt;30%)</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2. Hidden Skills Discovery */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>Discovered Hidden Skills</span>
+                      <span style={{ background: 'rgba(236,72,153,0.1)', color: '#EC4899', fontSize: 11, padding: '2px 8px', borderRadius: 12 }}>
+                        {wfIntel.hiddenSkills.length} Pending Approval
+                      </span>
+                    </h4>
+                    {wfIntel.hiddenSkills.length === 0 ? (
+                      <p style={{ color: T.sub, fontSize: 13, margin: 0 }}>No new hidden skills discovered from projects or certifications.</p>
+                    ) : (
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, textAlign: 'left' }}>
+                          <thead>
+                            <tr style={{ color: T.sub, borderBottom: `1px solid ${T.bdr}` }}>
+                              <th style={{ padding: '8px 12px' }}>Employee</th>
+                              <th style={{ padding: '8px 12px' }}>Skill Name</th>
+                              <th style={{ padding: '8px 12px' }}>Discovery Source</th>
+                              <th style={{ padding: '8px 12px' }}>Discovered On</th>
+                              <th style={{ padding: '8px 12px', textAlign: 'right' }}>Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {wfIntel.hiddenSkills.map((sk: any) => (
+                              <tr key={sk.id} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                <td style={{ padding: '12px 12px' }}>
+                                  <div style={{ fontWeight: 700 }}>{sk.employee_name}</div>
+                                  <div style={{ fontSize: 11, color: T.sub }}>{sk.zensar_id}</div>
+                                </td>
+                                <td style={{ padding: '12px 12px', fontWeight: 600 }}>{sk.skill_name}</td>
+                                <td style={{ padding: '12px 12px' }}>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                    background: sk.discovery_source === 'project' ? 'rgba(249,115,22,0.1)' : 'rgba(16,185,129,0.1)',
+                                    color: sk.discovery_source === 'project' ? '#F97316' : '#10B981'
+                                  }}>
+                                    {sk.discovery_source}
+                                  </span>
+                                </td>
+                                <td style={{ padding: '12px 12px', color: T.sub }}>
+                                  {new Date(sk.created_at).toLocaleDateString()}
+                                </td>
+                                <td style={{ padding: '12px 12px', textAlign: 'right' }}>
+                                  <button
+                                    onClick={() => handleApproveHiddenSkill(sk.employee_id, sk.skill_name)}
+                                    disabled={approvingSkill === `${sk.employee_id}-${sk.skill_name}`}
+                                    style={{
+                                      padding: '6px 12px', borderRadius: 8, background: '#EC4899', border: 'none',
+                                      color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer', transition: '0.2s'
+                                    }}
+                                  >
+                                    {approvingSkill === `${sk.employee_id}-${sk.skill_name}` ? 'Approving...' : 'Approve & Add'}
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 2.5. Top Talent Leaderboard */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>Top Talent Leaderboard</span>
+                      <span style={{ background: 'rgba(59,130,246,0.1)', color: '#3B82F6', fontSize: 11, padding: '2px 8px', borderRadius: 12 }}>
+                        Ranked by Capability & Assessment
+                      </span>
+                    </h4>
+                    {!wfIntel.topTalentLeaderboard || wfIntel.topTalentLeaderboard.length === 0 ? (
+                      <p style={{ color: T.sub, fontSize: 13, margin: 0 }}>No validated skill metrics to display on the leaderboard yet.</p>
+                    ) : (
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, textAlign: 'left' }}>
+                          <thead>
+                            <tr style={{ color: T.sub, borderBottom: `1px solid ${T.bdr}` }}>
+                              <th style={{ padding: '8px 12px' }}>Skill Name</th>
+                              <th style={{ padding: '8px 12px' }}>Validated Count</th>
+                              <th style={{ padding: '8px 12px' }}>Average Capability Score</th>
+                              <th style={{ padding: '8px 12px' }}>Rank #1 Talent</th>
+                              <th style={{ padding: '8px 12px', textAlign: 'right' }}>Top Capability Score</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {wfIntel.topTalentLeaderboard.map((item: any, idx: number) => (
+                              <tr key={idx} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                <td style={{ padding: '12px 12px', fontWeight: 700, color: T.text }}>{item.skillName}</td>
+                                <td style={{ padding: '12px 12px' }}>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 700,
+                                    background: 'rgba(16,185,129,0.1)', color: '#10B981'
+                                  }}>
+                                    {item.validatedCount} Validated
+                                  </span>
+                                </td>
+                                <td style={{ padding: '12px 12px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <strong style={{ minWidth: 32 }}>{item.averageCapability}%</strong>
+                                    <div style={{ background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', width: 80, height: 4, borderRadius: 2, overflow: 'hidden' }}>
+                                      <div style={{ background: 'linear-gradient(90deg,#10B981,#3B82F6)', height: '100%', width: `${item.averageCapability}%` }} />
+                                    </div>
+                                  </div>
+                                </td>
+                                <td style={{ padding: '12px 12px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ fontSize: 16 }}>🥇</span>
+                                    <span style={{ fontWeight: 700, color: T.text }}>{item.topEmployeeName}</span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: '12px 12px', textAlign: 'right', fontWeight: 900, color: '#ec4899', fontSize: 14 }}>
+                                  {item.topCapabilityScore}%
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 3. Emerging Skills & Skill Clusters */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: 24 }}>
+                    <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                      <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text }}>Emerging Skills Demand (Current Profiles)</h4>
+                      <div style={{ display: 'grid', gap: 12 }}>
+                        {wfIntel.emergingSkills.map((sk: any) => (
+                          <div key={sk.skill_name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: T.card, padding: '12px 16px', borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                            <span style={{ fontWeight: 600 }}>{sk.skill_name}</span>
+                            <span style={{ background: 'rgba(59,130,246,0.1)', color: '#3B82F6', fontSize: 12, padding: '2px 8px', borderRadius: 12, fontWeight: 700 }}>
+                              {sk.count} Employees
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                      <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text }}>Custom Skill Clusters</h4>
+                      <div style={{ display: 'grid', gap: 16 }}>
+                        {wfIntel.skillClustering.map((c: any) => (
+                          <div key={c.name} style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}` }}>
+                            <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{c.name}</div>
+                            <div style={{ fontSize: 12, color: T.sub, margin: '4px 0 12px' }}>{c.description}</div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                              {c.skills.map((sk: string) => (
+                                <span key={sk} style={{ fontSize: 11, background: T.bg, border: `1px solid ${T.bdr}`, padding: '2px 8px', borderRadius: 6, color: T.text }}>
+                                  {sk}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 4. Reskilling Recommendations */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700, color: T.text }}>Reskilling & Upskilling Paths</h4>
+                    {wfIntel.reskillingRecommendations.length === 0 ? (
+                      <p style={{ color: T.sub, fontSize: 13, margin: 0 }}>No automated learning path suggestions found based on open role demand.</p>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+                        {wfIntel.reskillingRecommendations.map((rec: any, idx: number) => (
+                          <div key={idx} style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                              <div>
+                                <div style={{ fontWeight: 700 }}>{rec.employeeName}</div>
+                                <div style={{ fontSize: 11, color: T.sub }}>{rec.zensarId}</div>
+                              </div>
+                              <span style={{ fontSize: 11, background: 'rgba(139,92,246,0.1)', color: '#8B5CF6', padding: '2px 8px', borderRadius: 12, fontWeight: 700 }}>
+                                {rec.targetRole}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: T.bg, padding: 8, borderRadius: 8, fontSize: 12 }}>
+                              <span style={{ fontWeight: 600, color: '#10B981' }}>{rec.currentSkill}</span>
+                              <span style={{ color: T.sub }}>âž¡ï¸</span>
+                              <span style={{ fontWeight: 600, color: '#EC4899' }}>{rec.recommendedSkill}</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: T.sub, fontStyle: 'italic' }}>
+                              "{rec.reason}"
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -1707,7 +3243,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
              </div>
 
-             {/* ── Inline Delete Confirmation ── */}
+             {/* â”€â”€ Inline Delete Confirmation â”€â”€ */}
              {deleteConfirming && (
                <div style={{ 
                  margin: '0 40px 24px', padding: '16px 24px', 
@@ -1780,7 +3316,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   <div style={{ animation: 'fadeIn 0.4s' }}>
                     {popupActiveTab === 'ZenRadar' && (
                       <div>
-                        {/* ── Full Profile Summary Card ── */}
+                        {/* â”€â”€ Full Profile Summary Card â”€â”€ */}
                         <div style={{ padding: '20px 4vw 0' }}>
                           <div style={{ background: T.card, borderRadius: 20, border: `1px solid ${T.bdr}`, padding: 'min(24px, 5vw)', marginBottom: 24 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 20 }}>
@@ -1790,9 +3326,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                   {(previewUser.name || '?')[0].toUpperCase()}
                                 </div>
                                 <div>
-                                  <div style={{ fontSize: 22, fontWeight: 900, color: T.text }}>{previewUser.name || '—'}</div>
-                                  <div style={{ fontSize: 13, color: '#3B82F6', fontWeight: 700, marginTop: 2 }}>{previewUser.designation || previewUser.Designation || '—'}</div>
-                                  <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>ID: <b style={{color:T.text}}>{previewUser.zensar_id || previewUser.id}</b> &nbsp;|&nbsp; {previewUser.department || '—'}</div>
+                                  <div style={{ fontSize: 22, fontWeight: 900, color: T.text }}>{previewUser.name || 'â€”'}</div>
+                                  <div style={{ fontSize: 13, color: '#3B82F6', fontWeight: 700, marginTop: 2 }}>{previewUser.designation || previewUser.Designation || 'â€”'}</div>
+                                  <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>ID: <b style={{color:T.text}}>{previewUser.zensar_id || previewUser.id}</b> &nbsp;|&nbsp; {previewUser.department || 'â€”'}</div>
                                 </div>
                               </div>
                               {/* Right: Stats */}
@@ -1814,21 +3350,21 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Details Grid */}
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 14, marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.bdr}` }}>
                               {[
-                                { label: '📧 Email',         value: previewUser.email },
-                                { label: '📱 Phone',         value: previewUser.phone },
-                                { label: '📍 Location',      value: previewUser.location },
-                                { label: '🏢 Department',    value: previewUser.department },
-                                { label: '💼 Years in IT',   value: previewUser.years_it ? `${previewUser.years_it} yrs` : '—' },
-                                { label: '🏷️ Years@Zensar',  value: previewUser.years_zensar ? `${previewUser.years_zensar} yrs` : '—' },
-                                { label: '⭐ Primary Skill', value: previewUser.primary_skill || previewData?.user?.primarySkill || '—' },
-                                { label: '🎯 Domain',        value: previewUser.primary_domain || previewData?.user?.primaryDomain || '—' },
-                                { label: '📚 Education',     value: `${previewData?.education?.length ?? 0} record(s)` },
-                                { label: '✅ Validated',     value: previewUser.submitted ? 'Yes' : 'No' },
-                                { label: '🗓️ Joined',        value: previewUser.created_at ? new Date(previewUser.created_at).toLocaleDateString('en-IN') : '—' },
+                                { label: 'ðŸ“§ Email',         value: previewUser.email },
+                                { label: 'ðŸ“± Phone',         value: previewUser.phone },
+                                { label: 'ðŸ“ Location',      value: previewUser.location },
+                                { label: 'ðŸ¢ Department',    value: previewUser.department },
+                                { label: 'ðŸ’¼ Years in IT',   value: previewUser.years_it ? `${previewUser.years_it} yrs` : 'â€”' },
+                                { label: 'ðŸ·ï¸ Years@Zensar',  value: previewUser.years_zensar ? `${previewUser.years_zensar} yrs` : 'â€”' },
+                                { label: 'â­ Primary Skill', value: previewUser.primary_skill || previewData?.user?.primarySkill || 'â€”' },
+                                { label: 'ðŸŽ¯ Domain',        value: previewUser.primary_domain || previewData?.user?.primaryDomain || 'â€”' },
+                                { label: 'ðŸ“š Education',     value: `${previewData?.education?.length ?? 0} record(s)` },
+                                { label: 'âœ… Validated',     value: previewUser.submitted ? 'Yes' : 'No' },
+                                { label: 'ðŸ—“ï¸ Joined',        value: previewUser.created_at ? new Date(previewUser.created_at).toLocaleDateString('en-IN') : 'â€”' },
                               ].map(({ label, value }) => (
                                 <div key={label} style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderRadius: 10, padding: '10px 14px' }}>
                                   <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
-                                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginTop: 4, wordBreak: 'break-all' }}>{value || '—'}</div>
+                                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginTop: 4, wordBreak: 'break-all' }}>{value || 'â€”'}</div>
                                 </div>
                               ))}
                             </div>
@@ -1836,12 +3372,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Education records if any */}
                             {previewData?.education && previewData.education.length > 0 && (
                               <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🎓 Education</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸŽ“ Education</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                                   {previewData.education.map((ed: any, i: number) => (
                                     <div key={i} style={{ background: dark ? 'rgba(59,130,246,0.08)' : '#eff6ff', borderRadius: 10, padding: '8px 14px', fontSize: 12 }}>
-                                      <div style={{ fontWeight: 800, color: T.text }}>{ed.degree || ed.Degree || ed.course || '—'}</div>
-                                      <div style={{ color: T.sub, marginTop: 2 }}>{ed.institution || ed.college || ed.College || '—'} {ed.year || ed.Year ? `· ${ed.year || ed.Year}` : ''}</div>
+                                      <div style={{ fontWeight: 800, color: T.text }}>{ed.degree || ed.Degree || ed.course || 'â€”'}</div>
+                                      <div style={{ color: T.sub, marginTop: 2 }}>{ed.institution || ed.college || ed.College || 'â€”'} {ed.year || ed.Year ? `Â· ${ed.year || ed.Year}` : ''}</div>
                                     </div>
                                   ))}
                                 </div>
@@ -1851,11 +3387,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Certifications preview */}
                             {previewUser.certifications?.length > 0 && (
                               <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🏅 Certifications ({previewUser.certifications.length})</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸ… Certifications ({previewUser.certifications.length})</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                   {previewUser.certifications.slice(0, 6).map((c: any, i: number) => (
                                     <span key={i} style={{ background: dark ? 'rgba(139,92,246,0.12)' : '#f5f3ff', color: '#8B5CF6', borderRadius: 8, padding: '4px 12px', fontSize: 11, fontWeight: 700 }}>
-                                      {c.CertName || c.cert_name || c.name || '—'}
+                                      {c.CertName || c.cert_name || c.name || 'â€”'}
                                     </span>
                                   ))}
                                   {previewUser.certifications.length > 6 && <span style={{ fontSize: 11, color: T.sub, padding: '4px 8px' }}>+{previewUser.certifications.length - 6} more</span>}
@@ -1866,11 +3402,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Projects preview */}
                             {previewUser.projects?.length > 0 && (
                               <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🚀 Projects ({previewUser.projects.length})</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸš€ Projects ({previewUser.projects.length})</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                   {previewUser.projects.slice(0, 5).map((p: any, i: number) => (
                                     <span key={i} style={{ background: dark ? 'rgba(245,158,11,0.1)' : '#fffbeb', color: '#F59E0B', borderRadius: 8, padding: '4px 12px', fontSize: 11, fontWeight: 700 }}>
-                                      {p.ProjectName || p.project_name || p.name || '—'}
+                                      {p.ProjectName || p.project_name || p.name || 'â€”'}
                                     </span>
                                   ))}
                                   {previewUser.projects.length > 5 && <span style={{ fontSize: 11, color: T.sub, padding: '4px 8px' }}>+{previewUser.projects.length - 5} more</span>}
@@ -2020,6 +3556,51 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       )}
 
       {/* Add New Employee Modal */}
+      {/* Bulk delete confirmation modal */}
+      {showBulkDeleteModal && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: dark ? 'rgba(15,15,26,0.9)' : 'rgba(245,245,245,0.9)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 2100, padding: 20
+        }}>
+          <div style={{
+            background: dark ? '#1a1b2e' : '#ffffff', borderRadius: 24, width: '100%', maxWidth: 480,
+            border: `1px solid ${T.bdr}`, boxShadow: '0 32px 80px rgba(0,0,0,0.4)',
+            maxHeight: '90vh', overflowY: 'auto', padding: 28
+          }}>
+            <h2 style={{ margin: '0 0 8px', fontSize: 20, fontWeight: 800, color: T.text }}>Delete Employees</h2>
+            <p style={{ margin: '0 0 16px', fontSize: 14, color: T.sub }}>
+              You are about to delete {selectedIds.size} employee{selectedIds.size > 1 ? 's' : ''}:
+            </p>
+            <div style={{ maxHeight: 220, overflowY: 'auto', background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 12, marginBottom: 16 }}>
+              {employees.filter((e: any) => selectedIds.has(String(e.id))).map((e: any) => (
+                <div key={e.id} style={{ fontSize: 13, color: T.text, padding: '4px 0' }}>
+                  • {e.name} <span style={{ color: T.muted }}>({e.zensar_id || e.id})</span>
+                </div>
+              ))}
+            </div>
+            <p style={{ margin: '0 0 20px', fontSize: 13, color: '#EF4444', fontWeight: 600 }}>This action cannot be undone.</p>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowBulkDeleteModal(false)}
+                disabled={bulkDeleting}
+                style={{ padding: '10px 20px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, fontWeight: 700, cursor: bulkDeleting ? 'not-allowed' : 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkDelete}
+                disabled={bulkDeleting}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 20px', borderRadius: 10, background: '#EF4444', border: 'none', color: '#fff', fontSize: 13, fontWeight: 700, cursor: bulkDeleting ? 'not-allowed' : 'pointer', opacity: bulkDeleting ? 0.7 : 1 }}
+              >
+                <Trash2 size={14} /> {bulkDeleting ? 'Deleting...' : `Delete ${selectedIds.size} Employee${selectedIds.size > 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAddEmployeeModal && (
         <div style={{
           position: 'fixed', inset: 0,
@@ -2050,7 +3631,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
             <div style={{ padding: '24px 28px 28px' }}>
 
-              {/* ── RESUME UPLOAD SCANNER ── */}
+              {/* â”€â”€ RESUME UPLOAD SCANNER â”€â”€ */}
               <div
                 onClick={() => !resumeScanLoading && resumeFileRef.current?.click()}
                 onDragOver={e => e.preventDefault()}
@@ -2089,7 +3670,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                     <CheckCircle2 size={28} style={{ color: '#10B981' }} />
                     <div style={{ fontSize: 13, fontWeight: 700, color: '#10B981' }}>Resume Scanned Successfully!</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Form auto-filled ↓ — review & complete missing fields</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Form auto-filled â†“ â€” review & complete missing fields</div>
                     <button onClick={e => { e.stopPropagation(); resumeFileRef.current?.click(); }} style={{ fontSize: 11, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', marginTop: 2 }}>Upload different resume</button>
                   </div>
                 ) : (
@@ -2098,10 +3679,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       <FileUp size={24} style={{ color: '#3B82F6' }} />
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 800, color: '#3B82F6' }}>Upload Resume to Auto-Fill</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Drag & drop or click — PDF, DOC, TXT supported</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Drag & drop or click â€” PDF, DOC, TXT supported</div>
                     <div style={{ fontSize: 10, color: T.sub, background: dark ? 'rgba(59,130,246,0.08)' : '#dbeafe', padding: '3px 10px', borderRadius: 99, marginTop: 2 }}>
                       <Sparkles size={10} style={{ display: 'inline', marginRight: 4 }} />
-                      AI extracts: Name · Phone · Email · Designation · Location · Experience
+                      AI extracts: Name Â· Phone Â· Email Â· Designation Â· Location Â· Experience
                     </div>
                   </div>
                 )}
@@ -2193,17 +3774,17 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         <input type="password" value={newEmployee.confirmPassword} onChange={e => setNewEmployee({ ...newEmployee, confirmPassword: e.target.value })} placeholder="Repeat password" style={{ width: '100%', padding: '13px 16px 13px 40px', borderRadius: 12, border: `1.5px solid ${newEmployee.confirmPassword ? (newEmployee.confirmPassword === newEmployee.password ? '#10B981' : '#EF4444') : T.bdr}`, background: T.input, color: T.text, fontSize: 14, outline: 'none', boxSizing: 'border-box' as const }} />
                       </div>
                       {newEmployee.confirmPassword && newEmployee.confirmPassword !== newEmployee.password && (
-                        <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>⚠ Passwords do not match</div>
+                        <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>âš  Passwords do not match</div>
                       )}
                       {newEmployee.confirmPassword && newEmployee.confirmPassword === newEmployee.password && (
-                        <div style={{ fontSize: 11, color: '#10B981', marginTop: 4 }}>✅ Passwords match</div>
+                        <div style={{ fontSize: 11, color: '#10B981', marginTop: 4 }}>âœ… Passwords match</div>
                       )}
                     </div>
                   </>
                 );
               })()}
 
-              {/* ── Inline Email Warning Banner ── */}
+              {/* â”€â”€ Inline Email Warning Banner â”€â”€ */}
               {emailWarningConfirmed && (
                 <div style={{
                   marginTop: 16, padding: '14px 16px',
@@ -2227,13 +3808,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       onClick={() => setEmailWarningConfirmed(false)}
                       style={{ flex: 1, padding: '9px', borderRadius: 8, border: '1px solid rgba(245,158,11,0.3)', background: 'none', color: '#F59E0B', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}
                     >
-                      ✏️ Change Email
+                      âœï¸ Change Email
                     </button>
                     <button
                       onClick={() => handleAddEmployee(false, true)}
                       style={{ flex: 2, padding: '9px', borderRadius: 8, border: 'none', background: '#F59E0B', color: '#fff', fontWeight: 800, cursor: 'pointer', fontSize: 12 }}
                     >
-                      ✅ Yes, Create Anyway
+                      âœ… Yes, Create Anyway
                     </button>
                   </div>
                 </div>
@@ -2314,7 +3895,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             setShowAddEmployeeModal(true);
           }}
           onSuccess={() => {
-            // Employee was created and data saved inside AdminResumeUploadPage — just clean up
+            // Employee was created and data saved inside AdminResumeUploadPage â€” just clean up
             setShowResumeUploadPage(false);
             setShowAddEmployeeModal(false);
             setResumeScanned(false);

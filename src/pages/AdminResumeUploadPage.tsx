@@ -808,7 +808,7 @@ export default function AdminResumeUploadPage({
       // === HANDLE PROFILE FIELDS ===
       // Clear unchecked existing profile fields
       const profileClears: any = {};
-      ['name', 'email', 'designation', 'yearsIT', 'location', 'phone'].forEach(key => {
+      ['name', 'email', 'designation', 'yearsIT', 'location', 'phone', 'primary_skill', 'secondary_skill', 'tertiary_skill'].forEach(key => {
         if (existingData.profile?.[key] && !existingProfileSelected[key]) {
           profileClears[key] = null; // Clear the field
         }
@@ -816,9 +816,21 @@ export default function AdminResumeUploadPage({
       
       // Add selected new profile fields
       if (extractedData?.profile) {
+        const keyMap: Record<string, string> = {
+          name: 'name',
+          email: 'email',
+          designation: 'designation',
+          yearsIT: 'yearsIT',
+          location: 'location',
+          phone: 'phone',
+          primarySkill: 'primary_skill',
+          secondarySkill: 'secondary_skill',
+          tertiarySkill: 'tertiary_skill'
+        };
         Object.keys(selectedProfileFields).forEach(key => {
           if (selectedProfileFields[key] && extractedData.profile[key]) {
-            profileClears[key] = extractedData.profile[key];
+            const dbKey = keyMap[key] || key;
+            profileClears[dbKey] = extractedData.profile[key];
           }
         });
       }
@@ -830,6 +842,56 @@ export default function AdminResumeUploadPage({
           body: JSON.stringify({ id: employeeId, ...profileClears })
         }).catch(() => {});
         savedCount++;
+      }
+
+      // Create CandidateProfile object and raw extraction for validation
+      if (extractedData) {
+        const p = extractedData.profile || {};
+        const s = extractedData.skills || {};
+        const c = extractedData.certifications || [];
+        const pr = extractedData.projects || [];
+        const ed = extractedData.education || [];
+
+        const skillsList = Object.entries(s).filter(([_, lvl]) => (lvl as number) > 0).map(([name, lvl]) => ({
+          skillName: name,
+          selfRating: lvl as number,
+          assessmentScore: 0
+        }));
+
+        const projectsList = pr.map((proj: any) => ({
+          name: proj.ProjectName || proj.name || '',
+          role: proj.Role || proj.role || '',
+          description: proj.Description || proj.description || '',
+          technologies: proj.technologies || (proj.skills_used || '').split ? (proj.technologies || proj.skills_used || '').split(/[,;]+/).map((t: string) => t.trim()).filter(Boolean) : [],
+          skills: proj.skills || (proj.skills_used || '').split ? (proj.skills_used || '').split(/[,;]+/).map((t: string) => t.trim()).filter(Boolean) : [],
+          domain: proj.Domain || proj.domain || '',
+        }));
+
+        const certsList = c.map((cert: any) => cert.CertName || cert.certName || cert || '');
+        const educationList = ed.map((e: any) => ({
+          degree: e.degree || '',
+          institution: e.institution || '',
+          year: e.year || ''
+        }));
+
+        const candidateProfile = {
+          name: p.name || 'Unknown',
+          experience: `${p.yearsIT || 0} Year${(p.yearsIT || 0) !== 1 ? 's' : ''}`,
+          yearsIT: p.yearsIT || 0,
+          designation: p.designation || 'Software Engineer',
+          skills: skillsList,
+          projects: projectsList,
+          certifications: certsList,
+          domains: Array.from(new Set(projectsList.map((proj: any) => proj.domain).filter(Boolean))),
+          education: educationList,
+          candidateId: employeeId,
+          source: 'ZenScan PDF Parser (Admin)',
+          extractionTimestamp: new Date().toISOString(),
+          profileVersion: '1.0.0'
+        };
+
+        localStorage.setItem('candidateProfile', JSON.stringify(candidateProfile));
+        localStorage.setItem('zenscan_raw_extraction', JSON.stringify(extractedData));
       }
 
       const msg = [];
@@ -1672,6 +1734,7 @@ export default function AdminResumeUploadPage({
                             yearsIT: 'Years in IT',
                             primarySkill: 'Primary Skill',
                             secondarySkill: 'Secondary Skill',
+                            tertiarySkill: 'Tertiary Skill',
                           };
                           return Object.entries(p)
                             .filter(([key, value]) => value && labelMap[key]) // only known fields with values

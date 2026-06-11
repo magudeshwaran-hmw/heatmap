@@ -14,6 +14,7 @@ export default function AppHeader() {
   const location  = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [llmStatus, setLlmStatus]   = useState<{ online: boolean; mode: string } | null>(null);
+  const [testingMode, setTestingMode] = useState(() => localStorage.getItem('testing_mode') === 'true');
 
   const { dark, toggleDark } = useDark();
   const T = mkTheme(dark);
@@ -24,12 +25,21 @@ export default function AppHeader() {
     return () => clearInterval(iv);
   }, []);
 
+  useEffect(() => {
+    const handleTestingChange = () => {
+      setTestingMode(localStorage.getItem('testing_mode') === 'true');
+    };
+    window.addEventListener('testing_mode_changed', handleTestingChange);
+    return () => window.removeEventListener('testing_mode_changed', handleTestingChange);
+  }, []);
+
   const displayName  = appData?.user?.Name || name || '…';
   const active       = (p: string) => location.pathname === p;
 
   const empNavItems = [
     { label: 'ZenRadar',      path: '/employee/dashboard' },
     { label: 'ZenMatrix',     path: '/employee/skills' },
+    { label: 'ZenAssess',     path: '/employee/zenassess' },
     { label: 'ZenAICoach',    path: '/employee/ai' },
     { label: 'My Projects',   path: '/employee/projects' },
     { label: 'My Education',  path: '/employee/education' },
@@ -98,8 +108,35 @@ export default function AppHeader() {
         </nav>
 
         {/* Right — Active Session Details */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           
+          {/* Testing Mode */}
+          <button 
+            onClick={() => {
+              const current = localStorage.getItem('testing_mode') === 'true';
+              localStorage.setItem('testing_mode', !current ? 'true' : 'false');
+              window.dispatchEvent(new Event('testing_mode_changed'));
+              setTestingMode(!current);
+            }} 
+            style={{
+              border: 'none', 
+              color: testingMode ? '#EF4444' : T.sub, 
+              cursor: 'pointer',
+              padding: '6px 10px', 
+              borderRadius: 12, 
+              transition: 'all 0.2s',
+              background: testingMode ? 'rgba(239,68,68,0.15)' : (dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'),
+              fontSize: 11,
+              fontWeight: 800,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4
+            }}
+            title="Toggle Testing Mode"
+          >
+            🧪 <span className="sk-hide-mobile">{testingMode ? 'Testing ON' : 'Testing OFF'}</span>
+          </button>
+
           {/* Theme */}
           <button onClick={toggleDark} style={{
             border: 'none', color: T.sub, cursor: 'pointer',
@@ -121,7 +158,7 @@ export default function AppHeader() {
                   <div style={{ fontSize: 13, fontWeight: 700, color: T.text, letterSpacing: -0.3, whiteSpace: 'nowrap' }}>{displayName.split(' ')[0]}</div>
                </div>
                <button 
-                 onClick={() => { logout(); navigate('/'); }}
+                 onClick={() => { logout(); navigate('/login'); }}
                  style={{ 
                    display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderRadius: 12, 
                    background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.1)', 
@@ -153,21 +190,33 @@ export default function AppHeader() {
       </div>
 
       {mobileOpen && isLoggedIn && (
-        <div style={{ background: T.card, borderTop: `1px solid ${T.bdr}`, padding: '12px 16px', position: 'fixed', top: 60, left: 0, right: 0, zIndex: 99, boxShadow: '0 20px 40px rgba(0,0,0,0.15)', maxHeight: 'calc(100vh - 60px)', overflowY: 'auto' }}>
-          {navItems.map(item => (
-            <button key={item.path}
-              onClick={() => { navigate(item.path); setMobileOpen(false); }}
-              style={{
-                display: 'block', width: '100%', textAlign: 'left', padding: '12px 14px',
-                borderRadius: 10, marginBottom: 6,
-                background: active(item.path) ? '#3B82F6' : 'transparent',
-                color: active(item.path) ? '#fff' : T.sub,
-                border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700
-              }}>
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <>
+          {/* Backdrop overlay */}
+          <div
+            onClick={() => setMobileOpen(false)}
+            style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.5)', zIndex: 9998 }}
+          />
+          {/* Side drawer */}
+          <div style={{ background: dark ? 'rgba(10,10,15,0.98)' : T.card, borderRight: `1px solid ${T.bdr}`, padding: '12px 16px', position: 'fixed', top: 0, left: 0, height: '100vh', width: 280, zIndex: 9999, overflowY: 'auto', boxShadow: '4px 0 24px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 16, marginBottom: 8, borderBottom: `1px solid ${T.bdr}` }}>
+              <ZensarLogo size="sm" />
+              <button onClick={() => setMobileOpen(false)} style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', padding: 4 }}><X size={20} /></button>
+            </div>
+            {navItems.map(item => (
+              <button key={item.path}
+                onClick={() => { navigate(item.path); setMobileOpen(false); }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', padding: '12px 14px',
+                  borderRadius: 10, marginBottom: 6,
+                  background: active(item.path) ? '#3B82F6' : 'transparent',
+                  color: active(item.path) ? '#fff' : T.sub,
+                  border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700
+                }}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </>
       )}
 
       <style>{`

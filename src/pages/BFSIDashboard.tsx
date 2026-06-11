@@ -13,7 +13,7 @@ import {
   Upload, FileText, Download, Search, Filter, ChevronRight,
   Briefcase, GraduationCap, Clock, CheckCircle, XCircle,
   BarChart3, PieChart, Calendar, ArrowRight, Sparkles,
-  Shield, CreditCard, Landmark, FileSpreadsheet, Plus, Trash2
+  Shield, CreditCard, Landmark, FileSpreadsheet, Plus, Trash2, RefreshCw
 } from 'lucide-react';
 
 // Types
@@ -110,6 +110,82 @@ const COLORS = {
   chart: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#f97316', '#06b6d4', '#ec4899']
 };
 
+// ── Find-a-Match results display helpers ──────────────────────────────────────
+const matchPctColor = (s: number) => s >= 80 ? COLORS.success : s >= 60 ? COLORS.warning : COLORS.danger;
+const matchBorderColor = (s: number) => s >= 80 ? '#378ADD' : s >= 60 ? '#EF9F27' : '#E24B4A';
+const scoreCellColor = (p: number) => p >= 70 ? COLORS.success : p >= 40 ? COLORS.warning : COLORS.danger;
+
+const GRADE_LADDER = ['F1', 'F2', 'E1', 'E2', 'D1', 'D2', 'C1', 'C2', 'B1', 'B2', 'A1', 'A2'];
+function computeGradeMatch(empGrade?: string, roleGrade?: string): number {
+  if (!roleGrade) return 100; // role has no grade requirement → no penalty
+  const e = GRADE_LADDER.indexOf(String(empGrade || '').toUpperCase());
+  const r = GRADE_LADDER.indexOf(String(roleGrade || '').toUpperCase());
+  if (e < 0 || r < 0) return 100;
+  if (e >= r) return 100;     // at or above requirement
+  if (r - e === 1) return 50; // one grade below
+  return 0;                   // two or more below
+}
+
+// Build the per-criterion match breakdown + gaining/missing reason lists from the
+// employee's live match data (matching is computed client-side in this dashboard).
+function buildMatchBreakdown(emp: any, role: any, skills: any[]) {
+  const reqSkills = (role?.required_skills || []).map((s: string) => String(s).toLowerCase());
+  const primary = String(emp?.primary_skill || '').toLowerCase();
+  const skillArr = Array.isArray(skills) ? skills : [];
+  const matchedZen = (emp?.matchedZenSkills || []).length;
+  const matchedExcel = (emp?.matchedExcelSkills || []).length;
+
+  const primaryMatch = ((primary && reqSkills.some((r: string) => r.includes(primary) || primary.includes(r))) || matchedZen > 0 || matchedExcel > 0) ? 100 : 0;
+
+  const verifiedSkill = skillArr.find((s: any) => {
+    const name = String(s.skillName || s.skill_name || '').toLowerCase();
+    const lvl = s.verifiedBadgeLevel || s.verified_badge_level;
+    return lvl && (name.includes(primary) || reqSkills.some((r: string) => name.includes(r) || r.includes(name)));
+  });
+  const verifiedLevel = verifiedSkill ? (verifiedSkill.verifiedBadgeLevel || verifiedSkill.verified_badge_level) : null;
+  const verifiedBadge = verifiedSkill ? 100 : 0;
+
+  const roleGrade = role?.required_grade || role?.grade || role?.band;
+  const gradeMatch = computeGradeMatch(emp?.grade || emp?.band, roleGrade);
+
+  const domainMatch = emp?.domain_match === 'Yes' ? 100 : 0;
+
+  const certCount = (emp?.certifications || []).length;
+  const certifications = certCount >= 3 ? 100 : certCount === 2 ? 66 : certCount === 1 ? 33 : 0;
+
+  const ps = emp?.project_strength || 'Low';
+  const projectStrength = Math.min(100, Math.round(ps === 'High' ? 100 : ps === 'Medium' ? 60 : (emp?.capability_score || 25)));
+
+  const rows = [
+    { key: 'primary',  label: 'Primary skill',    pct: primaryMatch },
+    { key: 'verified', label: 'Verified badge',   pct: verifiedBadge },
+    { key: 'grade',    label: 'Grade match',      pct: gradeMatch },
+    { key: 'domain',   label: 'Domain match',     pct: domainMatch },
+    { key: 'certs',    label: 'Certifications',   pct: certifications },
+    { key: 'project',  label: 'Project strength', pct: projectStrength },
+  ];
+
+  const gaining: string[] = [];
+  const missing: string[] = [];
+  if (primaryMatch >= 60) gaining.push(`Primary skill "${emp?.primary_skill || '—'}" matches the role requirement`);
+  else missing.push(`Primary skill does not match the required skills`);
+  if (verifiedBadge >= 60) gaining.push(`ZenAssess verified badge (${verifiedLevel}) for ${emp?.primary_skill || 'the skill'}`);
+  else missing.push(`No verified badge — complete ZenAssess to boost match score`);
+  if (domainMatch >= 60) gaining.push(`Domain experience matches ${role?.client_name || 'the client'}`);
+  else missing.push(`No domain match for ${role?.client_name || 'the client domain'}`);
+  if (certifications >= 60) gaining.push(`${certCount} relevant certification${certCount === 1 ? '' : 's'}`);
+  else missing.push(`No certifications${role?.required_skills?.[0] ? ' in ' + role.required_skills[0] : ''}`);
+  if (projectStrength >= 60) gaining.push(`Strong project background (${ps})`);
+  else missing.push(`Limited project strength (${ps})`);
+  if (roleGrade) {
+    if (gradeMatch >= 80) gaining.push(`Grade ${emp?.grade || emp?.band} meets the role requirement`);
+    else missing.push(`Grade ${emp?.grade || emp?.band || '—'} — role prefers ${roleGrade} or above`);
+  }
+  if ((emp?.freshness_at_alloc ?? 0) >= 90) gaining.push(`${emp.freshness_at_alloc}% freshness score`);
+
+  return { rows, gaining, missing, verifiedLevel };
+}
+
 const ALL_BFSI_SKILLS = [
   'Automation Testing',
   'Automation Testing SDET',
@@ -124,12 +200,52 @@ const ALL_BFSI_SKILLS = [
   'Digital Testing'
 ];
 
+const getProjectStrength = (project_name: string, customer: string, skillName: string) => {
+  if (!project_name) return 'Low';
+  const sLower = skillName.toLowerCase();
+  const pLower = project_name.toLowerCase();
+  const cLower = (customer || '').toLowerCase();
+  if (!pLower.includes(sLower) && !cLower.includes(sLower)) return 'Low';
+  const hasBFSI = pLower.includes('banking') || pLower.includes('insurance') || pLower.includes('bfsi') || pLower.includes('claims') ||
+                  cLower.includes('bank') || cLower.includes('insurance') || cLower.includes('finance') || cLower.includes('claims');
+  return hasBFSI ? 'High' : 'Medium';
+};
+
+const getCertificationStrength = (certifications: string[], skillName: string) => {
+  const matched = (certifications || []).filter(c => c.toLowerCase().includes(skillName.toLowerCase()));
+  if (matched.length === 0) return 'None';
+  const hasGold = matched.some(c => {
+    const name = c.toLowerCase();
+    return name.includes('istqb') || name.includes('aws') || name.includes('azure') || name.includes('google') ||
+           name.includes('cisa') || name.includes('cissp') || name.includes('scrum') || name.includes('associate') ||
+           name.includes('professional') || name.includes('architect');
+  });
+  return hasGold ? 'High' : 'Low';
+};
+
+const getDomainMatch = (emp: any) => {
+  const pName = (emp.project_name || '').toLowerCase();
+  const cust = (emp.customer || '').toLowerCase();
+  const pSkill = (emp.primary_skill || '').toLowerCase();
+  const hasBFSI = pName.includes('banking') || pName.includes('insurance') || pName.includes('bfsi') || pName.includes('claims') ||
+                  cust.includes('bank') || cust.includes('insurance') || cust.includes('finance') || cust.includes('claims') ||
+                  pSkill.includes('banking') || pSkill.includes('insurance') || pSkill.includes('bfsi') || pSkill.includes('claims');
+  return hasBFSI ? 'Yes' : 'No';
+};
+
+const getRecommendation = (capabilityScore: number, skillName: string) => {
+  if (capabilityScore >= 80) return `Highly Recommended for ${skillName} roles. Excellent capability match.`;
+  if (capabilityScore >= 60) return `Recommended for ${skillName} roles. Strong core knowledge.`;
+  if (capabilityScore >= 40) return `Suitable with supervision. Re-skilling recommended.`;
+  return `Not Recommended for client-facing ${skillName} roles. Needs training.`;
+};
+
 export default function BFSIDashboard() {
   const { dark } = useDark();
   const T = mkTheme(dark);
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'supply' | 'demand' | 'match' | 'zenfinder'>('supply');
+  const [activeTab, setActiveTab] = useState<'supply' | 'demand' | 'match' | 'zenfinder' | 'allocations' | 'analytics'>('supply');
   const [supplySubTab, setSupplySubTab] = useState<'pool' | 'deallocation'>('pool');
   const [demandSubTab, setDemandSubTab] = useState<'reactive' | 'proactive'>('reactive');
   const [kpiData, setKpiData] = useState<DashboardKPI | null>(null);
@@ -147,10 +263,30 @@ export default function BFSIDashboard() {
   const [skillMatrixModal, setSkillMatrixModal] = useState<{ employee: BFSIEmployee; skills: any[] } | null>(null);
   const [showAllMatches, setShowAllMatches] = useState(false);
   const [showTopRank, setShowTopRank] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState<'all' | 'excel' | 'matrix' | 'both'>('all');
+  // Find-a-Match results: which employee row has its breakdown panel open (inline)
+  const [matchPanel, setMatchPanel] = useState<{ id: string; type: 'breakdown' } | null>(null);
+  // View Details opens as a modal (employee whose details are shown)
+  const [detailModal, setDetailModal] = useState<BFSIEmployee | null>(null);
+  // Skills fetched fresh from the DB when the detail modal opens (most reliable
+  // source of verified_badge_level — avoids id-mismatch in the batch match data)
+  const [modalSkills, setModalSkills] = useState<any[]>([]);
+  const [modalSkillsLoading, setModalSkillsLoading] = useState(false);
+  // Per-employee allocate/reserve status applied this session (after a successful action)
+  const [localStatus, setLocalStatus] = useState<Record<string, 'allocated' | 'reserved'>>({});
   const [selectedSRF, setSelectedSRF] = useState<BFSIRole | null>(null);
   const [matchResults, setMatchResults] = useState<any>(null);
   const [matchLoading, setMatchLoading] = useState(false);
+  const [overridePrompt, setOverridePrompt] = useState<{ employee: BFSIEmployee; type: 'assign' | 'reserve' } | null>(null);
+  const [overrideReasonInput, setOverrideReasonInput] = useState('');
+  const [isAllocating, setIsAllocating] = useState(false);
+  const [assignments, setAssignments] = useState<any[]>([]);
+  const [loadingAssignments, setLoadingAssignments] = useState(false);
+  const [outcomeModal, setOutcomeModal] = useState<{ assignment: any } | null>(null);
+  const [outcomeStatusInput, setOutcomeStatusInput] = useState<'Success' | 'Failure'>('Success');
+  const [outcomeNotesInput, setOutcomeNotesInput] = useState('');
+  const [isRecordingOutcome, setIsRecordingOutcome] = useState(false);
+  const [analyticsData, setAnalyticsData] = useState<any | null>(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
 
   // ── ZenFinder state ──
   const [zfQuery, setZfQuery]           = useState('');
@@ -160,6 +296,7 @@ export default function BFSIDashboard() {
   const [zfShowSugg, setZfShowSugg]     = useState(false);
   const [zfSearched, setZfSearched]     = useState(false);
   const [zfScorePopup, setZfScorePopup] = useState<any | null>(null);
+  const [cardSelectedRoleMap, setCardSelectedRoleMap] = useState<Record<string, string>>({});
 
   // ── ZenFinder: detect search intent from query ──
   const detectZenFinderIntent = (q: string): 'certification' | 'achievement' | 'skill' | 'project' | 'general' => {
@@ -194,7 +331,29 @@ export default function BFSIDashboard() {
     setZfSearched(true);
     const q = rawQuery.trim().toLowerCase();
     const intent = detectZenFinderIntent(q);
-    const { skillTerms, locationTerms } = parseQuery(q);
+    const { skillTerms, locationTerms, allWords } = parseQuery(q);
+
+    // Parse open positions count (N)
+    const posMatch = rawQuery.match(/(\d+)\s*(?:open\s*)?positions?/i);
+    const maxResults = posMatch ? parseInt(posMatch[1], 10) : 50;
+
+    // Detect availability filter
+    const availKeywords = ['available', 'bench', 'free', 'pool', 'unallocated'];
+    const filterAvailability = allWords.some(w => availKeywords.includes(w));
+
+    // Detect domain terms
+    const domainKeywords = ['bfsi', 'banking', 'finance', 'insurance', 'healthcare', 'retail', 'telecom', 'ecommerce'];
+    const queryDomainTerms = allWords.filter(w => domainKeywords.includes(w));
+
+    const matchesDomain = (emp: BFSIEmployee) => {
+      if (queryDomainTerms.length === 0) return true;
+      const combinedText = [
+        emp.vertical, emp.customer, emp.project_name, emp.practice_name,
+        getDomainMatch(emp) === 'Yes' ? 'bfsi banking finance insurance claims' : ''
+      ].join(' ').toLowerCase();
+      return queryDomainTerms.some(term => combinedText.includes(term));
+    };
+
     const results: any[] = [];
 
     // Match text against skill terms only (not location words)
@@ -308,6 +467,8 @@ export default function BFSIDashboard() {
       }
 
       // ── Zen Matrix: fetch only relevant data based on intent ──
+      let skills: any[] = [];
+      let maxCapabilityScore = 0;
       try {
         const empId = emp.employee_id;
 
@@ -350,10 +511,23 @@ export default function BFSIDashboard() {
         }
 
         // ── SKILLS ──
-        if (intent === 'skill' || intent === 'general') {
-          const skillsRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
-          if (skillsRes.ok) {
-            const skills = await skillsRes.json();
+        skills = [];
+        maxCapabilityScore = 0;
+        const skillsRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
+        if (skillsRes.ok) {
+          skills = await skillsRes.json();
+          
+          // Find matching skills and compute max capability score
+          const matchedSkills = skills.filter((sk: any) => {
+            const name = sk.skill_name || sk.skillName || '';
+            return name && matchesSkill(name);
+          });
+          
+          if (matchedSkills.length > 0) {
+            maxCapabilityScore = Math.max(...matchedSkills.map((sk: any) => sk.capabilityScore || sk.capability_score || 0));
+          }
+
+          if (intent === 'skill' || intent === 'general') {
             (skills as any[]).forEach((sk: any) => {
               const name = sk.skill_name || sk.skillName || '';
               if (name && matchesSkill(name)) {
@@ -393,9 +567,27 @@ export default function BFSIDashboard() {
         }
       } catch {}
 
+      if (maxCapabilityScore === 0) {
+        // Fallback to primary skill or current skills from BFSI sheet
+        if (emp.primary_skill && matchesSkill(emp.primary_skill)) {
+          maxCapabilityScore = 35; // default capability score for primary skill
+        } else {
+          const hasCurrentSkillMatch = (emp.current_skills || []).some(s => s && matchesSkill(s));
+          if (hasCurrentSkillMatch) {
+            maxCapabilityScore = 25; // default capability score for current skills
+          }
+        }
+      }
+
+      // Filter by domain if domain terms were provided
+      const domainOk = matchesDomain(emp);
+
+      // Filter by availability if specified
+      const availOk = !filterAvailability || (emp.status === 'Available-Pool' || emp.rmg_status === 'Bench');
+
       // ── Only include if there's a real skill/cert/project match ──
       // If location was specified in query, employee MUST be in that location
-      if (score > 0 && hasSkillMatch) {
+      if (score > 0 && hasSkillMatch && domainOk && availOk) {
         // If query has location terms, location match is REQUIRED not optional
         if (locationTerms.length > 0 && !locMatch) {
           // Location specified but employee not in that location — skip
@@ -409,16 +601,18 @@ export default function BFSIDashboard() {
           results.push({
             ...emp,
             zfScore: score,
+            zfCapabilityScore: maxCapabilityScore,
             zfReasons: reasons.slice(0, 6),
             zfAllReasons: reasons,
             zfIntent: intent,
+            zfSkills: skills,
           });
         }
       }
     }
 
-    results.sort((a, b) => b.zfScore - a.zfScore);
-    setZfResults(results.slice(0, 50));
+    results.sort((a, b) => b.zfCapabilityScore - a.zfCapabilityScore || b.zfScore - a.zfScore);
+    setZfResults(results.slice(0, maxResults));
     setZfLoading(false);
   };
 
@@ -636,6 +830,212 @@ export default function BFSIDashboard() {
     fetchDashboardData();
   }, []);
 
+  const fetchAssignments = async () => {
+    setLoadingAssignments(true);
+    try {
+      const res = await fetch(`${API_BASE}/bfsi/assignments`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.assignments) {
+        setAssignments(data.assignments);
+      }
+    } catch (err) {
+      toast.error('Failed to load project allocations');
+    } finally {
+      setLoadingAssignments(false);
+    }
+  };
+
+  const handleRecordOutcome = async () => {
+    if (!outcomeModal) return;
+    setIsRecordingOutcome(true);
+    try {
+      const res = await fetch(`${API_BASE}/bfsi/outcome`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+        },
+        body: JSON.stringify({
+          roleId: outcomeModal.assignment.role_id,
+          employeeId: outcomeModal.assignment.employee_id,
+          outcomeStatus: outcomeStatusInput,
+          outcomeNotes: outcomeNotesInput
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(data.message || 'Outcome recorded successfully');
+        setOutcomeModal(null);
+        setOutcomeNotesInput('');
+        await fetchAssignments();
+        await fetchDashboardData();
+      } else {
+        toast.error(data.error || 'Failed to record outcome');
+      }
+    } catch (err) {
+      toast.error('Failed to record outcome');
+    } finally {
+      setIsRecordingOutcome(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'allocations') {
+      fetchAssignments();
+    }
+  }, [activeTab]);
+
+  const fetchAnalyticsData = async () => {
+    setLoadingAnalytics(true);
+    try {
+      const res = await fetch(`${API_BASE}/bfsi/analytics`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAnalyticsData(data);
+      } else {
+        toast.error(data.error || 'Failed to load executive analytics');
+      }
+    } catch (err) {
+      toast.error('Failed to load executive analytics');
+    } finally {
+      setLoadingAnalytics(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'analytics') {
+      fetchAnalyticsData();
+    }
+  }, [activeTab]);
+
+  const handlePerformAllocation = async (emp: BFSIEmployee, type: 'assign' | 'reserve', overrideReason = '', roleOverride?: BFSIRole) => {
+    const role = roleOverride || selectedSRF;
+    if (!role) {
+      toast.error('Please select a role/SRF first.');
+      return;
+    }
+    setIsAllocating(true);
+    try {
+      const isOverride = (emp as any).rank !== 1;
+      const endpoint = type === 'assign' ? '/api/bfsi/assign' : '/api/bfsi/reserve';
+      
+      const payload = {
+        roleId: role.role_id,
+        employeeId: emp.employee_id,
+        matchScore: (emp as any).matchScore || 0,
+        allocationReadiness: (emp as any).allocation_readiness || (emp as any).matchScore || 0,
+        confidenceAtAlloc: (emp as any).confidence_at_alloc || 70,
+        freshnessAtAlloc: (emp as any).freshness_at_alloc || 70,
+        riskScore: (emp as any).risk_score || 0,
+        recommendedRank: (emp as any).rank || 1,
+        adminOverride: isOverride,
+        overrideReason: isOverride ? overrideReason : '',
+        weeks: type === 'reserve' ? 4 : undefined
+      };
+
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(data.message || `Employee successfully ${type === 'assign' ? 'assigned' : 'reserved'}`);
+        setOverridePrompt(null);
+        setOverrideReasonInput('');
+        setMatchResults(null);
+        await fetchDashboardData();
+      } else {
+        toast.error(data.error || 'Failed to allocate employee');
+      }
+    } catch (err) {
+      toast.error('Failed to allocate employee');
+    } finally {
+      setIsAllocating(false);
+    }
+  };
+
+  // Open the View Details modal and fetch the employee's skills fresh from the DB
+  // (the /:id/skills route resolves id OR zensar_id and returns verifiedBadgeLevel).
+  const handleViewDetails = async (emp: BFSIEmployee) => {
+    setDetailModal(emp);
+    setModalSkills([]);
+    setModalSkillsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`, 'Cache-Control': 'no-cache' },
+      });
+      const skills = res.ok ? await res.json() : [];
+      console.log('[ViewDetails] skills fetched for', emp.employee_id, Array.isArray(skills) ? skills.length : skills, skills);
+      setModalSkills(Array.isArray(skills) ? skills : []);
+    } catch (err) {
+      console.error('[ViewDetails] skills fetch error:', err);
+      setModalSkills([]);
+    } finally {
+      setModalSkillsLoading(false);
+    }
+  };
+
+  // TEMP DIAGNOSTIC — what skills/verified data the detail modal actually has.
+  useEffect(() => {
+    if (!detailModal) return;
+    console.log('=== MODAL EMPLOYEE ===', detailModal.employee_id, detailModal.employee_name);
+    console.log('Modal skills state:', modalSkills);
+    console.log('Skills with verified badge:', (modalSkills || []).filter((s: any) => (s.verifiedBadgeLevel ?? s.verified_badge_level)));
+  }, [detailModal, modalSkills]);
+
+  // Allocate/Reserve from the match-result cards & detail modal. Uses the existing
+  // /api/bfsi/assign|reserve endpoints, but (unlike handlePerformAllocation) keeps
+  // the results modal open and marks the card's status locally so the badge shows
+  // and the button disables. Refreshes dashboard data in the background.
+  const runAllocation = async (emp: BFSIEmployee, type: 'assign' | 'reserve', _overrideReason = '') => {
+    const role = selectedSRF || matchResults?.role;
+    if (!role) { toast.error('Please select a role/SRF first.'); return; }
+    setIsAllocating(true);
+    try {
+      const endpoint = type === 'assign' ? '/api/admin/allocate' : '/api/admin/reserve';
+      const actorKey = type === 'assign' ? 'allocatedBy' : 'reservedBy';
+      const payload: Record<string, any> = {
+        employeeId: String((emp as any).employee_id || (emp as any).zensar_id || (emp as any).id || ''),
+        srfId: String(role.role_id || ''),
+        roleName: String(role.role_title || ''),
+        [actorKey]: String(localStorage.getItem('skill_nav_session_name') || 'admin'),
+      };
+      console.log(`[${type === 'assign' ? 'Allocate' : 'Reserve'}] sending`, payload);
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      console.log(`[${type === 'assign' ? 'Allocate' : 'Reserve'}] HTTP status:`, res.status, data);
+      // HTTP 2xx means success — do NOT require a `success` field in the body.
+      if (res.ok) {
+        toast.success(`${emp.employee_name} ${type === 'assign' ? `allocated to ${role.role_title}` : `reserved for ${role.role_title}`}`);
+        setLocalStatus(prev => ({ ...prev, [String(emp.employee_id)]: type === 'assign' ? 'allocated' : 'reserved' }));
+        setOverridePrompt(null);
+        setOverrideReasonInput('');
+        setDetailModal(null);
+        fetchDashboardData(); // refresh in background; keep results modal open
+      } else {
+        const errMsg = data?.error || data?.message || `HTTP ${res.status}`;
+        toast.error(`Failed to ${type === 'assign' ? 'allocate' : 'reserve'}: ${errMsg}`);
+      }
+    } catch (err: any) {
+      toast.error(`Failed to ${type === 'assign' ? 'allocate' : 'reserve'}: ${err?.message || 'network error'}`);
+    } finally {
+      setIsAllocating(false);
+    }
+  };
+
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
@@ -835,12 +1235,26 @@ export default function BFSIDashboard() {
               <Search size={16} />
               ZenFinder
             </button>
+            <button 
+              onClick={() => setActiveTab('allocations')} 
+              style={{ padding: '18px 0', color: activeTab === 'allocations' ? '#EC4899' : T.sub, borderBottom: `3px solid ${activeTab === 'allocations' ? '#EC4899' : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+            >
+              <CheckCircle size={16} />
+              Allocations
+            </button>
+            <button 
+              onClick={() => setActiveTab('analytics')} 
+              style={{ padding: '18px 0', color: activeTab === 'analytics' ? '#F59E0B' : T.sub, borderBottom: `3px solid ${activeTab === 'analytics' ? '#F59E0B' : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+            >
+              <BarChart3 size={16} />
+              Executive Analytics
+            </button>
           </div>
         </div>
 
         {/* Content Section */}
         <div style={{ background: T.card, padding: '28px', borderRadius: '0 0 20px 20px', border: `1px solid ${T.bdr}`, boxShadow: '0 20px 60px -20px rgba(0,0,0,0.12)', minHeight: '700px' }}>
-          
+
           {activeTab === 'supply' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
               
@@ -2119,16 +2533,72 @@ export default function BFSIDashboard() {
                                     if (aging > 60) { score += 5; matchReasons.push(`⏳ Aging: ${aging}d`); }
                                     else if (aging > 30) { score += 3; matchReasons.push(`⏳ Aging: ${aging}d`); }
 
+                                    // Get skill stats from batch data
+                                    const rawSkills = allSkillMatrixData[emp.employee_id] || allSkillMatrixData[String(emp.employee_id)] || [];
+                                    const avgConfidence = rawSkills.length > 0
+                                      ? Math.round(rawSkills.reduce((sum, s) => sum + (s.confidenceScore || s.confidence_score || 0), 0) / rawSkills.length)
+                                      : 70;
+                                    const avgFreshness = rawSkills.length > 0
+                                      ? Math.round(rawSkills.reduce((sum, s) => sum + (s.freshnessScore || s.freshness_score || 0), 0) / rawSkills.length)
+                                      : 70;
+
+                                    const matchedSkills = rawSkills.filter(s => 
+                                      role.required_skills.some(rs => (s.skillName || s.skill_name || '').toLowerCase().includes(rs.toLowerCase()))
+                                    );
+                                    const targetSkills = matchedSkills.length > 0 ? matchedSkills : rawSkills;
+
+                                    const avgReadiness = targetSkills.length > 0
+                                      ? Math.round(targetSkills.reduce((sum, s) => sum + (s.allocationReadiness || s.allocation_readiness || 0), 0) / targetSkills.length)
+                                      : Math.min(score, 100);
+
+                                    let aggRisk = 'Low';
+                                    if (targetSkills.some(s => s.allocationRisk === 'High' || s.allocation_risk === 'High')) {
+                                      aggRisk = 'High';
+                                    } else if (targetSkills.some(s => s.allocationRisk === 'Medium' || s.allocation_risk === 'Medium')) {
+                                      aggRisk = 'Medium';
+                                    }
+
+                                    const isReadyForAlloc = targetSkills.length > 0
+                                      ? targetSkills.every(s => s.readyForAllocation !== false && s.ready_for_allocation !== false)
+                                      : true;
+
+                                    const finalScore = Math.min(score, 100);
+
+                                    // Risk Score formula:
+                                    // 100 - (finalScore * 0.5 + avgConfidence * 0.25 + avgFreshness * 0.25)
+                                    let riskScore = Math.round((100 - finalScore) * 0.5 + (100 - avgConfidence) * 0.25 + (100 - avgFreshness) * 0.25);
+                                    if (skillLevelBonus > 0) riskScore = Math.max(0, riskScore - 10);
+                                    if ((emp.aging_days || 0) > 60) riskScore = Math.max(0, riskScore - 5);
+
+                                    const matchedSkill = targetSkills[0];
+                                    const capScore = matchedSkill?.capabilityScore || 0;
+                                    const skillName = matchedSkill?.skillName || role.required_skills[0] || '';
+                                    const projectStrength = getProjectStrength(emp.project_name || '', emp.customer || '', skillName);
+                                    const certStrength = getCertificationStrength(emp.certifications || [], skillName);
+                                    const domainMatch = getDomainMatch(emp);
+                                    const recommendation = getRecommendation(capScore, skillName);
+
                                     matchedEmployees.push({
                                       ...emp,
-                                      matchScore: Math.min(score, 100),
+                                      matchScore: finalScore,
                                       matchReasons: matchReasons.join(' · '),
                                       rank: 0,
                                       skillLevelBonus,
                                       matchedZenSkills:  [...new Set(matchedZenSkills)],
                                       matchedExcelSkills: [...new Set(matchedExcelSkills)],
                                       matchSource: skillMatrixMatch && excelSkillMatch ? 'Both Sources'
-                                                 : skillMatrixMatch ? 'Zen Matrix Only' : 'BFSI Data'
+                                                 : skillMatrixMatch ? 'Zen Matrix Only' : 'BFSI Data',
+                                      allocation_readiness: avgReadiness,
+                                      allocation_risk: aggRisk,
+                                      ready_for_allocation: isReadyForAlloc,
+                                      confidence_at_alloc: avgConfidence,
+                                      freshness_at_alloc: avgFreshness,
+                                      risk_score: Math.min(100, Math.max(0, riskScore)),
+                                      capability_score: capScore,
+                                      project_strength: projectStrength,
+                                      cert_strength: certStrength,
+                                      domain_match: domainMatch,
+                                      recommendation: recommendation
                                     });
                                   }
 
@@ -2140,8 +2610,8 @@ export default function BFSIDashboard() {
                                     .sort((a, b) => {
                                       // 1st priority: Score (highest first)
                                       if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
-                                      // 2nd priority: Skill Level Bonus (highest first)
-                                      if (b.skillLevelBonus !== a.skillLevelBonus) return b.skillLevelBonus - a.skillLevelBonus;
+                                      // 2nd priority: Risk Score (lowest first)
+                                      if ((a as any).risk_score !== (b as any).risk_score) return (a as any).risk_score - (b as any).risk_score;
                                       // 3rd priority: Aging Days (highest first - urgent placement)
                                       return (b.aging_days || 0) - (a.aging_days || 0);
                                     })
@@ -2188,8 +2658,8 @@ export default function BFSIDashboard() {
                                     allSkillMatrixData: allSkillMatrixData,
                                   });
                                   
-                                  // Reset filters/view state for fresh results
-                                  setSourceFilter('all');
+                                  // Reset panel/view state for fresh results
+                                  setMatchPanel(null);
                                   setShowAllMatches(false);
                                   setShowTopRank(false);
                                   
@@ -2238,6 +2708,250 @@ export default function BFSIDashboard() {
                     <div style={{ fontSize: 13, color: T.sub }}>Analyzing {workforce.filter(w => w.status === 'Available-Pool' || w.status === 'Deallocating').length} employees</div>
                   </div>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* ── ALLOCATIONS TAB ── */}
+          {activeTab === 'allocations' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24, animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <CheckCircle size={20} color="#EC4899" /> LOB Project Allocations & Outcomes
+                </h3>
+                <button onClick={fetchAssignments} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <RefreshCw size={13} className={loadingAssignments ? 'animate-spin' : ''} /> Refresh Allocations
+                </button>
+              </div>
+
+              {loadingAssignments ? (
+                <p style={{ color: T.sub, fontSize: 13 }}>Loading allocations queue...</p>
+              ) : assignments.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 48, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16 }}>
+                  <CheckCircle size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
+                  <div style={{ fontWeight: 700, color: T.sub }}>No active or past allocations logged in LOB</div>
+                </div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
+                    <thead>
+                      <tr style={{ background: T.card, borderBottom: `1px solid ${T.bdr}`, color: T.sub, textAlign: 'left' }}>
+                        <th style={{ padding: '12px 16px' }}>Employee</th>
+                        <th style={{ padding: '12px 16px' }}>Allocated Role</th>
+                        <th style={{ padding: '12px 16px' }}>Match & Readiness</th>
+                        <th style={{ padding: '12px 16px' }}>Confidence & Freshness</th>
+                        <th style={{ padding: '12px 16px' }}>Risk & Rank</th>
+                        <th style={{ padding: '12px 16px' }}>Allocation Status</th>
+                        <th style={{ padding: '12px 16px' }}>Outcome / Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {assignments.map((a: any) => {
+                        const hasOutcome = !!a.outcome_status;
+                        return (
+                          <tr key={a.id} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: T.text }}>{a.employee_name}</div>
+                              <div style={{ fontSize: 11, color: T.sub }}>{formatZensarId(a.employee_id)} · {a.experience_years} Years Exp</div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: T.text }}>{a.role_title}</div>
+                              <div style={{ fontSize: 11, color: T.sub }}>{a.client_name} · 📍 {a.role_location || 'N/A'}</div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: '#EC4899' }}>Match: {a.match_score}%</div>
+                              <div style={{ fontSize: 11, color: T.sub }}>Readiness: {a.allocation_readiness}%</div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: '#3B82F6' }}>Confidence: {a.confidence_at_alloc}%</div>
+                              <div style={{ fontSize: 11, color: '#10B981' }}>Freshness: {a.freshness_at_alloc}%</div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <div style={{ fontWeight: 700, color: a.risk_score > 60 ? '#EF4444' : '#10B981' }}>
+                                Risk: {a.risk_score}%
+                              </div>
+                              <div style={{ fontSize: 11, color: T.sub }}>
+                                Rank: #{a.recommended_rank || 1} {a.admin_override && <span style={{ color: '#EF4444', fontWeight: 800 }}>⚠️ Override</span>}
+                              </div>
+                              {a.admin_override && a.override_reason && (
+                                <div style={{ fontSize: 10, color: '#EF4444', fontStyle: 'italic', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.override_reason}>
+                                  "{a.override_reason}"
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              <span style={{
+                                padding: '3px 10px', borderRadius: 8, fontSize: 11, fontWeight: 800,
+                                background: a.assignment_status === 'Assigned' ? 'rgba(59,130,246,0.1)'
+                                          : a.assignment_status === 'Reserved' ? 'rgba(245,158,11,0.1)'
+                                          : 'rgba(16,185,129,0.1)',
+                                color: a.assignment_status === 'Assigned' ? '#3B82F6'
+                                     : a.assignment_status === 'Reserved' ? '#F59E0B'
+                                     : '#10B981'
+                              }}>
+                                {a.assignment_status}
+                              </span>
+                              <div style={{ fontSize: 10, color: T.sub, marginTop: 4 }}>
+                                {new Date(a.assigned_date).toLocaleDateString()}
+                              </div>
+                            </td>
+                            <td style={{ padding: '14px 16px' }}>
+                              {hasOutcome ? (
+                                <div>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                    background: a.outcome_status === 'Success' ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
+                                    color: a.outcome_status === 'Success' ? '#10B981' : '#EF4444'
+                                  }}>
+                                    Outcome: {a.outcome_status}
+                                  </span>
+                                  {a.outcome_notes && (
+                                    <div style={{ fontSize: 11, color: T.sub, marginTop: 4, maxWidth: 180, fontStyle: 'italic' }}>
+                                      "{a.outcome_notes}"
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setOutcomeModal({ assignment: a });
+                                    setOutcomeStatusInput('Success');
+                                    setOutcomeNotesInput('');
+                                  }}
+                                  style={{
+                                    padding: '6px 12px', borderRadius: 8, background: '#10B981', border: 'none',
+                                    color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer'
+                                  }}
+                                >
+                                  Log Outcome / Release
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+
+          {/* ── EXECUTIVE ANALYTICS TAB ── */}
+          {activeTab === 'analytics' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 28, animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <BarChart3 size={20} color="#F59E0B" /> LOB Executive Analytics & Growth Projections
+                </h3>
+                <button onClick={fetchAnalyticsData} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <RefreshCw size={13} className={loadingAnalytics ? 'animate-spin' : ''} /> Refresh Analytics
+                </button>
+              </div>
+
+              {loadingAnalytics || !analyticsData ? (
+                <p style={{ color: T.sub, fontSize: 13 }}>Loading LOB executive insights...</p>
+              ) : (
+                <>
+                  {/* 1. Allocation Rates & Pool Distribution */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24 }}>
+                    <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                      <div>
+                        <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>Allocation Utilization Rate</h4>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
+                          <span style={{ fontSize: 44, fontWeight: 900, color: '#F59E0B' }}>{analyticsData.allocationRates.allocationRate}%</span>
+                          <span style={{ fontSize: 12, color: T.sub }}>Target: 85%</span>
+                        </div>
+                        {/* Utilization Bar */}
+                        <div style={{ height: 10, width: '100%', background: T.card, borderRadius: 5, overflow: 'hidden', marginBottom: 12, border: `1px solid ${T.bdr}` }}>
+                          <div style={{ height: '100%', width: `${analyticsData.allocationRates.allocationRate}%`, background: 'linear-gradient(90deg, #F59E0B, #10B981)', borderRadius: 5 }} />
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 12, color: T.sub }}>
+                        Combined billable assigned and reserved allocations relative to total workforce.
+                      </div>
+                    </div>
+
+                    <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                      <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>Workforce Deployment Status</h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                        <div style={{ background: T.card, padding: 12, borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                          <div style={{ fontSize: 11, color: T.sub }}>Assigned (Billable)</div>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: '#10B981', marginTop: 4 }}>{analyticsData.allocationRates.assigned}</div>
+                        </div>
+                        <div style={{ background: T.card, padding: 12, borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                          <div style={{ fontSize: 11, color: T.sub }}>Reserved (Reskilling)</div>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: '#3B82F6', marginTop: 4 }}>{analyticsData.allocationRates.reserved}</div>
+                        </div>
+                        <div style={{ background: T.card, padding: 12, borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                          <div style={{ fontSize: 11, color: T.sub }}>Available Pool (Bench)</div>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: '#EF4444', marginTop: 4 }}>{analyticsData.allocationRates.pool}</div>
+                        </div>
+                        <div style={{ background: T.card, padding: 12, borderRadius: 10, border: `1px solid ${T.bdr}` }}>
+                          <div style={{ fontSize: 11, color: T.sub }}>Total LOB Headcount</div>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: T.text, marginTop: 4 }}>{analyticsData.allocationRates.total}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2. Band Readiness Distribution */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>Capability Readiness by Experience Band</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
+                      {analyticsData.readinessTrends.map((trend: any) => (
+                        <div key={trend.band} style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
+                          <span style={{ fontSize: 11, fontWeight: 900, background: 'rgba(245,158,11,0.1)', color: '#F59E0B', padding: '2px 8px', borderRadius: 10 }}>
+                            Band {trend.band || 'N/A'}
+                          </span>
+                          <div style={{ fontSize: 28, fontWeight: 800, color: T.text, marginTop: 12, marginBottom: 8 }}>
+                            {trend.avg_readiness}%
+                          </div>
+                          <div style={{ fontSize: 11, color: T.sub }}>Average Readiness Score</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3. Skill Growth Projections */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>Forward-looking Skill Supply & Certification Pipeline Forecast</h4>
+                    {analyticsData.skillGrowthForecast.length === 0 ? (
+                      <p style={{ color: T.sub, fontSize: 12, margin: 0 }}>No active certifications in the reskilling pipeline to forecast growth.</p>
+                    ) : (
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, textAlign: 'left' }}>
+                          <thead>
+                            <tr style={{ color: T.sub, borderBottom: `1px solid ${T.bdr}` }}>
+                              <th style={{ padding: '10px 12px' }}>Skill Domain</th>
+                              <th style={{ padding: '10px 12px' }}>Current Supply</th>
+                              <th style={{ padding: '10px 12px' }}>Reskilling Pipeline</th>
+                              <th style={{ padding: '10px 12px' }}>Projected Supply (30d)</th>
+                              <th style={{ padding: '10px 12px', textAlign: 'right' }}>Projected Growth</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {analyticsData.skillGrowthForecast.map((fc: any) => {
+                              const pctGrowth = fc.currentSupply > 0 ? Math.round((fc.pipelineCount / fc.currentSupply) * 100) : 0;
+                              return (
+                                <tr key={fc.skill} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                  <td style={{ padding: '12px 12px', fontWeight: 700 }}>{fc.skill}</td>
+                                  <td style={{ padding: '12px 12px' }}>{fc.currentSupply} specialists</td>
+                                  <td style={{ padding: '12px 12px', color: '#3B82F6', fontWeight: 700 }}>+{fc.pipelineCount} enrolled</td>
+                                  <td style={{ padding: '12px 12px', color: '#10B981', fontWeight: 800 }}>{fc.projectedSupply} specialists</td>
+                                  <td style={{ padding: '12px 12px', textAlign: 'right', color: '#10B981', fontWeight: 800 }}>
+                                    📈 +{pctGrowth}% growth
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -2426,6 +3140,26 @@ export default function BFSIDashboard() {
                     {zfResults.filter((emp: any) => emp.status !== 'In-project').map((emp: any, idx: number) => {
                       const statusColor = emp.status === 'Available-Pool' ? COLORS.success : emp.status === 'Deallocating' ? COLORS.warning : COLORS.info;
 
+                      // Precompute 8 indicators for Workforce Intelligence Engine
+                      const zfSkills = emp.zfSkills || [];
+                      const queryText = zfQuery || '';
+                      
+                      const qLower = queryText.trim().toLowerCase();
+                      const matchedSkill = zfSkills.find((s: any) => 
+                        (s.skillName || '').toLowerCase().includes(qLower) || 
+                        qLower.includes((s.skillName || '').toLowerCase())
+                      ) || [...zfSkills].sort((a: any, b: any) => (b.capabilityScore || 0) - (a.capabilityScore || 0))[0];
+
+                      const capabilityScore = matchedSkill?.capabilityScore || 0;
+                      const skillConfidence = matchedSkill?.confidenceScore || 0;
+                      const freshnessScore = matchedSkill?.freshnessScore || 0;
+                      const skillName = matchedSkill?.skillName || emp.primary_skill || 'Testing';
+
+                      const projectStrength = getProjectStrength(emp.project_name || '', emp.customer || '', skillName);
+                      const certStrength = getCertificationStrength(emp.certifications || [], skillName);
+                      const domainMatch = getDomainMatch(emp);
+                      const recommendation = getRecommendation(capabilityScore, skillName);
+
                       // Split reasons by source group
                       const lobReasons    = (emp.zfReasons || []).filter((r: any) => r.source === 'Excel');
                       const zenSkills     = (emp.zfReasons || []).filter((r: any) => r.source === 'Zen Matrix → Skills');
@@ -2479,6 +3213,47 @@ export default function BFSIDashboard() {
 
                           <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
 
+                            {/* ── Workforce Intelligence Engine Metrics ── */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, padding: '10px 12px', background: dark ? 'rgba(236,72,153,0.04)' : '#fff5f7', borderRadius: 12, border: `1px solid ${dark ? 'rgba(236,72,153,0.1)' : '#ffd2dc'}`, fontSize: 11 }}>
+                              <div style={{ textAlign: 'center' }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Capability Score</div>
+                                <div style={{ fontWeight: 900, color: '#ec4899', fontSize: 13, marginTop: 2 }}>{capabilityScore}%</div>
+                              </div>
+                              <div style={{ textAlign: 'center' }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Skill Confidence</div>
+                                <div style={{ fontWeight: 900, color: '#3b82f6', fontSize: 13, marginTop: 2 }}>{skillConfidence}%</div>
+                              </div>
+                              <div style={{ textAlign: 'center' }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Freshness Score</div>
+                                <div style={{ fontWeight: 900, color: '#10b981', fontSize: 13, marginTop: 2 }}>{freshnessScore}%</div>
+                              </div>
+                              <div style={{ textAlign: 'center', borderTop: `1px solid ${dark ? 'rgba(255,255,255,0.06)' : '#e2e8f0'}`, paddingTop: 6, marginTop: 4 }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Proj Strength</div>
+                                <div style={{ fontWeight: 800, color: projectStrength === 'High' ? '#10b981' : projectStrength === 'Medium' ? '#f59e0b' : '#ef4444', fontSize: 11, marginTop: 2 }}>{projectStrength}</div>
+                              </div>
+                              <div style={{ textAlign: 'center', borderTop: `1px solid ${dark ? 'rgba(255,255,255,0.06)' : '#e2e8f0'}`, paddingTop: 6, marginTop: 4 }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Cert Strength</div>
+                                <div style={{ fontWeight: 800, color: certStrength === 'High' ? '#10b981' : certStrength === 'Low' ? '#f59e0b' : T.sub, fontSize: 11, marginTop: 2 }}>{certStrength}</div>
+                              </div>
+                              <div style={{ textAlign: 'center', borderTop: `1px solid ${dark ? 'rgba(255,255,255,0.06)' : '#e2e8f0'}`, paddingTop: 6, marginTop: 4 }}>
+                                <div style={{ color: T.sub, fontSize: 9 }}>Domain Match</div>
+                                <div style={{ fontWeight: 800, color: domainMatch === 'Yes' ? '#10b981' : '#ef4444', fontSize: 11, marginTop: 2 }}>{domainMatch}</div>
+                              </div>
+                            </div>
+
+                            {/* Availability & Recommendation */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11, padding: '8px 12px', background: dark ? 'rgba(255,255,255,0.02)' : '#f8fafc', borderRadius: 8, border: `1px solid ${T.bdr}` }}>
+                              <div>
+                                <span style={{ color: T.sub }}>Availability: </span>
+                                <strong style={{ color: emp.status === 'Available-Pool' ? '#10b981' : '#f59e0b' }}>
+                                  {emp.status === 'Available-Pool' ? `Available (Bench: ${emp.aging_days || 0} days)` : `Deallocating (${emp.aging_days || 0} days)`}
+                                </strong>
+                              </div>
+                              <div style={{ color: COLORS.purple, fontWeight: 700, fontStyle: 'italic', borderTop: `1px solid ${dark ? 'rgba(255,255,255,0.05)' : '#e2e8f0'}`, paddingTop: 6, marginTop: 2 }}>
+                                {recommendation}
+                              </div>
+                            </div>
+
                             {/* ── ZEN MATRIX DATA ── */}
                             {hasZenData ? (
                               <div style={{ borderRadius: 12, border: `1px solid #10b98120`, background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', padding: '10px 12px' }}>
@@ -2529,25 +3304,79 @@ export default function BFSIDashboard() {
                           </div>
 
                           {/* ── FOOTER ACTIONS ── */}
-                          <div style={{ padding: '10px 16px', borderTop: `1px solid ${T.bdr}`, display: 'flex', gap: 8 }}>
-                            <button
-                              onClick={async () => {
-                                try {
-                                  const res = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`);
-                                  const skills = res.ok ? await res.json() : [];
-                                  setSkillMatrixModal({ employee: emp, skills });
-                                } catch { setSkillMatrixModal({ employee: emp, skills: [] }); }
-                              }}
-                              style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                            >
-                              <GraduationCap size={14} /> Zen Matrix
-                            </button>
-                            <button
-                              onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
-                              style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#f1f5f9', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
-                            >
-                              Profile
-                            </button>
+                          <div style={{ padding: '10px 16px', borderTop: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    const res = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`);
+                                    const skills = res.ok ? await res.json() : [];
+                                    setSkillMatrixModal({ employee: emp, skills });
+                                  } catch { setSkillMatrixModal({ employee: emp, skills: [] }); }
+                                }}
+                                style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                              >
+                                <GraduationCap size={14} /> Zen Matrix
+                              </button>
+                              <button
+                                onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
+                                style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#f1f5f9', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
+                              >
+                                Profile
+                              </button>
+                            </div>
+
+                            {/* Instant Allocation Dropdown & Button */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderTop: `1px dashed ${T.bdr}`, paddingTop: 10 }}>
+                              <select
+                                value={cardSelectedRoleMap[emp.employee_id] || selectedSRF?.role_id || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setCardSelectedRoleMap(prev => ({ ...prev, [emp.employee_id]: val }));
+                                }}
+                                style={{
+                                  flex: 1,
+                                  padding: '8px 10px',
+                                  borderRadius: 9,
+                                  border: `1px solid ${T.bdr}`,
+                                  background: dark ? '#1e293b' : '#fff',
+                                  color: T.text,
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                <option value="">Select SRF / Role...</option>
+                                {roles.filter(r => r.status === 'Open').map(r => (
+                                  <option key={r.role_id} value={r.role_id}>
+                                    {r.role_title} ({r.client_name})
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                onClick={() => {
+                                  const roleId = cardSelectedRoleMap[emp.employee_id] || selectedSRF?.role_id;
+                                  const targetRole = roles.find(r => r.role_id === roleId);
+                                  if (!targetRole) {
+                                    toast.error('Please select an open role first.');
+                                    return;
+                                  }
+                                  handlePerformAllocation(emp, 'assign', '', targetRole);
+                                }}
+                                style={{
+                                  padding: '9px 12px',
+                                  background: 'linear-gradient(135deg,#3b82f6,#2563eb)',
+                                  color: '#fff',
+                                  borderRadius: 9,
+                                  fontSize: 12,
+                                  fontWeight: 900,
+                                  border: 'none',
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap'
+                                }}
+                              >
+                                Allocate
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -2762,6 +3591,11 @@ export default function BFSIDashboard() {
               
               {/* Action Buttons */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                {/* BFSI Pool count badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.25)', border: '0.5px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '6px 12px', fontSize: 12, color: '#fff' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f6c90e', flexShrink: 0 }} />
+                  BFSI Pool · {(matchResults.matches || []).filter((e: any) => (e.matchSource || 'BFSI Data') === 'BFSI Data' || e.status === 'Available-Pool').length} matched
+                </div>
                 <button
                   onClick={() => setShowTopRank(!showTopRank)}
                   style={{ 
@@ -2797,79 +3631,6 @@ export default function BFSIDashboard() {
 
             {/* Content - Scrollable */}
             <div style={{ flex: 1, overflowY: 'auto', padding: 32 }}>
-              
-              {/* Compute live counts — total pool supply vs zen matrix coverage */}
-              {(() => {
-                const allSkillData = matchResults.allSkillMatrixData || {};
-                const poolIds = workforce
-                  .filter(w => w.status === 'Available-Pool' || w.status === 'Deallocating' ||
-                    (w.status === 'In-project' && !!(w as any).deallocation_date))
-                  .map(w => w.employee_id);
-                const withZenMatrix = poolIds.filter(id => {
-                  const skills = allSkillData[id] || allSkillData[String(id)] ||
-                    allSkillData[String(id).replace(/^0+/, '')] || [];
-                  return (skills as any[]).length > 0;
-                }).length;
-                matchResults._withZenMatrix = withZenMatrix;
-                const liveCounts = { excel: 0, matrix: 0, both: 0 };
-                for (const emp of matchResults.matches) {
-                  const src = (emp as any).matchSource || 'BFSI Data';
-                  if (src === 'Both Sources') liveCounts.both++;
-                  else if (src === 'Zen Matrix Only') liveCounts.matrix++;
-                  else liveCounts.excel++;
-                }
-                matchResults._liveCounts = liveCounts;
-                return null;
-              })()}
-
-              {/* Source Breakdown — 2 filter cards only */}
-              <div style={{ marginBottom: 32 }}>
-                <h4 style={{ margin: '0 0 16px', fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <BarChart3 size={22} color={COLORS.success} />
-                  Source Breakdown
-                  <span style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginLeft: 4 }}>— click a card to filter</span>
-                </h4>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-                  <div
-                    onClick={() => setSourceFilter(sourceFilter === 'excel' ? 'all' : 'excel')}
-                    style={{
-                      background: sourceFilter === 'excel' ? 'linear-gradient(135deg, rgba(245,158,11,0.2), rgba(249,115,22,0.1))' : 'linear-gradient(135deg, rgba(245,158,11,0.1), rgba(249,115,22,0.05))',
-                      borderRadius: 14, padding: '24px',
-                      border: `2px solid ${sourceFilter === 'excel' ? COLORS.warning : COLORS.warning + '44'}`,
-                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
-                      transform: sourceFilter === 'excel' ? 'scale(1.03)' : 'scale(1)'
-                    }}
-                    className="hover-card"
-                  >
-                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.warning, lineHeight: 1, marginBottom: 8 }}>{matchResults.matches.length}</div>
-                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟡 BFSI Data</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>All matched from BFSI pool data</div>
-                    {sourceFilter === 'excel'
-                      ? <div style={{ fontSize: 10, color: COLORS.warning, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>
-                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
-                  </div>
-                  <div
-                    onClick={() => setSourceFilter(sourceFilter === 'matrix' ? 'all' : 'matrix')}
-                    style={{
-                      background: sourceFilter === 'matrix' ? 'linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.1))' : 'linear-gradient(135deg, rgba(16,185,129,0.1), rgba(6,182,212,0.05))',
-                      borderRadius: 14, padding: '24px',
-                      border: `2px solid ${sourceFilter === 'matrix' ? COLORS.success : COLORS.success + '44'}`,
-                      textAlign: 'center', transition: '0.3s', cursor: 'pointer',
-                      transform: sourceFilter === 'matrix' ? 'scale(1.03)' : 'scale(1)'
-                    }}
-                    className="hover-card"
-                  >
-                    <div style={{ fontSize: 48, fontWeight: 800, color: COLORS.success, lineHeight: 1, marginBottom: 8 }}>
-                      {(matchResults._liveCounts?.matrix ?? 0) + (matchResults._liveCounts?.both ?? 0)}
-                    </div>
-                    <div style={{ fontSize: 13, fontWeight: 900, color: T.text, textTransform: 'uppercase', marginBottom: 4 }}>🟢 Zen Matrix Resume</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Matched with Zen Matrix skills verified</div>
-                    {sourceFilter === 'matrix'
-                      ? <div style={{ fontSize: 10, color: COLORS.success, marginTop: 8, fontWeight: 700 }}>✓ FILTERED</div>
-                      : <div style={{ fontSize: 10, color: T.sub, marginTop: 8 }}>Click to filter</div>}
-                  </div>
-                </div>
-              </div>
 
               {/* Matched Employees */}
               <div>
@@ -2877,28 +3638,12 @@ export default function BFSIDashboard() {
                   <h4 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
                     <Users size={22} color={COLORS.success} />
                     Matched Employees
-                    {sourceFilter !== 'all' && (
-                      <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, background: dark ? 'rgba(255,255,255,0.08)' : '#f1f5f9', padding: '3px 10px', borderRadius: 8 }}>
-                        Filtered: {sourceFilter === 'excel' ? 'BFSI Data' : sourceFilter === 'matrix' ? 'Has Zen Matrix' : 'Both Sources'}
-                        <span
-                          onClick={() => setSourceFilter('all')}
-                          style={{ marginLeft: 6, cursor: 'pointer', color: COLORS.danger, fontWeight: 900 }}
-                        >✕</span>
-                      </span>
-                    )}
                   </h4>
                   <div style={{ display: 'flex', gap: 12 }}>
                     <button
                       onClick={() => {
-                        // Build CSV from current filtered matches
-                        const filtered = matchResults.matches.filter((emp: BFSIEmployee) => {
-                          if (sourceFilter === 'all') return true;
-                          const src = (emp as any).matchSource || 'BFSI Data';
-                          if (sourceFilter === 'excel')  return src === 'BFSI Data';
-                          if (sourceFilter === 'matrix') return src === 'Zen Matrix Only';
-                          if (sourceFilter === 'both')   return src === 'Both Sources';
-                          return true;
-                        });
+                        // Build CSV from all matches
+                        const filtered = matchResults.matches;
 
                         const headers = ['Rank', 'Employee ID', 'Employee Name', 'Primary Skill', 'Matched Skill', 'Location', 'Band/Grade', 'Source', 'Match Score'];
                         const rows = filtered.map((emp: BFSIEmployee, idx: number) => {
@@ -2939,104 +3684,128 @@ export default function BFSIDashboard() {
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
-                  {matchResults.matches.slice(0, showTopRank ? 5 : (showAllMatches ? undefined : 10)).filter((emp: BFSIEmployee) => {
-                    // Use matchSource — single source of truth computed during matching
-                    if (sourceFilter === 'all') return true;
-                    const src = (emp as any).matchSource || 'BFSI Data';
-                    if (sourceFilter === 'excel')  return src === 'BFSI Data';
-                    // 'matrix' filter = any employee with Zen Matrix data (both "Zen Matrix Only" AND "Both Sources")
-                    if (sourceFilter === 'matrix') return src === 'Zen Matrix Only' || src === 'Both Sources';
-                    if (sourceFilter === 'both')   return src === 'Both Sources';
-                    return true;
-                  }).map((emp: BFSIEmployee, idx: number) => {
-                    // Badge from matchSource — no re-computation, always consistent
-                    const src = (emp as any).matchSource || 'BFSI Data';
-                    const sourceType = src === 'Both Sources' ? 'both' : src === 'Zen Matrix Only' ? 'matrix' : 'excel';
-                    const badgeColor = sourceType === 'both' ? COLORS.success : sourceType === 'matrix' ? COLORS.info : COLORS.warning;
-                    const badgeLabel = sourceType === 'both' ? 'Both' : sourceType === 'matrix' ? 'Matrix' : 'BFSI Data';
-                    
+                  {matchResults.matches.slice(0, showTopRank ? 5 : (showAllMatches ? undefined : 10)).map((emp: BFSIEmployee, idx: number) => {
+                    const empId = String(emp.employee_id);
+                    const score = Math.round((emp as any).matchScore || 0);
+                    const pct = Math.min(100, score);
+                    const accent = matchBorderColor(pct);
+                    const mColor = matchPctColor(pct);
+                    const skillsArr = (matchResults.allSkillMatrixData?.[emp.employee_id]
+                      || matchResults.allSkillMatrixData?.[String(emp.employee_id)]
+                      || matchResults.allSkillMatrixData?.[String(emp.employee_id).replace(/^0+/, '')]
+                      || []) as any[];
+                    const bd = buildMatchBreakdown(emp, matchResults.role, skillsArr);
+                    const isPool = emp.status === 'Available-Pool' || ((emp as any).matchSource || 'BFSI Data') === 'BFSI Data';
+                    const breakdownOpen = matchPanel?.id === empId && matchPanel?.type === 'breakdown';
+                    const togglePanel = (type: 'breakdown') => setMatchPanel(p => (p?.id === empId && p?.type === type) ? null : { id: empId, type });
+                    const darkerBg = dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.04)';
+                    const empGrade = (emp as any).grade || (emp as any).band || '—';
+                    const empStatus = localStatus[empId]; // 'allocated' | 'reserved' | undefined
+                    const allocate = () => (emp as any).rank === 1 ? runAllocation(emp, 'assign') : setOverridePrompt({ employee: emp, type: 'assign' });
+                    const reserve = () => (emp as any).rank === 1 ? runAllocation(emp, 'reserve') : setOverridePrompt({ employee: emp, type: 'reserve' });
+
                     return (
-                      <div key={idx} style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, borderTop: `1px solid ${badgeColor}44`, borderRight: `1px solid ${badgeColor}44`, borderBottom: `1px solid ${badgeColor}44`, borderLeft: `4px solid ${badgeColor}`, padding: '16px', transition: '0.3s', position: 'relative' }} className="hover-card">
+                      <div key={empId} style={{ position: 'relative' }}>
+                        {/* ── CARD ── */}
+                        <div style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, border: `1px solid ${T.bdr}`, borderLeft: `3px solid ${accent}`, overflow: 'hidden', position: 'relative' }} className="hover-card">
+                          {showTopRank && (
+                            <div style={{ position: 'absolute', top: -8, left: -8, width: 28, height: 28, borderRadius: '50%', background: idx < 3 ? 'linear-gradient(135deg,#ffd700,#ffed4e)' : 'linear-gradient(135deg,#6b7280,#9ca3af)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 900, fontSize: 12, border: '2px solid #fff', boxShadow: '0 2px 8px rgba(0,0,0,0.2)', zIndex: 2 }}>
+                              #{(emp as any).rank || idx + 1}
+                            </div>
+                          )}
 
-                        {/* Rank Badge */}
-                        {showTopRank && (
-                          <div style={{ position: 'absolute', top: -8, left: -8, width: 28, height: 28, borderRadius: '50%', background: idx < 3 ? 'linear-gradient(135deg,#ffd700,#ffed4e)' : 'linear-gradient(135deg,#6b7280,#9ca3af)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 900, fontSize: 12, border: '2px solid #fff', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-                            #{(emp as any).rank || idx + 1}
-                          </div>
-                        )}
-
-                        {/* ── Header: Name + Score + Status ── */}
-                        <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'flex-start' }}>
-                          <div style={{ width: 44, height: 44, borderRadius: 10, background: `linear-gradient(135deg,${badgeColor},${badgeColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 18, flexShrink: 0 }}>
-                            {(emp.employee_name || '?')[0]}
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontWeight: 900, fontSize: 14, color: T.text, marginBottom: 2 }}>{emp.employee_name}</div>
-                            <div style={{ fontSize: 11, color: T.sub }}>
-                              {formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'} · {emp.location || '—'}
+                          {/* CARD HEADER */}
+                          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '14px', background: darkerBg }}>
+                            <div style={{ width: 44, height: 44, borderRadius: 10, background: `linear-gradient(135deg,${accent},${accent}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 18, flexShrink: 0 }}>
+                              {(emp.employee_name || '?')[0]}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                                <span style={{ fontWeight: 900, fontSize: 14, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp.employee_name}</span>
+                                {isPool && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Pool</span>}
+                                {empStatus === 'allocated' && <span style={{ padding: '1px 7px', background: `${COLORS.success}22`, color: COLORS.success, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Allocated</span>}
+                                {empStatus === 'reserved' && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Reserved</span>}
+                              </div>
+                              <div style={{ fontSize: 11, color: T.sub }}>
+                                {formatZensarId(emp.employee_id)} · {empGrade} · {emp.location || '—'}
+                              </div>
+                            </div>
+                            <div onClick={() => togglePanel('breakdown')} style={{ textAlign: 'right', flexShrink: 0, cursor: 'pointer' }}>
+                              <div style={{ fontSize: 22, fontWeight: 900, color: mColor, lineHeight: 1 }}>{pct}%</div>
+                              <div style={{ fontSize: 9, color: T.sub }}>match score</div>
+                              <div style={{ fontSize: 10, color: COLORS.info, textDecoration: 'underline', marginTop: 2 }}>see breakdown</div>
                             </div>
                           </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                            {(emp as any).matchScore && (
-                              <div style={{ padding: '3px 10px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 900 }}>
-                                {(emp as any).matchScore} pts
-                              </div>
-                            )}
-                            <span style={{ padding: '2px 8px', background: emp.status === 'Available-Pool' ? `${COLORS.success}18` : `${COLORS.warning}18`, color: emp.status === 'Available-Pool' ? COLORS.success : COLORS.warning, borderRadius: 6, fontSize: 10, fontWeight: 800 }}>
-                              {emp.status === 'Available-Pool' ? '🟢 Pool' : '🟡 Deallocating'}
-                            </span>
+
+                          {/* CARD BODY */}
+                          <div style={{ padding: '12px 14px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 12, flexWrap: 'wrap' }}>
+                              <span style={{ color: T.sub }}>Primary:</span>
+                              <strong style={{ color: T.text }}>{emp.primary_skill || '—'}</strong>
+                              {bd.verifiedLevel && <span style={{ padding: '1px 8px', background: `${COLORS.success}18`, color: COLORS.success, borderRadius: 5, fontSize: 10, fontWeight: 800 }}>✓ {bd.verifiedLevel}</span>}
+                            </div>
+                            <div style={{ fontSize: 11, color: T.sub, marginBottom: 10 }}>
+                              Aging: <strong style={{ color: T.text }}>{emp.aging_days || 0} days</strong>
+                              {emp.rmg_status && <> · RMG: <strong style={{ color: T.text }}>{emp.rmg_status}</strong></>}
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 10 }}>
+                              {[
+                                { label: 'Capability', v: Number((emp as any).capability_score ?? 0) },
+                                { label: 'Confidence', v: Number((emp as any).confidence_at_alloc ?? 0) },
+                                { label: 'Freshness', v: Number((emp as any).freshness_at_alloc ?? 0) },
+                              ].map(c => (
+                                <div key={c.label} style={{ textAlign: 'center', padding: '8px 4px', background: darkerBg, borderRadius: 8 }}>
+                                  <div style={{ fontSize: 15, fontWeight: 900, color: scoreCellColor(c.v) }}>{c.v}%</div>
+                                  <div style={{ fontSize: 9, color: T.sub, marginTop: 2 }}>{c.label}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: 11, color: T.sub, fontStyle: 'italic' }}>{(emp as any).recommendation || 'No recommendation'}</div>
+                          </div>
+
+                          {/* CARD FOOTER */}
+                          <div style={{ display: 'flex', gap: 8, padding: '12px 14px', background: darkerBg }}>
+                            <button onClick={() => handleViewDetails(emp)} style={{ flex: 2, padding: '9px 8px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 9, fontSize: 11, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}>View Details</button>
+                            <button onClick={allocate} disabled={empStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 900, border: 'none', cursor: empStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: empStatus === 'allocated' ? 0.7 : 1 }}>{empStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
+                            <button onClick={reserve} disabled={empStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 900, border: 'none', cursor: empStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: empStatus === 'reserved' ? 0.7 : 1 }}>{empStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
                           </div>
                         </div>
 
-                        {/* ── BFSI Data row ── */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', padding: '8px 12px', background: dark ? 'rgba(59,130,246,0.06)' : '#eff6ff', borderRadius: 8, marginBottom: 8, fontSize: 11 }}>
-                          <div><span style={{ color: T.sub }}>Primary Skill: </span><span style={{ fontWeight: 700, color: T.text }}>{emp.primary_skill || '—'}</span></div>
-                          <div><span style={{ color: T.sub }}>Aging: </span><span style={{ fontWeight: 700, color: (emp.aging_days || 0) > 60 ? COLORS.success : T.text }}>{emp.aging_days || 0} days {(emp.aging_days || 0) > 60 ? '⭐' : ''}</span></div>
-                          {emp.rmg_status && <div style={{ gridColumn: '1/-1' }}><span style={{ color: T.sub }}>RMG: </span><span style={{ fontWeight: 700, color: T.text }}>{emp.rmg_status}</span></div>}
-                        </div>
-
-                        {/* ── Zen Matrix matched skills ── */}
-                        {(emp as any).matchedZenSkills?.length > 0 && (
-                          <div style={{ padding: '8px 12px', background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', borderRadius: 8, marginBottom: 8 }}>
-                            <div style={{ fontSize: 10, fontWeight: 800, color: COLORS.success, marginBottom: 4 }}>🎓 Zen Matrix Skills Matched:</div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                              {[...new Set((emp as any).matchedZenSkills as string[])].map((s: string, i: number) => (
-                                <span key={i} style={{ fontSize: 11, padding: '2px 8px', background: `${COLORS.success}18`, color: COLORS.success, borderRadius: 5, fontWeight: 700 }}>{s}</span>
+                        {/* ── MATCH BREAKDOWN PANEL ── */}
+                        {breakdownOpen && (
+                          <div style={{ marginTop: 8, padding: 16, background: dark ? 'rgba(15,23,42,0.6)' : '#fff', border: `1px solid ${accent}`, borderRadius: 12 }}>
+                            <div style={{ fontSize: 13, fontWeight: 900, color: T.text, marginBottom: 14 }}>Match breakdown — {emp.employee_name} vs {matchResults.role.role_title}</div>
+                            {bd.rows.map(r => {
+                              const tagColor = r.pct >= 80 ? COLORS.success : r.pct >= 40 ? COLORS.warning : COLORS.danger;
+                              const tagLabel = r.pct >= 80 ? (r.key === 'verified' ? '✓ Verified' : '✓ Match') : r.pct >= 40 ? 'Partial' : (r.key === 'verified' ? 'None' : r.key === 'certs' ? 'None' : 'Missing');
+                              return (
+                                <div key={r.key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                                  <div style={{ width: 130, fontSize: 11, color: T.sub, flexShrink: 0 }}>{r.label}</div>
+                                  <div style={{ flex: 1, height: 8, background: dark ? 'rgba(255,255,255,0.08)' : '#e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
+                                    <div style={{ height: '100%', width: `${r.pct}%`, background: tagColor, borderRadius: 6, transition: 'width 0.4s' }} />
+                                  </div>
+                                  <div style={{ width: 38, textAlign: 'right', fontSize: 11, fontWeight: 800, color: T.text, flexShrink: 0 }}>{r.pct}%</div>
+                                  <div style={{ width: 78, fontSize: 10, fontWeight: 800, color: tagColor, flexShrink: 0 }}>{tagLabel}</div>
+                                </div>
+                              );
+                            })}
+                            <div style={{ marginTop: 16 }}>
+                              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
+                              {bd.gaining.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>—</div>}
+                              {bd.gaining.map((g, i) => (
+                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 900 }}>✓</span>{g}</div>
+                              ))}
+                            </div>
+                            <div style={{ marginTop: 12 }}>
+                              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
+                              {bd.missing.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>Nothing — full match!</div>}
+                              {bd.missing.map((m, i) => (
+                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 900 }}>✕</span>{m}</div>
                               ))}
                             </div>
                           </div>
                         )}
 
-                        {/* ── Match reasons ── */}
-                        {showTopRank && (emp as any).matchReasons && (
-                          <div style={{ fontSize: 10, color: COLORS.success, marginBottom: 8, fontWeight: 600, padding: '4px 8px', background: `${COLORS.success}10`, borderRadius: 6 }}>
-                            {(emp as any).matchReasons}
-                          </div>
-                        )}
-
-                        {/* ── Actions ── */}
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <button
-                            onClick={async () => {
-                              try {
-                                const skillsResponse = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`);
-                                const skills = skillsResponse.ok ? await skillsResponse.json() : [];
-                                setSkillMatrixModal({ employee: emp, skills });
-                              } catch {
-                                setSkillMatrixModal({ employee: emp, skills: [] });
-                              }
-                            }}
-                            style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                          >
-                            <GraduationCap size={14} /> Zen Matrix
-                          </button>
-                          <button
-                            onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
-                            style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
-                          >
-                            Profile
-                          </button>
-                        </div>
                       </div>
                     );
                   })}
@@ -3069,6 +3838,124 @@ export default function BFSIDashboard() {
           </div>
         </div>
       )}
+
+      {/* ── VIEW DETAILS MODAL ── */}
+      {detailModal && (() => {
+        const dm = detailModal;
+        const dmId = String(dm.employee_id);
+        const role = matchResults?.role;
+        // Prefer freshly-fetched modal skills; fall back to the batch match data.
+        const batchSkills = (matchResults?.allSkillMatrixData?.[dm.employee_id]
+          || matchResults?.allSkillMatrixData?.[String(dm.employee_id)]
+          || matchResults?.allSkillMatrixData?.[String(dm.employee_id).replace(/^0+/, '')]
+          || []) as any[];
+        const dmSkills = (modalSkills && modalSkills.length > 0) ? modalSkills : batchSkills;
+        const bd = buildMatchBreakdown(dm, role, dmSkills);
+        const hasVerified = (s: any) => {
+          const v = s.verifiedBadgeLevel ?? s.verified_badge_level;
+          return v !== null && v !== undefined && v !== '' && v !== 'null';
+        };
+        const verifiedSkills = dmSkills.filter(hasVerified);
+        const allSkillNames = [...new Set(dmSkills.map((s: any) => s.skillName || s.skill_name).filter(Boolean))] as string[];
+        const dmGrade = (dm as any).grade || (dm as any).band || '—';
+        const gIdx = GRADE_LADDER.indexOf(String(dmGrade).toUpperCase());
+        const dmPath = gIdx >= 4 ? 'Expert' : gIdx >= 2 ? 'Intermediate' : gIdx >= 0 ? 'Beginner' : '—';
+        const dmStatus = localStatus[dmId];
+        const accent = matchBorderColor(Math.min(100, Math.round((dm as any).matchScore || 0)));
+        const dmAllocate = () => (dm as any).rank === 1 ? runAllocation(dm, 'assign') : (setDetailModal(null), setOverridePrompt({ employee: dm, type: 'assign' }));
+        const dmReserve = () => (dm as any).rank === 1 ? runAllocation(dm, 'reserve') : (setDetailModal(null), setOverridePrompt({ employee: dm, type: 'reserve' }));
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.78)', zIndex: 3500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={() => setDetailModal(null)}>
+            <div onClick={e => e.stopPropagation()} style={{ width: 560, maxWidth: '90vw', maxHeight: '80vh', overflowY: 'auto', background: dark ? '#1a1f2e' : '#ffffff', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.1)', boxShadow: '0 40px 100px rgba(0,0,0,0.5)', padding: 24 }}>
+              {/* Modal header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 10, background: `linear-gradient(135deg,${accent},${accent}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 18, flexShrink: 0 }}>
+                  {(dm.employee_name || '?')[0]}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 900, fontSize: 16, color: T.text }}>{dm.employee_name}</div>
+                  <div style={{ fontSize: 11, color: T.sub }}>{formatZensarId(dm.employee_id)} · {dmGrade}</div>
+                </div>
+                <button onClick={() => setDetailModal(null)} style={{ background: dark ? 'rgba(255,255,255,0.1)' : '#f1f5f9', border: 'none', color: T.text, width: 36, height: 36, borderRadius: 10, cursor: 'pointer', fontSize: 18, flexShrink: 0 }}>✕</button>
+              </div>
+
+              {/* Section 1 — Employee Info */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 16px', marginBottom: 18 }}>
+                {[
+                  { label: 'ID', value: formatZensarId(dm.employee_id) },
+                  { label: 'Grade · Path', value: `${dmGrade}${dmPath !== '—' ? ' · ' + dmPath : ''}` },
+                  { label: 'Location', value: dm.location || '—' },
+                  { label: 'IT Experience', value: `${dm.experience_years ?? '—'} Years` },
+                  { label: 'RMG Status', value: dm.rmg_status || '—' },
+                  { label: 'Days on Bench', value: `${dm.aging_days || 0} days` },
+                  { label: 'Department', value: (dm as any).department || (dm as any).vertical || (dm as any).practice_name || '—' },
+                  { label: 'Zensar Tenure', value: (dm as any).zensar_tenure != null ? `${(dm as any).zensar_tenure} Years` : '—' },
+                ].map(f => (
+                  <div key={f.label} style={{ display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ fontSize: 10, textTransform: 'uppercase', color: T.sub, fontWeight: 700, letterSpacing: '0.05em', marginBottom: 2 }}>{f.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{f.value}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Section 2 — Verified Skills */}
+              <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, marginBottom: 6, textTransform: 'uppercase' }}>Verified Skills</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 18 }}>
+                {verifiedSkills.length === 0 && <span style={{ fontSize: 11, color: T.sub }}>No verified badges yet — complete ZenAssess to boost score</span>}
+                {verifiedSkills.map((s: any, i: number) => (
+                  <span key={i} style={{ fontSize: 11, padding: '3px 10px', background: `${COLORS.success}18`, color: COLORS.success, borderRadius: 6, fontWeight: 800 }}>✓ {s.skillName || s.skill_name} — {s.verifiedBadgeLevel || s.verified_badge_level}</span>
+                ))}
+              </div>
+
+              {/* Section 3 — All Skills */}
+              <div style={{ fontSize: 11, fontWeight: 900, color: T.sub, marginBottom: 6, textTransform: 'uppercase' }}>All Skills</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 18 }}>
+                {allSkillNames.length === 0 && <span style={{ fontSize: 11, color: T.sub }}>No skill data</span>}
+                {allSkillNames.map((s: string, i: number) => (
+                  <span key={i} style={{ fontSize: 11, padding: '3px 10px', background: dark ? 'rgba(255,255,255,0.06)' : '#f1f5f9', color: T.text, borderRadius: 6, fontWeight: 600 }}>{s}</span>
+                ))}
+              </div>
+
+              {/* Section 4 — Match Breakdown */}
+              <div style={{ fontSize: 11, fontWeight: 900, color: T.sub, marginBottom: 10, textTransform: 'uppercase' }}>Match Breakdown</div>
+              {bd.rows.map(r => {
+                const tagColor = r.pct >= 80 ? COLORS.success : r.pct >= 40 ? COLORS.warning : COLORS.danger;
+                const tagLabel = r.pct >= 80 ? (r.key === 'verified' ? '✓ Verified' : '✓ Match') : r.pct >= 40 ? 'Partial' : (r.key === 'verified' || r.key === 'certs' ? 'None' : 'Missing');
+                return (
+                  <div key={r.key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                    <div style={{ width: 120, fontSize: 11, color: T.sub, flexShrink: 0 }}>{r.label}</div>
+                    <div style={{ flex: 1, height: 8, background: dark ? 'rgba(255,255,255,0.08)' : '#e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${r.pct}%`, background: tagColor, borderRadius: 6 }} />
+                    </div>
+                    <div style={{ width: 38, textAlign: 'right', fontSize: 11, fontWeight: 800, color: T.text, flexShrink: 0 }}>{r.pct}%</div>
+                    <div style={{ width: 74, fontSize: 10, fontWeight: 800, color: tagColor, flexShrink: 0 }}>{tagLabel}</div>
+                  </div>
+                );
+              })}
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
+                {bd.gaining.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>—</div>}
+                {bd.gaining.map((g, i) => (
+                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 900 }}>✓</span>{g}</div>
+                ))}
+              </div>
+              <div style={{ marginTop: 12, marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
+                {bd.missing.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>Nothing — full match!</div>}
+                {bd.missing.map((m, i) => (
+                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 900 }}>✕</span>{m}</div>
+                ))}
+              </div>
+
+              {/* Modal footer */}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={dmAllocate} disabled={dmStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 900, border: 'none', cursor: dmStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'allocated' ? 0.7 : 1 }}>{dmStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
+                <button onClick={dmReserve} disabled={dmStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 900, border: 'none', cursor: dmStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'reserved' ? 0.7 : 1 }}>{dmStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── JD Modal ── */}
       {jdModal && (
@@ -3149,6 +4036,101 @@ export default function BFSIDashboard() {
                   })}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Admin Override Reason Modal ── */}
+      {overridePrompt && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
+          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 11, fontWeight: 900, color: '#EF4444', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <AlertTriangle size={14} /> Admin Override Alert
+            </div>
+            <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>Reason for Non-Rank #1 Allocation</h3>
+            <p style={{ fontSize: 12, color: T.sub, lineHeight: 1.5, marginBottom: 16 }}>
+              You are allocating <strong>{overridePrompt.employee.employee_name}</strong>, who is not the top-ranked candidate for this role. Zensar governance requires documenting a justification for this override.
+            </p>
+            <textarea
+              value={overrideReasonInput}
+              onChange={e => setOverrideReasonInput(e.target.value)}
+              rows={3}
+              placeholder="E.g., Candidate has domain knowledge in client's specific ledger system, or is requested by PM..."
+              style={{ width: '100%', padding: 12, borderRadius: 10, background: T.bg, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, boxSizing: 'border-box', marginBottom: 20 }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => { setOverridePrompt(null); setOverrideReasonInput(''); }}
+                style={{ padding: '8px 16px', borderRadius: 8, background: 'none', border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => runAllocation(overridePrompt.employee, overridePrompt.type, overrideReasonInput)}
+                disabled={!overrideReasonInput.trim() || isAllocating}
+                style={{ padding: '8px 16px', borderRadius: 8, background: '#EF4444', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                {isAllocating ? 'Allocating...' : 'Confirm Allocation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Log Outcome Modal ── */}
+      {outcomeModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
+          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <CheckCircle size={14} /> Log Project Outcome & Release
+            </div>
+            <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>
+              Complete Allocation for {outcomeModal.assignment.employee_name}
+            </h3>
+            <p style={{ fontSize: 12, color: T.sub, lineHeight: 1.5, marginBottom: 16 }}>
+              Please select the final project outcome status for role <strong>{outcomeModal.assignment.role_title}</strong> (Client: {outcomeModal.assignment.client_name}). This will release the employee back to the pool and adjust their skill metrics.
+            </p>
+
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 8 }}>Outcome Status</label>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+              <button
+                onClick={() => setOutcomeStatusInput('Success')}
+                style={{ flex: 1, padding: '10px', borderRadius: 8, border: outcomeStatusInput === 'Success' ? `2px solid #10B981` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Success' ? 'rgba(16,185,129,0.1)' : 'transparent', color: outcomeStatusInput === 'Success' ? '#10B981' : T.sub, fontWeight: 700, cursor: 'pointer' }}
+              >
+                🟢 Project Success (+10 Skill Confidence)
+              </button>
+              <button
+                onClick={() => setOutcomeStatusInput('Failure')}
+                style={{ flex: 1, padding: '10px', borderRadius: 8, border: outcomeStatusInput === 'Failure' ? `2px solid #EF4444` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Failure' ? 'rgba(239,68,68,0.1)' : 'transparent', color: outcomeStatusInput === 'Failure' ? '#EF4444' : T.sub, fontWeight: 700, cursor: 'pointer' }}
+              >
+                🔴 Project Failure (-15 Skill Penalty)
+              </button>
+            </div>
+
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 8 }}>Manager & Client Feedback / Notes</label>
+            <textarea
+              value={outcomeNotesInput}
+              onChange={e => setOutcomeNotesInput(e.target.value)}
+              rows={3}
+              placeholder="E.g., Delivered all sprint deliverables successfully. Client appreciated prompt engineering work..."
+              style={{ width: '100%', padding: 12, borderRadius: 10, background: T.bg, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, boxSizing: 'border-box', marginBottom: 20 }}
+            />
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => { setOutcomeModal(null); setOutcomeNotesInput(''); }}
+                style={{ padding: '8px 16px', borderRadius: 8, background: 'none', border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRecordOutcome}
+                disabled={isRecordingOutcome}
+                style={{ padding: '8px 16px', borderRadius: 8, background: outcomeStatusInput === 'Success' ? '#10B981' : '#EF4444', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                {isRecordingOutcome ? 'Saving...' : 'Record Outcome & Release'}
+              </button>
             </div>
           </div>
         </div>

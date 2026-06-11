@@ -2,10 +2,12 @@
  * EmployeeDashboard.tsx — /employee/dashboard
  * First page employee sees after logging in or onboarding.
  */
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/lib/AppContext';
+import { apiGetSkills } from '@/lib/api';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload } from 'lucide-react';
+import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck } from 'lucide-react';
 
 import { Radar } from 'react-chartjs-2';
 import {
@@ -29,8 +31,25 @@ export default function EmployeeDashboard({
   isPopup?: boolean; 
   onTabChange?: (tab: any) => void; 
 }) {
-  const { role } = useAuth();
+  const { role, employeeId } = useAuth();
   const navigate = useNavigate();
+
+  // ── Verified ZenAssess badges — always fetched fresh from the DB on mount ──
+  // (verified_badge_level only; never derived from self_rating or cache)
+  const [verifiedSkillBadges, setVerifiedSkillBadges] = useState<{ skill: string; level: string }[]>([]);
+  useEffect(() => {
+    if (!employeeId) return;
+    (async () => {
+      try {
+        const skills = await apiGetSkills(employeeId);
+        const verified = (skills || [])
+          .map((s: any) => ({ skill: s.skillName || s.skill_name, level: s.verifiedBadgeLevel || s.verified_badge_level }))
+          .filter((s: any) => s.skill && s.level);
+        setVerifiedSkillBadges(verified);
+      } catch { /* no verified badges available — section stays empty */ }
+    })();
+  }, [employeeId]);
+
   const { dark } = useDark();
   const T = mkTheme(dark);
   const appContext = useApp();
@@ -43,6 +62,36 @@ export default function EmployeeDashboard({
   if (isLoading) {
     return <ZensarLoader fullScreen label="Synchronizing Zensar IQ Cloud..." />;
   }
+  
+  // Handle admin users without employee data
+  if (!data?.user && role === 'admin') {
+    return (
+      <div style={{ minHeight: '100vh', background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20, padding: 40, textAlign: 'center' }}>
+        <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'rgba(59,130,246,0.1)', color: '#3B82F6', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+          <LayoutDashboard size={40} />
+        </div>
+        <h2 style={{ fontSize: 24, fontWeight: 900, color: T.text, margin: 0 }}>Admin Dashboard Access</h2>
+        <p style={{ color: T.sub, fontSize: 14, maxWidth: 400, lineHeight: 1.6 }}>
+          You are logged in as an administrator. Employee dashboards require an employee session.
+        </p>
+        <div style={{ display: 'flex', gap: 12, marginTop: 10 }}>
+          <button 
+            onClick={() => navigate('/admin')}
+            style={{ padding: '12px 24px', borderRadius: 12, background: '#3B82F6', color: '#fff', border: 'none', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+          >
+            <LayoutDashboard size={18} /> Go to Admin Dashboard
+          </button>
+          <button 
+            onClick={() => navigate('/login')}
+            style={{ padding: '12px 24px', borderRadius: 12, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+          >
+            <RefreshCw size={18} /> Login as Employee
+          </button>
+        </div>
+      </div>
+    );
+  }
+  
   if (!data?.user) {
     // If inside popup, show simpler error with option to close popup
     if (isPopup) {
@@ -72,8 +121,15 @@ export default function EmployeeDashboard({
         <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'rgba(239,68,68,0.1)', color: '#EF4444', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
           <AlertTriangle size={40} />
         </div>
-        <h2 style={{ fontSize: 24, fontWeight: 900, color: T.text, margin: 0 }}>Personnel Link Severed</h2>
-        <p style={{ color: T.sub, fontSize: 14, maxWidth: 400, lineHeight: 1.6 }}>We were unable to synchronize your professional digital twin with the Zensar IQ Cloud. This may be due to a session timeout or a temporary infrastructure disruption.</p>
+        <h2 style={{ fontSize: 24, fontWeight: 900, color: T.text, margin: 0 }}>Profile Synchronization Required</h2>
+        <p style={{ color: T.sub, fontSize: 14, maxWidth: 400, lineHeight: 1.6, textAlign: 'left' as const, display: 'inline-block' }}>
+          We were unable to retrieve the latest workforce profile information.<br /><br />
+          <strong>Possible Reasons:</strong><br />
+          • Session expired<br />
+          • Network interruption<br />
+          • Synchronization service unavailable<br /><br />
+          Please retry synchronization.
+        </p>
         <button 
           onClick={() => {
             localStorage.removeItem('skill_nav_session_id');
@@ -81,7 +137,7 @@ export default function EmployeeDashboard({
           }}
           style={{ padding: '12px 24px', borderRadius: 12, background: '#3B82F6', color: '#fff', border: 'none', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}
         >
-          <RefreshCw size={18} /> Re-establish Secure Session
+          <RefreshCw size={18} /> Retry Synchronization
         </button>
       </div>
     );
@@ -95,7 +151,18 @@ export default function EmployeeDashboard({
   const safeProjects = projects || [];
 
   const initials = (user.Name || 'Emp').substring(0,2).toUpperCase();
-  
+
+  // Derived identity fields for the compact profile card
+  const zid = user.zensar_id || user.ZensarID || user.EmployeeID || user.id || 'N/A';
+  const grade = user.grade || user.Grade || '—';
+  const gradePath = (() => {
+    const g = String(grade).toUpperCase();
+    if (g.startsWith('F')) return 'Beginner';
+    if (g.startsWith('E')) return 'Intermediate';
+    if (g.startsWith('D') || g.startsWith('C')) return 'Expert';
+    return '';
+  })();
+
   const scoreLabel = 
     overallScore < 31 ? 'Building Foundation' :
     overallScore < 51 ? 'Developing' :
@@ -133,38 +200,31 @@ export default function EmployeeDashboard({
       <div style={{ minHeight: '100vh', background: T.bg, color: T.text, padding: 'clamp(12px,3vw,24px) clamp(12px,3vw,24px) 80px', fontFamily: "'Inter', sans-serif" }}>
         <div style={{ maxWidth: 1100, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
           
-          {/* TOP SECTION — Hero Profile Card */}
-          <div style={{ ...cardStyle, background: 'linear-gradient(135deg, rgba(107,45,139,0.1), rgba(59,130,246,0.1))', border: `1px solid ${dark ? 'rgba(107,45,139,0.2)' : '#e5e7eb'}`, padding: '20px' }}>
-            {/* Avatar + Name row */}
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
-              <div style={{ width: 56, height: 56, borderRadius: '50%', background: 'linear-gradient(135deg, #6B2D8B, #3B82F6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
+          {/* TOP SECTION — Compact Profile Card */}
+          <div style={{ ...cardStyle, background: 'linear-gradient(135deg, rgba(107,45,139,0.1), rgba(59,130,246,0.1))', border: `1px solid ${dark ? 'rgba(107,45,139,0.2)' : '#e5e7eb'}`, padding: '16px 20px' }}>
+            {/* ROW 1 — thin identity bar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+              <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'linear-gradient(135deg, #6B2D8B, #3B82F6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
                 {initials}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <h1 style={{ margin: '0 0 4px', fontSize: 'clamp(18px,4vw,24px)', fontWeight: 800, letterSpacing: -0.5, color: T.text, lineHeight: 1.2 }}>{user.Name}</h1>
-                <div style={{ fontSize: 13, color: '#3B82F6', fontWeight: 700 }}>{user.designation || user.Designation || 'Quality Engineer'}</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {user.Name}
+                  <span style={{ color: T.muted, fontWeight: 600 }}> · {user.designation || user.Designation || 'Quality Engineer'} · {zid}</span>
+                </div>
               </div>
-              {/* Score — inline on desktop, below on mobile */}
-              <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                <div style={{ fontSize: 9, textTransform: 'uppercase', color: T.sub, fontWeight: 700, letterSpacing: 0.5, marginBottom: 2 }}>Score</div>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
-                  <span style={{ fontSize: 24, fontWeight: 800, lineHeight: 1, color: T.text }}>{overallScore}</span>
-                  <span style={{ fontSize: 11, color: T.muted }}>/100</span>
-                </div>
-                <div style={{ height: 3, width: 60, background: 'rgba(255,255,255,0.1)', borderRadius: 2, marginTop: 4 }}>
-                  <div style={{ height: '100%', width: `${overallScore}%`, background: '#3B82F6', borderRadius: 2 }} />
-                </div>
+              <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 3 }}>
+                <span style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: T.text }}>{overallScore}</span>
+                <span style={{ fontSize: 11, color: T.muted }}>/100</span>
               </div>
             </div>
 
-            {/* Detail grid — 2 cols on mobile, 3 on tablet+ */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px 16px' }}>
+            {/* ROW 2 — Department | Location | Grade+Path */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px 16px', marginBottom: 10 }}>
               {[
-                { label: 'Zensar ID',     value: user.zensar_id || user.ZensarID || user.EmployeeID || user.id || 'N/A' },
-                { label: 'Department',    value: user.department || user.Department || 'Quality Engineering' },
-                { label: 'Location',      value: user.location || user.Location || 'Remote / India' },
-                { label: 'IT Experience', value: `${user.years_it ?? user.yearsIT ?? user.YearsIT ?? '0'} Years` },
-                { label: 'Zensar Tenure', value: `${user.years_zensar ?? user.yearsZensar ?? user.YearsZensar ?? '0'} Years` },
+                { label: 'Department', value: user.department || user.Department || 'Quality Engineering' },
+                { label: 'Location',   value: user.location || user.Location || 'Remote / India' },
+                { label: 'Grade · Path', value: gradePath ? `${grade} · ${gradePath}` : grade },
               ].map(f => (
                 <div key={f.label} style={{ display: 'flex', flexDirection: 'column' }}>
                   <span style={{ fontSize: 10, textTransform: 'uppercase', color: T.muted, fontWeight: 700, letterSpacing: '0.05em', marginBottom: 2 }}>{f.label}</span>
@@ -173,11 +233,33 @@ export default function EmployeeDashboard({
               ))}
             </div>
 
-            {/* Stats bar */}
-            <div style={{ display: 'flex', gap: 16, marginTop: 16, paddingTop: 14, borderTop: `1px solid ${T.bdr}`, fontSize: 12, flexWrap: 'wrap' }}>
-              <div><span style={{ color: T.muted }}>Completion:</span> <span style={{ fontWeight: 700 }}>{completion}%</span></div>
-              <div><span style={{ color: T.muted }}>Certs:</span> <span style={{ fontWeight: 700 }}>{safeCerts.length}</span></div>
-              <div><span style={{ color: T.muted }}>Projects:</span> <span style={{ fontWeight: 700 }}>{safeProjects.length}</span></div>
+            {/* ROW 3 — IT Experience | Zensar Tenure | Zensar ID */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px 16px', marginBottom: 14 }}>
+              {[
+                { label: 'IT Experience', value: `${user.years_it ?? user.yearsIT ?? user.YearsIT ?? '0'} Years` },
+                { label: 'Zensar Tenure', value: `${user.years_zensar ?? user.yearsZensar ?? user.YearsZensar ?? '0'} Years` },
+                { label: 'Zensar ID',     value: zid },
+              ].map(f => (
+                <div key={f.label} style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 10, textTransform: 'uppercase', color: T.muted, fontWeight: 700, letterSpacing: '0.05em', marginBottom: 2 }}>{f.label}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text, wordBreak: 'break-word' }}>{f.value}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* ROW 4 — stat mini-cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, paddingTop: 12, borderTop: `1px solid ${T.bdr}` }}>
+              {[
+                { label: 'Badges Earned', value: verifiedSkillBadges.length },
+                { label: 'Completion',    value: `${completion}%` },
+                { label: 'Certs',         value: safeCerts.length },
+                { label: 'Projects',      value: safeProjects.length },
+              ].map(s => (
+                <div key={s.label} style={{ background: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', borderRadius: 10, padding: '10px 12px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: T.text }}>{s.value}</div>
+                  <div style={{ fontSize: 9, textTransform: 'uppercase', color: T.muted, fontWeight: 700, letterSpacing: '0.05em', marginTop: 2 }}>{s.label}</div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -188,6 +270,7 @@ export default function EmployeeDashboard({
              {[
                { label: 'ZenScan',              path: '/employee/resume-upload', icon: <Upload size={20}/>,        color: '#3B82F6', desc: 'AI reads your resume and maps every skill, cert and project — instantly.' },
                { label: 'ZenMatrix',             path: '/employee/skills',         icon: <PenTool size={20}/>,       color: '#8B5CF6', desc: 'Rate yourself. Let your manager confirm. Own your skill profile.' },
+               { label: 'ZenAssess',             path: '/employee/zenassess',      icon: <ClipboardCheck size={20}/>, color: '#10B981', desc: 'Validate your skills. Earn verified badges.' },
                { label: 'ZenAlign',              path: '/employee/resume-builder', icon: <FileText size={20}/>,      color: '#ec4899', desc: 'Convert your resume to Zensar standard instantly.', hideInPopup: true },
                { label: 'ZenAICoach',            path: '/employee/ai',             icon: <Bot size={20}/>,           color: '#c084fc', desc: 'Career intelligence', hideInPopup: true },
                { label: 'My Education',          path: '/employee/education',      icon: <GraduationCap size={20}/>, color: '#06B6D4', desc: 'Know your skills. Plan your growth.' },
@@ -215,6 +298,18 @@ export default function EmployeeDashboard({
                   <Radar data={radarData} options={radarOptions} />
                 </div>
                 <div style={{ flex: 1, minWidth: 120, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {verifiedSkillBadges.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: 12, color: T.muted, textTransform: 'uppercase', marginBottom: 8, letterSpacing: 1 }}>Verified Skills</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        {verifiedSkillBadges.map(b => (
+                          <span key={b.skill} style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            {b.skill} <span style={{ fontWeight: 900 }}>✓</span> {b.level}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <div style={{ fontSize: 12, color: T.muted, textTransform: 'uppercase', marginBottom: 8, letterSpacing: 1 }}>Top Strengths</div>
                     {safeExpertSkills.length > 0 ? (

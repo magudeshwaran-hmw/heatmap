@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { UserRole } from './types';
-import { saveSession, loadSession, clearSession } from './localDB';
+import { saveSession, loadSession } from './localDB';
+import { apiLogout } from './api';
 
 interface AuthState {
   isLoggedIn: boolean;
@@ -59,13 +60,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       name: name,
     };
 
-    console.log('[Auth] Switching Session:', newAuth);
-    
     // 1. Update State
     setAuth(newAuth);
     
     // 2. Persist to LocalStorage (This updates skill_nav_session_id)
-    saveSession({ employeeId: employeeId, role, name: name });
+    // Only set employee session for actual employees, not admins
+    if (role === 'employee') {
+      saveSession({ employeeId: employeeId, role, name: name });
+    } else {
+      // For admins, clear any existing employee session to avoid conflicts
+      localStorage.removeItem('skill_nav_session_id');
+      localStorage.setItem('skill_nav_session_role', role);
+      localStorage.setItem('skill_nav_session_name', name);
+    }
     
     // 3. Force Global Refresh
     const event = new CustomEvent('skill_nav_session_changed', { detail: newAuth });
@@ -76,8 +83,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const logout = useCallback(() => {
+    apiLogout().catch(() => {});
     setAuth({ isLoggedIn: false, role: null, employeeId: null, name: null });
-    clearSession();
+    // Wipe all browser-stored state so nothing from this session (tokens,
+    // cached profiles, skill data) can bleed into the next employee's session.
+    localStorage.clear();
+    sessionStorage.clear();
     window.dispatchEvent(new Event('skill_nav_session_changed'));
   }, []);
 

@@ -13,7 +13,7 @@
 import { SKILLS } from './mockData';
 import { SkillRating, ProficiencyLevel } from './types';
 
-const OLLAMA_BASE = 'http://localhost:11434';
+import { OLLAMA_BASE } from './config';
 
 export interface OllamaStatus {
   available: boolean;
