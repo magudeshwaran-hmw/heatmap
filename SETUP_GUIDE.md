@@ -21,6 +21,30 @@ Install these first:
 
 ---
 
+## Additional Requirements for ZenAssess (AI Proctoring)
+
+ZenAssess AI proctoring has a few extra requirements:
+
+1. **HTTPS or localhost only.** The browser Camera API requires a secure
+   context. For development, `localhost` works fine. For production, the app
+   **must** be served over HTTPS (a tunnel URL like `forward:cf` is HTTPS).
+
+2. **Model files — already in the repo, no separate download.**
+   - face-api.js detection models → `public/models/`
+   - MediaPipe FaceMesh / iris models → `public/mediapipe/`
+   These ship with the repository and are served locally. A CDN fallback exists
+   if a file is missing, so first load still works either way.
+
+3. **Supported browsers:**
+   - Chrome 90+ (recommended), Firefox 88+, Edge 90+
+   - **Not supported:** Safari on iOS, and any mobile browser — the assessment
+     is intentionally blocked on mobile.
+
+4. **Camera:** any webcam works (built-in laptop camera is fine). Minimum
+   640×480; 720p or higher recommended for better gaze/iris accuracy.
+
+---
+
 ## Step 1 — Copy or Clone the Project
 
 **From USB / drive:** copy the entire `zenlap` folder to your location
@@ -156,6 +180,9 @@ upload. There are no pre-seeded employee accounts after cleanup.
 | `npm install` fails | Delete `node_modules` and `package-lock.json`, then run `npm install` again. |
 | `forward:cf` shows no URL | Check internet connection; try `npm run forward:lt`. |
 | Ollama not working | Install from ollama.ai and run `ollama pull llama3`. AI features fall back to a built-in mode without it. |
+| Camera not working in ZenAssess | 1) Confirm the browser has camera permission. 2) Browser settings → Privacy → Camera → allow `localhost`. 3) Refresh and retry. Camera needs `localhost` or HTTPS. |
+| "Iris tracking not loaded" in console | Non-critical. The assessment still works — face + head detection stay active. Check the console for the specific load error. |
+| Models loading slowly on first use | First load can take 10–30s (models load/cache). After that they're cached in the browser and load instantly. |
 
 ---
 

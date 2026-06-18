@@ -134,6 +134,11 @@ Do NOT default to 2 if experience is clearly stated.
 
 RULE 3 — SKILLS (this is the most important section):
 Map ONLY to this exact 32-skill list. Do not invent skills outside this list.
+
+CRITICAL ANTI-HALLUCINATION RULE:
+Only extract skills that are EXPLICITLY mentioned in the resume text provided (directly, or via a tool/keyword that clearly maps to a skill per the mapping rules below).
+Do NOT infer, assume, or add skills that are not written in the resume. If a skill is not in the text, set it to 0.
+When in doubt, leave it out — a skill with no textual evidence MUST be 0, not a guess.
 For each skill, assign a rating 0-3 based on DEPTH and RECENCY of evidence:
 
 THE 32 SKILLS (map resume content to these names exactly):
@@ -168,6 +173,10 @@ SKILL MAPPING RULES:
 - "BDD" / "Cucumber" → part of "Automation Testing", do not create a new skill
 - "Healthcare" client → maps to "Healthcare" domain skill
 - "Banking" client / "EBRD" / "MasterCard" → maps to "Banking" domain skill
+- "LoadRunner" / "Load Runner" / "TestRTC" → maps to "Performance Testing"
+- "AppDynamics" / "DataDog" / "Dynatrace" / "Grafana" / "Kibana" → maps to "Performance Testing" (APM/monitoring used in perf engineering)
+- "Groovy" → maps to "Java" (Groovy is a JVM language)
+- "Insurance" client/domain → maps to "Insurance"; "Telecom" → "Telecom"
 
 RULE 4 — CERTIFICATIONS:
 Extract EVERY certification listed. Look for sections titled "Certifications", "Certificates", "Achievements".
@@ -193,6 +202,12 @@ Do NOT give low scores to well-structured resumes.
 missingCriticalFields: list only genuinely missing things (LinkedIn URL, photo, etc.)
 careerGaps: look at date ranges across all roles and identify gaps > 3 months.
 redFlags: only flag genuine concerns (e.g. no dates on roles, contradictory experience claims).
+
+RULE 8 — ACHIEVEMENTS / AWARDS / RECOGNITION:
+Scan the resume for lines indicating awards or recognition. Trigger phrases include:
+"Monthly Star", "Star Performer", "Client Appreciation", "Award", "Awarded", "Recognition", "Recognized for", "Honored", "Honoured", "Employee of the Month", "Spot Award", "Kudos", "Appreciation".
+For EACH match, add an object to the "achievements" array: { "Title": "<short award title>", "Description": "<surrounding context sentence>", "AwardType": "Recognition" }.
+Only extract achievements actually present in the text — do not invent. If none are found, return an empty achievements array.
 
 RESUME TEXT TO PARSE:
 ---
@@ -274,7 +289,9 @@ The JSON must follow this exact structure:
       "year": "graduation year"
     }
   ],
-  "achievements": [],
+  "achievements": [
+    { "Title": "Monthly Star Performer", "Description": "context sentence from the resume", "AwardType": "Recognition" }
+  ],
   "gaps": [],
   "analysis": {
     "completenessScore": 88,

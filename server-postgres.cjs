@@ -360,6 +360,30 @@ async function ensurePhase2Tables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_mr_employee ON manager_reviews(employee_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_mr_status ON manager_reviews(review_status)`);
 
+    // AI proctoring integrity reports (one row per proctored skill test)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS integrity_reports (
+        id SERIAL PRIMARY KEY,
+        session_id VARCHAR,
+        employee_id VARCHAR,
+        skill_name VARCHAR,
+        integrity_score INTEGER,
+        verdict VARCHAR,
+        flags JSONB,
+        camera_enabled BOOLEAN DEFAULT false,
+        ai_enabled BOOLEAN DEFAULT false,
+        tab_switches INTEGER DEFAULT 0,
+        copy_attempts INTEGER DEFAULT 0,
+        phone_detections INTEGER DEFAULT 0,
+        multiple_persons INTEGER DEFAULT 0,
+        start_time BIGINT,
+        end_time BIGINT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ir_employee ON integrity_reports(employee_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ir_verdict ON integrity_reports(verdict)`);
+
     // Extend zenassess_sessions with new columns
     const newCols = [
       `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS skill_name          VARCHAR(255)`,
@@ -401,6 +425,8 @@ async function ensurePhase2Tables() {
       `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS project_allocation_score INTEGER DEFAULT 0`,
       `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS typing_velocity_log JSONB DEFAULT '[]'`,
       `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS answer_snapshots    JSONB DEFAULT '[]'`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS integrity_flagged   BOOLEAN DEFAULT false`,
+      `ALTER TABLE zenassess_sessions ADD COLUMN IF NOT EXISTS badge_withheld      BOOLEAN DEFAULT false`,
     ];
     for (const col of newCols) {
       try { await pool.query(col); } catch (_) {}
@@ -7469,6 +7495,84 @@ function determineTierResult(claimedLevel, finalScore) {
 
 // POST /api/zenassess/skill-test-complete — record one skill's outcome from the
 // 3-skill sequential ZenAssess engine (silent tier-drop aware, badge never-downgrade)
+// ── AI Proctoring: store an integrity report for a proctored skill test ──────
+app.post('/api/zenassess/integrity-report', async (req, res) => {
+  try {
+    const {
+      sessionId, employeeId, skillName,
+      integrityScore, verdict, flags,
+      cameraEnabled, aiEnabled,
+      tabSwitches, copyAttempts,
+      phoneDetections, multiplePersons,
+      startTime, endTime
+    } = req.body;
+
+    await pool.query(`
+      INSERT INTO integrity_reports (
+        session_id, employee_id, skill_name,
+        integrity_score, verdict, flags,
+        camera_enabled, ai_enabled,
+        tab_switches, copy_attempts,
+        phone_detections, multiple_persons,
+        start_time, end_time
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,
+        $9,$10,$11,$12,$13,$14
+      )`,
+      [
+        sessionId, employeeId, skillName,
+        integrityScore, verdict,
+        JSON.stringify(flags || []),
+        cameraEnabled, aiEnabled,
+        tabSwitches || 0,
+        copyAttempts || 0,
+        phoneDetections || 0,
+        multiplePersons || 0,
+        startTime, endTime
+      ]
+    );
+
+    // Auto-withhold badge if compromised
+    if (verdict === 'compromised' || integrityScore < 40) {
+      try {
+        await pool.query(`
+          UPDATE zenassess_sessions
+          SET integrity_flagged = true,
+              integrity_score = $1,
+              badge_withheld = true
+          WHERE session_id = $2`,
+          [integrityScore, sessionId]
+        );
+      } catch (_) { /* session row may not exist yet — best-effort */ }
+    }
+
+    return res.json({ success: true, integrityScore, verdict });
+  } catch (err) {
+    console.error('Integrity report error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── AI Proctoring: list integrity reports for the admin monitor ──────────────
+app.get('/api/admin/integrity-reports', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ir.*,
+        e.name as employee_name,
+        e.designation
+      FROM integrity_reports ir
+      LEFT JOIN employees e
+        ON e.id::text = ir.employee_id::text
+        OR e.zensar_id::text = ir.employee_id::text
+      ORDER BY ir.created_at DESC
+      LIMIT 100
+    `);
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/zenassess/skill-test-complete', async (req, res) => {
   try {
     await ensureZenAssessTable();

@@ -49,7 +49,7 @@ export default function AppHeader() {
 
   const adminNavItems = [
     { label: 'ZenRadar', path: '/admin', icon: LayoutDashboard },
-    { label: 'ZenTalenHub', path: '/admin/bfsi', icon: Landmark },
+    { label: 'ZenTalentHub', path: '/admin/bfsi', icon: Landmark },
   ];
 
   const navItems = role === 'admin' ? adminNavItems : empNavItems;

@@ -9,6 +9,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useApp } from '@/lib/AppContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { callLLM, checkLLMStatus } from '@/lib/llm';
+import { useAuth } from '@/lib/authContext';
+import { API_BASE } from '@/lib/api';
 import { useNavigate } from 'react-router-dom';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement,
@@ -23,31 +25,117 @@ ChartJS.register(CategoryScale, LinearScale, BarElement, BarController, Tooltip,
 // TAB 1 — CAREER COACH
 // ─────────────────────────────────────────────────
 function CareerCoachTab({ data, T }: { data: any, T: any }) {
+  const { employeeId } = useAuth();
+  const [fullProfile, setFullProfile] = useState<any>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
   const [messages, setMessages] = useState<Array<{ role: 'user' | 'bot'; text: string }>>([]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
   const botRef = useRef<HTMLDivElement>(null);
 
-  const systemCtx = `You are the Zensar ZenAICoach - Your AI Mentor for ${data.user?.Name || 'Employee'}.
-Skills: ${(data?.expertSkills || []).join(', ')}.
-Overall Score: ${data?.overallScore || 0}/100.
-Certifications: ${(data?.certifications || []).map((c:any)=>c.CertName || c.Name).join(', ')}.
-Education: ${(data?.education || []).map((e:any)=>e.Degree || e.degree).join(', ')}.
-IMPORTANT: Your response must be in JSON format: {"response": "your message here"}`;
-
+  // ── Fetch the COMPLETE profile so the coach answers from real data ──
   useEffect(() => {
-    const firstName = data.user?.Name?.split(' ')[0] || data.user?.name?.split(' ')[0] || 'there';
-    setMessages([{ role:'bot', text: `Hello ${firstName}! 👋 I'm your ZenAICoach. I've analyzed your expertise in ${data.expertSkills?.[0] || 'Quality Intelligence'} and your educational background. How can I guide your growth today?` }]);
-  }, []);
+    if (!employeeId) { setProfileLoading(false); return; }
+    let cancelled = false;
+    (async () => {
+      setProfileLoading(true);
+      const j = (r: Response) => (r.ok ? r.json() : null);
+      try {
+        const [emp, skills, projects, certs, achievements, education] = await Promise.all([
+          fetch(`${API_BASE}/employees/${employeeId}`).then(j).catch(() => null),
+          fetch(`${API_BASE}/employees/${employeeId}/skills`).then(j).catch(() => null),
+          fetch(`${API_BASE}/projects/${employeeId}`).then(j).catch(() => null),
+          fetch(`${API_BASE}/certifications/${employeeId}`).then(j).catch(() => null),
+          fetch(`${API_BASE}/achievements/${employeeId}`).then(j).catch(() => null),
+          fetch(`${API_BASE}/education/${employeeId}`).then(j).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setFullProfile({
+          employee: emp || data?.user || {},
+          skills: Array.isArray(skills) ? skills : (skills?.skills || []),
+          projects: projects?.projects || [],
+          certifications: certs?.certifications || [],
+          achievements: achievements?.achievements || [],
+          education: education?.education || [],
+        });
+      } catch {
+        if (!cancelled) setFullProfile({ employee: data?.user || {}, skills: [], projects: [], certifications: [], achievements: [], education: [] });
+      } finally {
+        if (!cancelled) setProfileLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [employeeId]);
+
+  const pick = (o: any, ...keys: string[]) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
+
+  const buildSystemPrompt = (profile: any) => {
+    if (!profile) return 'You are ZenAICoach, a career coach.';
+    const { employee = {}, skills = [], projects = [], certifications = [], achievements = [], education = [] } = profile;
+    const sName = (s: any) => pick(s, 'skill_name', 'skillName', 'name');
+    const sRating = (s: any) => pick(s, 'self_rating', 'selfRating') || 0;
+    const sVerified = (s: any) => pick(s, 'verified_badge_level', 'verifiedBadgeLevel');
+    const verifiedSkills = skills.filter((s: any) => sVerified(s));
+    const topSkills = [...skills].filter((s: any) => Number(sRating(s)) > 0).sort((a: any, b: any) => Number(sRating(b)) - Number(sRating(a))).slice(0, 10);
+    return `You are ZenAICoach, an expert career coach for ${pick(employee, 'name', 'Name') || 'this employee'}.
+
+EMPLOYEE PROFILE (use this for ALL answers):
+Name: ${pick(employee, 'name', 'Name') || 'N/A'}
+Role: ${pick(employee, 'designation', 'Designation') || 'N/A'}
+Grade: ${pick(employee, 'grade', 'Grade') || 'N/A'}
+Department: ${pick(employee, 'department', 'Department') || 'N/A'}
+IT Experience: ${pick(employee, 'years_it', 'yearsIT', 'YearsIT') || 0} years
+Location: ${pick(employee, 'location', 'Location') || 'N/A'}
+
+SKILLS (${skills.length} total):
+${topSkills.length ? topSkills.map((s: any) => `- ${sName(s)}: Level ${sRating(s)}/3 ${sVerified(s) ? '(Verified: ' + sVerified(s) + ')' : '(Not yet verified)'}`).join('\n') : 'No skills rated yet'}
+
+VERIFIED BADGES (${verifiedSkills.length}):
+${verifiedSkills.length ? verifiedSkills.map((s: any) => `- ${sName(s)}: ${sVerified(s)}`).join('\n') : 'No verified badges yet'}
+
+PROJECTS (${projects.length}):
+${projects.length ? projects.map((p: any) => `- ${pick(p, 'ProjectName', 'project_name', 'name', 'title') || 'Untitled'} | Client: ${pick(p, 'Client', 'client') || 'N/A'} | Domain: ${pick(p, 'Domain', 'domain') || 'N/A'} | Role: ${pick(p, 'Role', 'role') || 'N/A'} | ${pick(p, 'StartDate', 'start_date') || ''} to ${pick(p, 'EndDate', 'end_date') || (pick(p, 'IsOngoing', 'is_ongoing') ? 'Present' : '')}`).join('\n') : 'No projects recorded yet'}
+
+CERTIFICATIONS (${certifications.length}):
+${certifications.length ? certifications.map((c: any) => `- ${pick(c, 'CertName', 'cert_name', 'name')} | ${pick(c, 'Provider', 'issuer', 'issuingOrganization') || ''} ${pick(c, 'IssueDate', 'issue_date', 'year') || ''}`).join('\n') : 'No certifications recorded yet'}
+
+ACHIEVEMENTS (${achievements.length}):
+${achievements.length ? achievements.map((a: any) => `- ${pick(a, 'Title', 'title', 'name')}: ${pick(a, 'Description', 'description') || ''} ${pick(a, 'DateReceived', 'date_received', 'date') || ''}`).join('\n') : 'No achievements recorded yet'}
+
+EDUCATION (${education.length}):
+${education.length ? education.map((e: any) => `- ${pick(e, 'degree', 'Degree')} in ${pick(e, 'field', 'fieldOfStudy', 'field_of_study') || ''} | ${pick(e, 'institution', 'Institution') || ''} ${pick(e, 'year', 'endDate', 'end_date') || ''}`).join('\n') : 'No education recorded yet'}
+
+CRITICAL INSTRUCTIONS:
+1. ONLY answer based on the profile data above. Do NOT invent skills, projects, certifications, or achievements not listed.
+2. When asked about projects/certifications/skills/achievements, use the matching section above.
+3. If something is not in the profile, say: "I don't see [X] in your profile yet — you can add it in the relevant section."
+4. Be specific and use the employee's actual data in every response.
+5. If a section is empty, say so plainly and offer to suggest relevant next steps.`;
+  };
+
+  // ── Greeting reflects the real, loaded profile ──
+  useEffect(() => {
+    if (profileLoading) return;
+    const fp = fullProfile;
+    const firstName = (pick(fp?.employee || {}, 'name', 'Name') || data.user?.Name || 'there').split(' ')[0];
+    const ratedCount = (fp?.skills || []).filter((s: any) => Number(pick(s, 'self_rating', 'selfRating') || 0) > 0).length;
+    const greeting = fp
+      ? `Hello ${firstName}! 👋 I'm your ZenAICoach. I can see your profile: ${ratedCount} rated skills, ${fp.projects?.length || 0} projects, ${fp.certifications?.length || 0} certifications, ${fp.achievements?.length || 0} achievements. What would you like to work on today?`
+      : `Hello! 👋 I'm your ZenAICoach. What would you like to work on today?`;
+    setMessages([{ role: 'bot', text: greeting }]);
+  }, [profileLoading]);
 
   useEffect(() => { botRef.current?.scrollIntoView({ behavior:'smooth' }); }, [messages, typing]);
 
   const send = async (text: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || profileLoading) return;
     const m = [...messages, { role:'user' as const, text }];
     setMessages(m); setInput(''); setTyping(true);
     try {
-      const res = await callLLM(`${systemCtx}\n\nUser: ${text}\nCoach (JSON {"response": "..."}):`);
+      const systemPrompt = buildSystemPrompt(fullProfile);
+      const history = m.slice(-10).map(x => `${x.role === 'user' ? 'User' : 'Coach'}: ${x.text}`).join('\n');
+      const prompt = `${systemPrompt}\n\nConversation so far:\n${history}\n\nUser: ${text}\n\nReply as the coach using ONLY the profile data above. Your response MUST be valid JSON: {"response": "your message here"}`;
+      const res = await callLLM(prompt);
       if (res?.data?.response) {
         setMessages([...m, { role: 'bot', text: String(res.data.response) }]);
       } else if (res?.data && typeof res.data === 'string') {
@@ -73,6 +161,7 @@ IMPORTANT: Your response must be in JSON format: {"response": "your message here
     <div style={{ animation: 'fadeUp 0.4s' }}>
       <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 24, display: 'flex', flexDirection: 'column', gap: 16, height: 500, overflow: 'hidden' }}>
         <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 8 }}>
+          {profileLoading && <div style={{ color: T.sub, fontSize: 13, marginLeft: 8 }}>Loading your profile data…</div>}
           {messages.map((m, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: m.role==='user' ? 'flex-end' : 'flex-start' }}>
               <div style={{ 
@@ -89,8 +178,8 @@ IMPORTANT: Your response must be in JSON format: {"response": "your message here
           <div ref={botRef} />
         </div>
         <div style={{ display: 'flex', gap: 10, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-          <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter' && send(input)} placeholder="Ask about growth, certs, or career path..." style={{ flex:1, padding:'14px 18px', borderRadius:14, background:T.bg, border:`1px solid ${T.bdr}`, color:T.text, outline:'none', fontSize: 14 }} />
-          <button onClick={()=>send(input)} style={{ width: 44, height: 44, borderRadius: 12, background:'#3B82F6', border:'none', color:'#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor:'pointer' }}><Send size={18}/></button>
+          <input value={input} disabled={profileLoading} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter' && send(input)} placeholder={profileLoading ? 'Loading your profile…' : 'Ask about growth, certs, or career path...'} style={{ flex:1, padding:'14px 18px', borderRadius:14, background:T.bg, border:`1px solid ${T.bdr}`, color:T.text, outline:'none', fontSize: 14, opacity: profileLoading ? 0.6 : 1 }} />
+          <button onClick={()=>send(input)} disabled={profileLoading} style={{ width: 44, height: 44, borderRadius: 12, background:'#3B82F6', border:'none', color:'#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: profileLoading ? 'not-allowed' : 'pointer', opacity: profileLoading ? 0.6 : 1 }}><Send size={18}/></button>
         </div>
       </div>
     </div>
@@ -163,7 +252,7 @@ Format: Return a JSON object ONLY with a "steps" array containing 3 objects:
          <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 48, textAlign: 'center' }}>
             <Loader2 className="animate-spin" size={32} color="#3B82F6" style={{ margin: '0 auto 16px' }} />
             <div style={{ fontWeight: 800, fontSize: 16 }}>Synthesises skill map with the help of AI...</div>
-            <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Analyzing ${data.gapSkills?.length || 0} skill gaps against Zensar QI standards.</div>
+            <div style={{ fontSize: 13, color: T.sub, marginTop: 4 }}>Analyzing {data.gapSkills?.length || 0} skill gaps against Zensar QI standards.</div>
          </div>
        )}
 

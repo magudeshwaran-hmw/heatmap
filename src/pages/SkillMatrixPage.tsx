@@ -90,6 +90,7 @@ export default function SkillMatrixPage({
   // ── Verified badges (ZenAssess) — always read fresh from DB, never from cache ──
   // Badge display must come from verified_badge_level only (never self_rating).
   const [verifiedBadges, setVerifiedBadges] = useState<Record<string, string>>({});
+  const [verifiedDates, setVerifiedDates] = useState<Record<string, string>>({});
 
   // Refetch on mount, on employee change, AND on every navigation to this page
   // (location.key changes) — so a badge earned in ZenAssess shows immediately
@@ -100,12 +101,18 @@ export default function SkillMatrixPage({
       try {
         const skills = await apiGetSkills(activeEmpId);
         const badges: Record<string, string> = {};
+        const dates: Record<string, string> = {};
         (skills || []).forEach((s: any) => {
           const name = s.skillName || s.skill_name;
           const verified = s.verifiedBadgeLevel || s.verified_badge_level;
-          if (name && verified) badges[name] = verified;
+          if (name && verified) {
+            badges[name] = verified;
+            const d = s.lastValidationDate || s.last_validated_date;
+            if (d) dates[name] = d;
+          }
         });
         setVerifiedBadges(badges);
+        setVerifiedDates(dates);
       } catch { /* verified badges remain empty — safe default */ }
     })();
   }, [activeEmpId, location.key, (location.state as any)?.forceRefresh]);
@@ -257,7 +264,6 @@ export default function SkillMatrixPage({
         onTabChange('/employee/dashboard');
       } else {
         navigate('/employee/dashboard');
-        window.location.reload();
       }
     }, 900);
   };
@@ -334,6 +340,29 @@ export default function SkillMatrixPage({
           </div>
         </div>
 
+        {/* Matrix Summary Row */}
+        {(() => {
+          const verifiedCount = Object.keys(verifiedBadges).length;
+          const ratedCount = ratings.filter(r => r.selfRating > 0).length;
+          const notRatedCount = SKILLS.length - ratedCount;
+          return (
+            <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: '14px', padding: '14px 20px', marginBottom: '28px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <div style={{ fontSize: 13, color: T.sub }}>
+                <span style={{ fontWeight: 800, color: '#10B981' }}>{verifiedCount} verified ✓</span>
+                <span style={{ color: T.muted }}> · </span>
+                <span style={{ fontWeight: 700, color: T.text }}>{ratedCount} rated</span>
+                <span style={{ color: T.muted }}> · </span>
+                <span style={{ color: T.muted }}>{notRatedCount} not yet rated</span>
+              </div>
+              {!isPopup && (
+                <button onClick={() => navigate('/employee/zenassess')} style={{ background: 'transparent', border: 'none', color: '#3B82F6', fontSize: 13, fontWeight: 700, cursor: 'pointer', padding: 0 }}>
+                  Complete ZenAssess to earn more badges →
+                </button>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Categories */}
         {!showIncomplete && (() => {
           const N = CATEGORIES.length;
@@ -389,6 +418,11 @@ export default function SkillMatrixPage({
                   <div style={{ fontSize: '12px', fontWeight: 700, color: verifiedBadges[skill.name] ? '#10B981' : T.muted }}>
                     {verifiedBadges[skill.name] ? `✓ ${verifiedBadges[skill.name]}` : '—'}
                   </div>
+                  {verifiedBadges[skill.name] && verifiedDates[skill.name] && (
+                    <div style={{ fontSize: '11px', color: T.muted, marginTop: 2 }}>
+                      Last verified: {new Date(verifiedDates[skill.name]).toLocaleDateString()}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   {([0, 1, 2, 3] as ProficiencyLevel[]).map(l => (

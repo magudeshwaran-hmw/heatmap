@@ -45,6 +45,9 @@ import {
 import { getQuestionBank, shuffleMCQs, correctLetterToIndex } from '../data/questionBank/index';
 import { determineTierResult } from '../lib/scoringEngine';
 import CodeEditor from '../components/CodeEditor';
+import ProctoringPermissionScreen from '../components/ProctoringPermissionScreen';
+import ProctorCameraView from '../components/ProctorCameraView';
+import { ProctoringEngine, type ProctoringFlag, type IntegrityReport } from '../lib/proctoringEngine';
 // ─── Internationalization Helper ──────────────────────────────────────────────
 const t = (text: string): string => text;
 
@@ -371,6 +374,82 @@ function scoreTextAnswer(
   const keywordScore = (found / expectedKeywords.length) * 70;
   const lengthBonus = Math.min(30, (wordCount / (minWords * 2)) * 30);
   return Math.min(100, Math.round(keywordScore + lengthBonus));
+}
+
+// ─── Integrity Report Card (shown on result page only when flags exist) ───────
+function IntegrityResultCard({ report, T }: { report: IntegrityReport | null; T: ReturnType<typeof mkTheme> }) {
+  if (!report || report.flags.length === 0) return null; // Clean test — show nothing
+
+  const getFlagIcon = (type: string): string => {
+    const icons: Record<string, string> = {
+      tab_switch: '🔄', copy_paste: '📋', right_click: '🖱️', devtools: '🛠️',
+      fullscreen_exit: '⛶', phone_detected: '📱', multiple_persons: '👥',
+      screenshot_attempt: '📸', second_screen: '🖥️', rapid_answers: '⚡',
+      face_not_visible: '👤', keyboard_shortcut: '⌨️',
+    };
+    return icons[type] || '⚠️';
+  };
+
+  // Group flags by type for a cleaner display (count + highest severity seen).
+  const severityOrder: Record<string, number> = { low: 1, medium: 2, high: 3, severe: 4 };
+  const grouped = report.flags.reduce((acc: Record<string, { count: number; severity: ProctoringFlag['severity']; type: string }>, flag) => {
+    if (!acc[flag.type]) acc[flag.type] = { count: 0, severity: flag.severity, type: flag.type };
+    acc[flag.type].count++;
+    if (severityOrder[flag.severity] > severityOrder[acc[flag.type].severity]) acc[flag.type].severity = flag.severity;
+    return acc;
+  }, {});
+
+  const sevBg: Record<string, string> = { severe: 'rgba(239,68,68,0.15)', high: 'rgba(249,115,22,0.15)', medium: 'rgba(234,179,8,0.15)', low: 'rgba(59,130,246,0.15)' };
+  const sevColor: Record<string, string> = { severe: '#ef4444', high: '#f97316', medium: '#eab308', low: '#3b82f6' };
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 20 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h3 style={{ color: T.text, fontSize: 14, fontWeight: 600, margin: 0 }}>⚠️ INTEGRITY REPORT</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: T.muted }}>Integrity Score</span>
+          <span style={{ fontSize: 20, fontWeight: 600, color: report.integrityScore >= 85 ? '#10B981' : report.integrityScore >= 65 ? '#F59E0B' : '#EF4444' }}>
+            {report.integrityScore}/100
+          </span>
+        </div>
+      </div>
+
+      {/* Flag list */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+        {Object.values(grouped).map((flag) => (
+          <div key={flag.type} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>{getFlagIcon(flag.type)}</span>
+              <span style={{ fontSize: 12, color: T.sub, textTransform: 'capitalize' }}>{flag.type.replace(/_/g, ' ')}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {flag.count > 1 && <span style={{ fontSize: 11, color: T.muted }}>×{flag.count}</span>}
+              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 20, background: sevBg[flag.severity], color: sevColor[flag.severity], fontWeight: 500, textTransform: 'uppercase' }}>
+                {flag.severity}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Verdict */}
+      <div style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8, fontSize: 12, color: T.muted, lineHeight: 1.6 }}>
+        {report.verdict === 'compromised' && '🔴 This assessment has been flagged for review. Your badge award is pending admin review.'}
+        {report.verdict === 'high_risk' && '🟠 Multiple violations detected. This assessment has been flagged for admin review.'}
+        {report.verdict === 'suspicious' && '🟡 Minor violations detected. Your result has been recorded for review.'}
+        {report.verdict === 'clean' && '🟢 Minor activity noted. No integrity concerns detected.'}
+        <br />
+        <span style={{ fontSize: 11 }}>Admin has been notified silently.</span>
+      </div>
+
+      {/* Camera / AI status */}
+      <div style={{ display: 'flex', gap: 12, marginTop: 12, fontSize: 11, color: T.muted }}>
+        <span>📷 Camera: {report.cameraEnabled ? 'Active' : 'Not used'}</span>
+        <span>🤖 AI Detection: {report.aiDetectionEnabled ? 'Active' : 'Not loaded'}</span>
+      </div>
+    </div>
+  );
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -2423,8 +2502,205 @@ export default function ZenAssessPage() {
 
 
   // ─── RENDER ────────────────────────────────────────────────────────────────
+  // ═══ AI PROCTORING (browser-only, zero server cost) ═══════════════════════
+  const [showPermissionScreen, setShowPermissionScreen] = useState(false);
+  const [proctoringActive, setProctoringActive] = useState(false);
+  const [proctoringEngine, setProctoringEngine] = useState<ProctoringEngine | null>(null);
+  const [liveFlags, setLiveFlags] = useState<ProctoringFlag[]>([]);
+  const [integrityScore, setIntegrityScore] = useState(100);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [integrityReport, setIntegrityReport] = useState<IntegrityReport | null>(null);
+  const [pendingTestStart, setPendingTestStart] = useState<{ skill: string; level: 'Beginner' | 'Intermediate' | 'Expert'; idx: number } | null>(null);
+  const [attentionScore, setAttentionScore] = useState(100);
+  const [isPersonPresent, setIsPersonPresent] = useState(true);
+  const [lastViolation, setLastViolation] = useState<string | null>(null);
+  const proctorEngineRef = useRef<ProctoringEngine | null>(null);
+  const proctorSessionIdRef = useRef<string>('');
+  const lastViolationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Per-type toast cooldown so a repeating violation shows its toast at most once per 30s.
+  const toastCooldowns = useRef<Record<string, number>>({});
+
+  // cameraEnabled is recorded for the integrity report; not read in render.
+  void cameraEnabled;
+
+  // Brief in-PIP violation toast (auto-clears after 3s; matches fadeInOut anim).
+  const showViolationToast = (msg: string) => {
+    setLastViolation(msg);
+    if (lastViolationTimer.current) clearTimeout(lastViolationTimer.current);
+    lastViolationTimer.current = setTimeout(() => setLastViolation(null), 3000);
+  };
+
+  const handleProctorFlag = (flag: ProctoringFlag) => {
+    setLiveFlags(prev => [...prev, flag]);
+    if (proctorEngineRef.current) setIntegrityScore(proctorEngineRef.current.calculateIntegrityScore());
+    const msg =
+      flag.type === 'phone_detected' ? '📱 Phone detected'
+      : flag.type === 'tab_switch' ? '🔄 Tab switch detected'
+      : flag.type === 'multiple_persons' ? '👥 Multiple persons detected'
+      : flag.type === 'face_not_visible' ? '👤 Face not visible'
+      : flag.type === 'copy_paste' ? '📋 Copy attempt blocked'
+      : flag.type === 'devtools' ? '🛠️ DevTools detected'
+      : flag.type === 'second_screen' ? '🖥️ Second screen detected'
+      : flag.type === 'screenshot_attempt' ? '📸 Screenshot blocked'
+      : null;
+    if (msg) showViolationToast(msg);
+  };
+
+  const handleProctorViolation = (type: string) => {
+    // Always keep the score + face-presence overlay in sync (no cooldown).
+    if (proctorEngineRef.current) setIntegrityScore(proctorEngineRef.current.calculateIntegrityScore());
+    if (type === 'person_left' || type === 'face_away') setIsPersonPresent(false);
+
+    // Toast dedup — each violation type shows a toast at most once per 30s.
+    const now = Date.now();
+    if (now - (toastCooldowns.current[type] || 0) < 30000) return;
+    toastCooldowns.current[type] = now;
+
+    if (type === 'phone_detected') toast.warning('⚠️ Mobile phone detected. This has been flagged.');
+    else if (type === 'multiple_persons') toast.warning('⚠️ Multiple people detected in frame. This has been flagged.');
+    else if (type === 'devtools') toast.error('⚠️ Developer tools detected. Assessment may be invalidated.');
+    else if (type === 'fullscreen_exit') toast.warning('⚠️ Please stay in fullscreen mode. Returning to fullscreen…');
+    else if (type === 'face_away' || type === 'eyes_off_screen') toast.warning('⚠️ Please keep your eyes on the screen.');
+  };
+
+  // Launch the real skill test once permissions are granted.
+  const beginProctoredTest = (skill: string, level: 'Beginner' | 'Intermediate' | 'Expert', idx: number) => {
+    setV7SelectedSkill(skill);
+    setAssessmentPath(level);
+    setActiveSkillIdx(idx);
+    resetRoundState();
+    loadQuestionsForSkillLevel(skill, level);
+    setV7Step(4);
+    setV7Timer(level === 'Beginner' ? 1800 : 3600);
+    setV7TimerActive(true);
+    markSkillInProgress(skill, true);
+  };
+
+  const handlePermissionsGranted = (cameraGranted: boolean, engine: ProctoringEngine) => {
+    setShowPermissionScreen(false);
+    proctorEngineRef.current = engine;
+    setProctoringEngine(engine);
+    setIntegrityReport(null);
+    setLiveFlags([]);
+    setIntegrityScore(100);
+    setAttentionScore(100);
+    setIsPersonPresent(true);
+    setLastViolation(null);
+    // Wire the live attention meter + face-presence overlay callbacks.
+    engine.onAttentionUpdate = (s) => setAttentionScore(s);
+    engine.onPersonReturned = () => setIsPersonPresent(true);
+    if (cameraGranted) {
+      setCameraStream(engine.getStream());
+      setCameraEnabled(true);
+    } else {
+      setCameraStream(null);
+      setCameraEnabled(false);
+    }
+    engine.setupFullscreenMonitor();
+    engine.setupVisibilityMonitor();
+    engine.setupKeyboardBlocking();
+    engine.setupContextMenuBlocking();
+    engine.setupClipboardBlocking();
+    engine.setupDevToolsDetection();
+    setProctoringActive(true);
+    const p = pendingTestStart;
+    if (p) beginProctoredTest(p.skill, p.level, p.idx);
+    setPendingTestStart(null);
+  };
+
+  const handlePermissionCancel = () => {
+    setShowPermissionScreen(false);
+    setPendingTestStart(null);
+    proctorEngineRef.current = null;
+    setProctoringEngine(null);
+  };
+
+  const saveIntegrityReport = async (report: IntegrityReport | null) => {
+    if (!report) return;
+    try {
+      await fetch(`${API_BASE}/zenassess/integrity-report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: report.sessionId,
+          employeeId: report.employeeId,
+          skillName: report.skillName,
+          integrityScore: report.integrityScore,
+          verdict: report.verdict,
+          flags: report.flags,
+          cameraEnabled: report.cameraEnabled,
+          aiEnabled: report.aiDetectionEnabled,
+          tabSwitches: report.tabSwitchCount,
+          copyAttempts: report.copyAttempts,
+          phoneDetections: report.phoneDetections,
+          multiplePersons: report.multiplePersonDetections,
+          startTime: report.startTime,
+          endTime: report.endTime,
+        }),
+      });
+    } catch { /* silent — never interrupt the result */ }
+  };
+
+  // Detection (face-api + COCO-SSD) is driven by ProctorCameraView, which owns
+  // the displayed video + overlay canvas and calls engine.startDetection().
+
+  // Per-question rapid-answer timing — re-arm whenever the visible MCQ changes.
+  useEffect(() => {
+    if (proctoringActive && proctorEngineRef.current) {
+      proctorEngineRef.current.checkAnswerSpeed();
+      proctorEngineRef.current.startQuestionTimer(v7CurrentMcqIdx + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [v7CurrentMcqIdx, proctoringActive]);
+
+  // Finalize proctoring when a skill test reaches its per-skill result page.
+  useEffect(() => {
+    if (v7Step === 9 && proctoringActive && proctorEngineRef.current) {
+      const engine = proctorEngineRef.current;
+      const report = engine.generateReport();
+      setIntegrityReport(report);
+      saveIntegrityReport(report);
+      engine.cleanup().catch(() => {});
+      proctorEngineRef.current = null;
+      setProctoringActive(false);
+      setProctoringEngine(null);
+      setCameraStream(null);
+      if (lastViolationTimer.current) { clearTimeout(lastViolationTimer.current); lastViolationTimer.current = null; }
+      setLastViolation(null);
+      setIsPersonPresent(true);
+      setAttentionScore(100);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [v7Step, proctoringActive]);
+
   return (
     <div style={{ minHeight: '100vh', background: T.bg, color: T.text, fontFamily: "'Inter',sans-serif" }}>
+      {/* ─── AI Proctoring overlays ─── */}
+      {showPermissionScreen && pendingTestStart && (
+        <ProctoringPermissionScreen
+          skillName={pendingTestStart.skill}
+          level={pendingTestStart.level}
+          sessionId={proctorSessionIdRef.current}
+          employeeId={employeeId || ''}
+          onFlag={handleProctorFlag}
+          onViolation={handleProctorViolation}
+          onAllGranted={handlePermissionsGranted}
+          onCancel={handlePermissionCancel}
+        />
+      )}
+      {proctoringActive && v7Step >= 4 && v7Step <= 8 && (
+        <ProctorCameraView
+          stream={cameraStream}
+          flags={liveFlags}
+          integrityScore={integrityScore}
+          isDetecting={proctoringActive}
+          attentionScore={attentionScore}
+          isPersonPresent={isPersonPresent}
+          lastViolation={lastViolation}
+          engine={proctoringEngine}
+        />
+      )}
       {/* ─── V7 COMPLETE CANDIDATE JOURNEY FLOW ─── */}
       <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: 20 }}>
 
@@ -2588,15 +2864,11 @@ export default function ZenAssessPage() {
                                 } catch { /* ignore check failure */ }
                               }
 
-                              setV7SelectedSkill(sk.skill);
-                              setAssessmentPath(startLevel);
+                              // AI proctoring: require permissions before the test begins.
+                              proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + sk.skill.replace(/\s+/g, '_');
                               setActiveSkillIdx(idx);
-                              resetRoundState();
-                              loadQuestionsForSkillLevel(sk.skill, startLevel);
-                              setV7Step(4);
-                              setV7Timer(startLevel === 'Beginner' ? 1800 : 3600);
-                              setV7TimerActive(true);
-                              markSkillInProgress(sk.skill, true);
+                              setPendingTestStart({ skill: sk.skill, level: startLevel, idx });
+                              setShowPermissionScreen(true);
                             }}
                             style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: state === 4 ? '#3B82F6' : 'linear-gradient(135deg, #3B82F6, #8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}
                           >
@@ -3545,6 +3817,16 @@ export default function ZenAssessPage() {
                       <div style={{ fontSize: 13, color: T.muted }}>No badge awarded</div>
                     </div>
                   )}
+
+                  {/* What this means — plain-language explanation */}
+                  <div style={{ marginTop: 20, paddingTop: 20, borderTop: `1px solid ${T.bdr}`, textAlign: 'left' }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>What this means</div>
+                    <p style={{ margin: 0, fontSize: 13, color: T.muted, lineHeight: 1.6 }}>
+                      {lastResult.badgeAwarded
+                        ? `You are now verified at ${lastResult.validatedLevel} level for ${lastResult.skill}. This badge appears on your profile and in manager staffing searches, giving your skill claim verified evidence.`
+                        : `You did not meet the validation threshold for ${lastResult.skill} this time, so no verified badge was awarded yet. Your self-rating stays on your profile — practise the fundamentals and re-assess to earn a verified badge.`}
+                    </p>
+                  </div>
                 </div>
 
                 {/* Block 2: ZenAICoach Tip — show if improvement needed */}
@@ -3574,6 +3856,9 @@ export default function ZenAssessPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Integrity Report — shown only when proctoring flagged activity */}
+                <IntegrityResultCard report={integrityReport} T={T} />
 
                 {/* Block 4: Navigation */}
                 <div className="result-nav-buttons" style={{ display: 'flex', gap: 16, marginTop: 12 }}>

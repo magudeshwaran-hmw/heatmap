@@ -29,7 +29,8 @@ export default function EducationPage({
   const [eduList, setEduList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
-  
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   const [formData, setFormData] = useState({
     degree: '',
     institution: '',
@@ -69,17 +70,19 @@ export default function EducationPage({
       const res = await fetch(`${API_BASE}/education`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          ...formData, 
+        body: JSON.stringify({
+          ...formData,
+          id: editingId || undefined,
           startDate: fixDate(formData.startDate),
           endDate: fixDate(formData.endDate),
-          employeeId: activeEmpId 
+          employeeId: activeEmpId
         })
       });
 
       if (res.ok) {
-        toast.success('Academic Portfolio Updated');
+        toast.success(editingId ? 'Academic Record Updated' : 'Academic Portfolio Updated');
         setIsAdding(false);
+        setEditingId(null);
         setFormData({ degree: '', institution: '', fieldOfStudy: '', startDate: '', endDate: '', description: '' });
         loadEducation();
       }
@@ -106,6 +109,30 @@ export default function EducationPage({
     } catch (err: any) {
       toast.error('Delete Error: ' + (err.message || 'Network error'));
     }
+  };
+
+  const openEdit = (edu: any) => {
+    setEditingId(edu.id || edu.ID);
+    setFormData({
+      degree: edu.degree || edu.Degree || '',
+      institution: edu.institution || edu.Institution || '',
+      fieldOfStudy: edu.fieldOfStudy || edu.FieldOfStudy || '',
+      startDate: edu.startDate || edu.StartDate || '',
+      endDate: edu.endDate || edu.EndDate || '',
+      description: edu.description || edu.Description || ''
+    });
+    setIsAdding(true);
+  };
+
+  const toggleAdd = () => {
+    if (isAdding) {
+      setIsAdding(false);
+      setEditingId(null);
+      return;
+    }
+    setEditingId(null);
+    setFormData({ degree: '', institution: '', fieldOfStudy: '', startDate: '', endDate: '', description: '' });
+    setIsAdding(true);
   };
 
   if (loading) return (
@@ -149,9 +176,9 @@ export default function EducationPage({
               <p style={{ margin: '4px 0 0', color: T.sub, fontSize: 13, fontWeight: 500 }}>Manage your professional qualifications and academic journey.</p>
             </div>
           </div>
-          <button 
-            onClick={() => setIsAdding(!isAdding)}
-            style={{ 
+          <button
+            onClick={toggleAdd}
+            style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '14px 28px', borderRadius: 14, 
               background: isAdding ? T.card : '#3B82F6', border: isAdding ? `1px solid ${T.bdr}` : 'none', 
               color: isAdding ? T.text : '#fff', fontWeight: 800, cursor: 'pointer', transition: '0.2s',
@@ -165,7 +192,7 @@ export default function EducationPage({
 
         {isAdding && (
           <div style={{ background: T.card, borderRadius: 24, padding: 32, border: `1px solid ${T.bdr}`, marginBottom: 32, animation: 'slideDown 0.3s' }}>
-            <h3 style={{ margin: '0 0 24px', fontSize: 18, fontWeight: 800 }}>Record New Entry</h3>
+            <h3 style={{ margin: '0 0 24px', fontSize: 18, fontWeight: 800 }}>{editingId ? 'Edit Entry' : 'Record New Entry'}</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 20 }}>
               <div style={{ gridColumn: 'span 2' }}>
                 <label style={{ display: 'block', fontSize: 12, fontWeight: 800, color: T.muted, textTransform: 'uppercase', marginBottom: 8 }}>Degree / Certification Name</label>
@@ -233,7 +260,10 @@ export default function EducationPage({
                       <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Calendar size={14} /> {edu.endDate}</span>
                     </div>
                   </div>
-                  <button onClick={() => handleDelete(edu.id)} style={{ padding: 10, borderRadius: 12, background: 'rgba(239,68,68,0.1)', border: 'none', color: '#EF4444', cursor: 'pointer', flexShrink: 0 }}><Trash2 size={16} /></button>
+                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                    <button onClick={() => openEdit(edu)} style={{ padding: 10, borderRadius: 12, background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', border: 'none', color: T.sub, cursor: 'pointer' }}><Edit2 size={16} /></button>
+                    <button onClick={() => handleDelete(edu.id)} style={{ padding: 10, borderRadius: 12, background: 'rgba(239,68,68,0.1)', border: 'none', color: '#EF4444', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                  </div>
                 </div>
                 <div style={{ marginTop: 16, padding: '14px', background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderRadius: 14, fontSize: 13, lineHeight: 1.5, color: T.sub }}>
                    Major in <span style={{ color: T.text, fontWeight: 700 }}>{edu.fieldOfStudy}</span>. 

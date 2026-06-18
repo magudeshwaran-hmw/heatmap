@@ -99,7 +99,6 @@ export default function ProjectsPage({
         setShowModal(false);
         toast.success(editingProj ? 'Project updated successfully' : 'New project added to portfolio');
         await reload();
-        if (!isPopup) window.location.reload();
       } else {
         toast.error(res.error || 'Failed to sync project');
       }
@@ -124,7 +123,6 @@ export default function ProjectsPage({
       if (res.success) {
         toast.success('Project removed from portfolio');
         await reload();
-        if (!isPopup) window.location.reload();
       } else {
         toast.error(res.error || 'Failed to delete');
       }

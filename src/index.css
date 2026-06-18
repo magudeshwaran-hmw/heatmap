@@ -197,6 +197,22 @@
   50%     { transform: translateY(-5px); }
 }
 
+/* AI Proctoring (ProctorCameraView) animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.6; transform: scale(0.95); }
+}
+@keyframes fadeInOut {
+  0%   { opacity: 0; transform: translateY(10px); }
+  20%  { opacity: 1; transform: translateY(0); }
+  80%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+@keyframes redFlash {
+  0%, 100% { border-color: transparent; }
+  50%      { border-color: #ef4444; }
+}
+
 /* Mobile Responsive Overrides */
 @media (max-width: 768px) {
   /* Target React's inline grid styles directly */

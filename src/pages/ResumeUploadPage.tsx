@@ -629,6 +629,31 @@ export default function ResumeUploadPage({
             </button>
           </div>
           <div style={{ padding: '24px' }}>
+            {(() => {
+              const projCount = pr.length;
+              const certCount = c.length;
+              const eduCount = extractedData.education?.length || 0;
+              const confidence = Math.min(65, skillCount * 3 + projCount * 5 + certCount * 6 + eduCount * 3 + (p.yearsIT ? 8 : 0));
+              return (
+                <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: 12, padding: 18, marginBottom: 20 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                    <CheckCircle size={18} color="#10B981" />
+                    <span style={{ fontSize: 14, fontWeight: 800, color: '#10B981' }}>Resume Processed</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: T.sub, marginBottom: 6 }}>Extracted from your resume:</div>
+                  <ul style={{ margin: '0 0 12px', paddingLeft: 18, fontSize: 13, color: T.text, display: 'grid', gap: 4 }}>
+                    <li>{skillCount} skills identified</li>
+                    <li>{projCount} projects found</li>
+                    <li>{certCount} certifications detected</li>
+                    <li>{p.yearsIT ? `${p.yearsIT} years experience calculated` : 'Experience not detected'}</li>
+                  </ul>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, paddingTop: 10, borderTop: `1px solid ${T.bdr}` }}>
+                    <span style={{ fontSize: 13, color: T.text }}>Profile confidence: <strong style={{ color: '#F59E0B' }}>{confidence}/100</strong></span>
+                    <span style={{ fontSize: 12, color: T.muted }}>Next step: Take ZenAssess to increase to 70+</span>
+                  </div>
+                </div>
+              );
+            })()}
             <div style={{ background: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 10, marginBottom: 20, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 12 }}>
               <div><span style={{ color: T.muted }}>Name:</span> {p.name || '—'}</div>
               <div><span style={{ color: T.muted }}>Role:</span> {p.designation || '—'}</div>
@@ -915,6 +940,16 @@ export default function ResumeUploadPage({
               <button onClick={onConfirmAndSave} style={{ padding: '14px 40px', minWidth: 200, background: '#3B82F6', border: 'none', color: '#fff', fontWeight: 700, borderRadius: 10, cursor: 'pointer', fontSize: 14 }}>
                 Go to ZenAssess →
               </button>
+            </div>
+
+            {/* What happens next */}
+            <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.bdr}` }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>What happens next</div>
+              <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: T.muted, display: 'grid', gap: 6, lineHeight: 1.5 }}>
+                <li>Your skills are now in ZenMatrix.</li>
+                <li>You appear in project staffing searches.</li>
+                <li>Take ZenAssess to verify your top 3 skills and earn badges.</li>
+              </ol>
             </div>
           </div>
         </div>

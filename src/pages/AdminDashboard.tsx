@@ -29,6 +29,7 @@ import AIIntelligencePage from './AIIntelligencePage';
 import AdminResumeUploadPage from './AdminResumeUploadPage';
 import ResumeBuilderPage from './ResumeBuilderPage';
 import { callResumeLLM } from '@/lib/llm';
+import { extractTextFromPDF, accurateExtractFromResume } from '@/lib/resumeExtraction';
 
 import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement, PointElement, LineElement, ArcElement,
@@ -41,7 +42,7 @@ ChartJS.register(
   BarController, LineController, DoughnutController, Tooltip, Legend, Title
 );
 
-// â”€â”€â”€ Internationalization Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Internationalization Helper ──────────────────────────────────────────────
 const t = (text: string): string => text;
 
 export default function AdminDashboard() {
@@ -73,7 +74,7 @@ export default function AdminDashboard() {
   const [rawExtractedData, setRawExtractedData] = useState<any>(null);
   const resumeFileRef = useRef<HTMLInputElement>(null);
 
-  // â”€â”€ Expert Reviews Queue State & Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Expert Reviews Queue State & Handlers ──────────────────────────────────
   const [reviews, setReviews] = useState<any[]>([]);
   const [selectedReview, setSelectedReview] = useState<any | null>(null);
   const [reviewNotes, setReviewNotes] = useState('');
@@ -119,13 +120,36 @@ export default function AdminDashboard() {
     }
   };
 
+  // ── AI Proctoring: Assessment Integrity Monitor ───────────────────────────
+  const [integrityReports, setIntegrityReports] = useState<any[]>([]);
+  const [isLoadingIntegrity, setIsLoadingIntegrity] = useState(false);
+  const [selectedIntegrity, setSelectedIntegrity] = useState<any | null>(null);
+
+  const fetchIntegrityReports = async () => {
+    setIsLoadingIntegrity(true);
+    try {
+      const res = await fetch(`${API_BASE}/admin/integrity-reports`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data)) {
+        setIntegrityReports(data);
+      }
+    } catch (err) {
+      /* silent — non-critical panel */
+    } finally {
+      setIsLoadingIntegrity(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'Expert Reviews') {
       fetchReviews();
+      fetchIntegrityReports();
     }
   }, [activeTab]);
 
-  // â”€â”€ Workforce Intelligence State & Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Workforce Intelligence State & Handlers ───────────────────────────────
   const [wfIntel, setWfIntel] = useState<any | null>(null);
   const [isLoadingWfIntel, setIsLoadingWfIntel] = useState(false);
   const [approvingSkill, setApprovingSkill] = useState<string | null>(null);
@@ -259,7 +283,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // â”€â”€ Extract text from PDF (with proper visual line detection) â”€â”€
+  // ── Extract text from PDF (with proper visual line detection) ──
   const extractPDFText = async (file: File): Promise<string> => {
     try {
       const pdfjsLib = (window as any).pdfjsLib;
@@ -278,7 +302,7 @@ export default function AdminDashboard() {
           for (const item of content.items as any[]) {
             const y = item.transform[5];
             if (lastY !== null && Math.abs(y - lastY) > 3) {
-              // Y position changed â†’ new visual line
+              // Y position changed → new visual line
               if (line.trim()) fullText += line.trim() + '\n';
               line = '';
             }
@@ -302,7 +326,7 @@ export default function AdminDashboard() {
   };
 
 
-  // â”€â”€ Scan resume and auto-fill form â”€â”€
+  // ── Scan resume and auto-fill form ──
   const handleResumeScan = async (file: File) => {
     setResumeScanLoading(true);
     setResumeScanned(false);
@@ -317,7 +341,7 @@ export default function AdminDashboard() {
       }
       console.log('[Resume Scan] Text length:', resumeText.length, '| First 120:', resumeText.slice(0, 120));
 
-      // â”€â”€ Regex helpers (always reliable) â”€â”€
+      // ── Regex helpers (always reliable) ──
       const rGet = (re: RegExp) => (resumeText.match(re)?.[1] ?? resumeText.match(re)?.[0] ?? '').trim();
 
       // Extract email & phone via regex (very reliable)
@@ -327,14 +351,14 @@ export default function AdminDashboard() {
       // Extract name: labeled field first, then heuristic scan
       const rxName = (() => {
         // First try labeled: "Name: Kishore S" or "Candidate Name: ..."
-        const labeled = rGet(/(?:^|\n)(?:candidate\s*)?name\s*[:\-â€“]\s*([A-Za-z][A-Za-z .'-]+)/im);
+        const labeled = rGet(/(?:^|\n)(?:candidate\s*)?name\s*[:\-–]\s*([A-Za-z][A-Za-z .'-]+)/im);
         if (labeled && labeled.length > 2) return labeled.trim();
         // Scan first 20 lines for a name-like line (allow single-char initials)
         const lines = resumeText.split('\n').slice(0, 20).map(l => l.trim()).filter(l => l.length > 1 && l.length < 55);
         for (const l of lines) {
           if (/[@\d|\\/#<>{}\[\]]/.test(l)) continue;
           if (/^(resume|cv|curriculum|vitae|profile|summary|contact|email|phone|mobile|address|www|http|dear|to|from|date|ref)/i.test(l)) continue;
-          // Title Case: "Kishore S" or "Rahul Kumar Sharma" â€” allow 1-char words (initials)
+          // Title Case: "Kishore S" or "Rahul Kumar Sharma" — allow 1-char words (initials)
           if (/^[A-Z][a-zA-Z'-]*(?:\s[A-Z][a-zA-Z'-]*){1,3}$/.test(l)) return l;
           // ALL CAPS: "KISHORE S" or "RAHUL KUMAR"
           if (/^[A-Z]+(?:\s[A-Z]+){1,3}$/.test(l) && !/^(QA|IT|UI|UX|HR|DB|AI|ML|DL|CI|CD)$/.test(l)) {
@@ -350,12 +374,12 @@ export default function AdminDashboard() {
       })();
 
       // Designation - check for labeled field or second prominent line
-      const rxDesig = rGet(/(?:designation|title|position|current\s*role|profile|objective)\s*[:\-â€“]\s*([A-Za-z][A-Za-z .\/]+)/im)
+      const rxDesig = rGet(/(?:designation|title|position|current\s*role|profile|objective)\s*[:\-–]\s*([A-Za-z][A-Za-z .\/]+)/im)
         || rGet(/^(?:software|senior|junior|lead|associate|principal|staff|qa|quality|devops|full.?stack|front.?end|back.?end|data|mobile|android|ios|test)\s+\w+/im);
 
-      // Location â€” labeled field or Indian city names
+      // Location — labeled field or Indian city names
       const rxLocation = (
-        rGet(/(?:location|city|address|residing|place|based(?:\s*(?:at|in|out))?|current\s*loc(?:ation)?|living\s*in)\s*[:\-â€“]\s*([A-Za-z][A-Za-z ,]+?)(?:\n|,\s*\d|\s{3,}|$)/im)
+        rGet(/(?:location|city|address|residing|place|based(?:\s*(?:at|in|out))?|current\s*loc(?:ation)?|living\s*in)\s*[:\-–]\s*([A-Za-z][A-Za-z ,]+?)(?:\n|,\s*\d|\s{3,}|$)/im)
         || (() => {
           // Scan for Indian city names directly
           const m = resumeText.match(/((?:[A-Za-z]+[,\s]+)?(?:Chennai|Pune|Bangalore|Bengaluru|Hyderabad|Mumbai|Delhi|Noida|Gurgaon|Gurugram|Kolkata|Ahmedabad|Surat|Jaipur|Coimbatore|Madurai|Kochi|Trivandrum|Nagpur|Indore|Bhopal|Chandigarh|Lucknow|Patna|Mysore|Mysuru|Vizag|Visakhapatnam|Vadodara|Rajkot|Thane|Navi Mumbai|Greater Noida|Faridabad|Ghaziabad)(?:[,\s]+[A-Za-z]+)?)/i);
@@ -364,13 +388,13 @@ export default function AdminDashboard() {
       );
 
       // Department  
-      const rxDept = rGet(/(?:department|division|team|vertical|practice|domain)\s*[:\-â€“]\s*([A-Za-z][A-Za-z ]+?)(?:\n|$)/im);
+      const rxDept = rGet(/(?:department|division|team|vertical|practice|domain)\s*[:\-–]\s*([A-Za-z][A-Za-z ]+?)(?:\n|$)/im);
 
       // Years IT - comprehensive patterns
       const rxYearsIT = (() => {
         const pats = [
           /(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?).*?(?:IT|software|technolog|develop|testing|engineer|industry|work)/i,
-          /(?:experience|exp(?:erience)?)\s*(?:of\s*)?[:\-â€“]?\s*(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)/i,
+          /(?:experience|exp(?:erience)?)\s*(?:of\s*)?[:\-–]?\s*(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)/i,
           /(\d+)(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:total\s+)?(?:professional\s+)?experience/i,
           /total\s+(?:work\s+)?(?:exp|experience)[:\s]*(\d+)/i,
           /(?:having|with)\s+(\d+)(?:\.\d+)?\s*\+?\s*(?:year|yr)/i,
@@ -398,12 +422,12 @@ JSON:`;
       // Step 2b: Extract Skills, Projects, Certificates, Education, Achievements (COMPREHENSIVE)
       let detailsExtraction: any = {};
       try {
-        const detailsPrompt = `ðŸš¨ CRITICAL EXTRACTION TASK - READ CAREFULLY ðŸš¨
+        const detailsPrompt = `🚨 CRITICAL EXTRACTION TASK - READ CAREFULLY 🚨
 
 You are extracting data from a PROFESSIONAL RESUME. Extract ALL skills, projects, achievements, certifications, and education.
 
 STEP 1: EXTRACT SKILLS FROM PREDEFINED LIST ONLY (CRITICAL)
-âš ï¸ ONLY extract skills that EXACTLY MATCH these 32 predefined skills:
+⚠️ ONLY extract skills that EXACTLY MATCH these 32 predefined skills:
 
 TOOLS: Selenium, Appium, JMeter, Postman, JIRA, TestRail
 TECHNOLOGIES: Python, Java, JavaScript, TypeScript, C#, SQL
@@ -428,14 +452,14 @@ STEP 2: EXTRACT ALL PROJECTS
 - Extract: name, client, role, startDate, endDate, description, technologies, duration
 
 STEP 3: EXTRACT ALL ACHIEVEMENTS
-âš ï¸ STRICT RULE - Only extract REAL awards/recognitions. DO NOT extract project metrics or outcomes.
+⚠️ STRICT RULE - Only extract REAL awards/recognitions. DO NOT extract project metrics or outcomes.
 
-âœ… VALID achievements (extract these):
+✅ VALID achievements (extract these):
 - Named awards: Pegasus, Gold Award, Silver Award, Bronze Medal, Best Team Award, Star Award
 - External recognitions: Kaggle medals, hackathon wins, competition rankings
 - Client appreciation: "Appreciated by client for quality and timely delivery"
 
-âŒ INVALID - DO NOT extract these as achievements:
+❌ INVALID - DO NOT extract these as achievements:
 - Project metrics: "Reduced false positive rate by 20%", "Improved accuracy to 82%"
 - Project outcomes: "Data Quality Improvement", "Page Load Speed Improvement"
 - Technical improvements: "Reduced manual review time", "Experiment time reduction"
@@ -446,7 +470,7 @@ WHERE TO LOOK:
 - "Major achievements" in each project: ONLY if it is a NAMED AWARD, not a metric
 - "Any client appreciation" in each project: extract client appreciation text
 
-IF NO AWARDS EXIST IN THE RESUME â†’ return empty achievements array []
+IF NO AWARDS EXIST IN THE RESUME → return empty achievements array []
 
 STEP 4: EXTRACT ALL CERTIFICATIONS
 - Look in "Certifications" section
@@ -514,7 +538,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         }
       } catch (e) { console.warn('[Resume Scan] Details extraction failed:', e); }
 
-      // Step 3: Merge â€” LLM fills where regex couldn't, regex wins for email/phone
+      // Step 3: Merge — LLM fills where regex couldn't, regex wins for email/phone
       const final = {
         name:        (llm.name?.trim()        || rxName        || ''),
         email:       (rxEmail                 || llm.email?.trim()        || ''),
@@ -607,7 +631,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         if (extractedEducation.length > 0) allFilled.push(`${extractedEducation.length} Education`);
         const achievementsCount = Array.isArray(detailsExtraction.achievements) ? detailsExtraction.achievements.length : 0;
         if (achievementsCount > 0) allFilled.push(`${achievementsCount} Achievements`);
-        toast.success(`âœ… Auto-filled: ${allFilled.join(' Â· ')}`);
+        toast.success(`✅ Auto-filled: ${allFilled.join(' · ')}`);
       } else {
         toast.error('Could not extract details. Please fill the form manually.');
       }
@@ -621,6 +645,104 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
 
   const [employees, setEmployees] = useState<any[]>([]);
+  const [skillDemand, setSkillDemand] = useState<Record<string, number>>({});
+
+  // Demand signal: how many open BFSI roles reference each canonical skill (best-effort)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/bfsi/roles`);
+        if (!res.ok) return;
+        const json = await res.json();
+        const roles = json.roles || json || [];
+        if (!Array.isArray(roles) || roles.length === 0) return;
+        const demand: Record<string, number> = {};
+        SKILLS.forEach(sk => {
+          const n = sk.name.toLowerCase();
+          if (n.length < 3) return;
+          demand[sk.name] = roles.filter((r: any) => JSON.stringify(r || {}).toLowerCase().includes(n)).length;
+        });
+        setSkillDemand(demand);
+      } catch { /* demand unavailable — Supply/Demand card degrades gracefully */ }
+    })();
+  }, []);
+
+  // ── Bulk resume import (client-side: reuses ZenScan extraction + create-employee) ──
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+  const [bulkResult, setBulkResult] = useState<{ created: number; failed: number; skills: number } | null>(null);
+  const bulkInputRef = useRef<HTMLInputElement>(null);
+
+  const handleBulkResumeImport = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const list = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(0, 100);
+    if (list.length === 0) { toast.error('Please select PDF resume files'); return; }
+    setBulkImporting(true);
+    setBulkResult(null);
+    setBulkProgress({ current: 0, total: list.length });
+    let created = 0, failed = 0, skillsTotal = 0;
+    for (let i = 0; i < list.length; i++) {
+      setBulkProgress({ current: i + 1, total: list.length });
+      try {
+        const text = await extractTextFromPDF(list[i]);
+        if (!text || !text.trim()) { failed++; continue; }
+        let data: any;
+        try { data = await accurateExtractFromResume(text); } catch { failed++; continue; }
+        const p = data.profile || {};
+        const skillsArr = Object.entries(data.skills || {})
+          .filter(([, v]) => (v as number) > 0)
+          .map(([name, rating]) => ({ name, rating: rating as number }));
+        const projects = (data.projects || []).map((pr: any) => ({
+          name: pr.ProjectName || pr.name || '',
+          description: pr.Description || pr.description || '',
+          technologies: pr.Technologies || pr.technologies || [],
+          duration: [pr.StartDate, pr.EndDate].filter(Boolean).join(' - '),
+        }));
+        const certificates = (data.certifications || [])
+          .map((c: any) => ({ name: c.CertName || c.certName || c.name || (typeof c === 'string' ? c : ''), issuer: c.Provider || c.issuer || '' }))
+          .filter((c: any) => c.name);
+        const education = (data.education || []).map((e: any) => ({ degree: e.degree || '', institution: e.institution || '', field: e.field || '', year: e.year || '' }));
+        const id = 'IMP' + Date.now().toString(36) + i;
+        const email = (p.email && String(p.email).includes('@')) ? p.email : `${id.toLowerCase()}@imported.zensar`;
+        const token = localStorage.getItem('zn_access_token');
+        const res = await fetch(`${API_BASE}/admin/create-employee`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({
+            name: p.name || list[i].name.replace(/\.pdf$/i, ''),
+            email, employeeId: id, phone: p.phone || '',
+            designation: p.designation || '', location: p.location || '',
+            yearsIT: p.yearsIT || 0, yearsZensar: 0, password: 'Imported@2026',
+            primarySkill: p.primarySkill || '', secondarySkill: p.secondarySkill || '', tertiarySkill: p.tertiarySkill || '',
+            skills: skillsArr, projects, certificates, education,
+          }),
+        });
+        if (res.ok) { created++; skillsTotal += skillsArr.length; } else { failed++; }
+      } catch { failed++; }
+    }
+    setBulkResult({ created, failed, skills: skillsTotal });
+    setBulkImporting(false);
+    if (bulkInputRef.current) bulkInputRef.current.value = '';
+    await loadAllData();
+    toast.success(`Bulk import complete: ${created} created · ${failed} failed`);
+  };
+
+  // Bench risk from project history (days since last project ended)
+  const benchRiskOf = (e: any): { label: string; color: string; days: number } => {
+    const projs = e.projects || [];
+    if (projs.some((p: any) => p.IsOngoing || p.is_ongoing)) return { label: 'Low', color: '#10B981', days: 0 };
+    const ends = projs
+      .map((p: any) => p.EndDate || p.end_date)
+      .filter(Boolean)
+      .map((d: string) => new Date(d).getTime())
+      .filter((t: number) => !isNaN(t));
+    if (ends.length === 0) return { label: 'Unknown', color: '#6B7280', days: -1 };
+    const days = Math.round((Date.now() - Math.max(...ends)) / (24 * 3600 * 1000));
+    if (days < 14) return { label: 'Low', color: '#10B981', days };
+    if (days < 30) return { label: 'Medium', color: '#F59E0B', days };
+    if (days < 60) return { label: 'High', color: '#F97316', days };
+    return { label: 'Critical', color: '#EF4444', days };
+  };
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   
@@ -651,7 +773,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [achSearch, setAchSearch] = useState('');
   const [eduSearch, setEduSearch] = useState('');
   const [projSearch, setProjSearch] = useState('');
-  // Expanded cards state (empId â†’ boolean)
+  // Expanded cards state (empId → boolean)
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
 
   const runAiSearch = (query: string, empList: any[]) => {
@@ -688,7 +810,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
-  // â”€â”€ Multi-select delete (Manage Employees) â”€â”€
+  // ── Multi-select delete (Manage Employees) ──
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -768,14 +890,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       });
   };
 
-  // â”€â”€ DELETE employee â”€â”€
+  // ── DELETE employee ──
   const handleDeleteEmployee = async (empId: string, empName: string) => {
     setGlobalLoading(`Purging ${empName} from records...`);
     try {
       const res = await fetch(`${API_BASE}/employees/${empId}`, { method: 'DELETE' });
       const d = await res.json();
       if (res.ok && d.success) {
-        toast.success(`ðŸ—‘ï¸ Account for "${empName}" permanently removed.`);
+        toast.success(`🗑️ Account for "${empName}" permanently removed.`);
         setPreviewUser(null);
         setPreviewData(null);
         setDeleteConfirming(false);
@@ -841,7 +963,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     setLoading(true);
     setGlobalLoading('Synchronizing Global Cloud...');
     try {
-      // â”€â”€ Employees + Skills (essential) â”€â”€
+      // ── Employees + Skills (essential) ──
       const res = await fetch(`${API_BASE}/employees`);
       if (!res.ok) {
         throw new Error(`Server returned ${res.status} — is the backend running on port 3001?`);
@@ -850,28 +972,28 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       const _emps = d.employees || [];
       const _skills = d.skills || [];
 
-      // â”€â”€ Certifications (non-blocking) â”€â”€
+      // ── Certifications (non-blocking) ──
       let certifications: any[] = [];
       try {
         const cRes = await fetch(`${API_BASE}/certifications/ALL`);
         if (cRes.ok) ({ certifications } = await cRes.json());
-      } catch { /* ignore â€” show employees without cert data */ }
+      } catch { /* ignore — show employees without cert data */ }
 
-      // â”€â”€ Projects (non-blocking) â”€â”€
+      // ── Projects (non-blocking) ──
       let projects: any[] = [];
       try {
         const pRes = await fetch(`${API_BASE}/projects/ALL`);
         if (pRes.ok) ({ projects } = await pRes.json());
-      } catch { /* ignore â€” show employees without project data */ }
+      } catch { /* ignore — show employees without project data */ }
 
-      // â”€â”€ Achievements (non-blocking) â”€â”€
+      // ── Achievements (non-blocking) ──
       let achievements: any[] = [];
       try {
         const aRes = await fetch(`${API_BASE}/achievements/ALL`);
         if (aRes.ok) { const aData = await aRes.json(); achievements = aData.achievements || aData || []; }
       } catch { /* ignore */ }
 
-      // â”€â”€ Education (non-blocking) â”€â”€
+      // ── Education (non-blocking) ──
       let education: any[] = [];
       try {
         const eRes = await fetch(`${API_BASE}/education/ALL`);
@@ -899,6 +1021,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             selfRating: (raw?.self_rating || 0) as any,
             managerRating: raw?.manager_rating || null,
             validated: raw?.validated || false,
+            verifiedBadgeLevel: raw?.verified_badge_level || null,
+            lastValidationDate: raw?.last_validated_date || null,
             isCustom: false
           };
         });
@@ -1065,10 +1189,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
       education: payload.education?.length || 0
     };
     
-    toast.success(`âœ… "${newEmployee.name}" created â€” ${savedCounts.skills} skills, ${savedCounts.projects} projects, ${savedCounts.certificates} certs!`);
+    toast.success(`✅ "${newEmployee.name}" created — ${savedCounts.skills} skills, ${savedCounts.projects} projects, ${savedCounts.certificates} certs!`);
 
     if (openDetails && rawExtractedData) {
-      // Employee now exists in DB â€” open comparison page with correct ID
+      // Employee now exists in DB — open comparison page with correct ID
       setCreatedEmployeeId(newEmployee.employeeId);
       setShowAddEmployeeModal(false);
       setEmailWarningConfirmed(false);
@@ -1163,7 +1287,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           </div>
 
           {activeTab === 'Overview' && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 30, animation: 'fadeIn 0.4s ease' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 30, animation: 'fadeIn 0.4s ease' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 30 }}>
               <div>
                 <h3 style={{ margin: '0 0 32px', fontSize: 18, fontWeight: 800, display:'flex', alignItems:'center', gap:12 }}><BarChart3 size={20} color="#3B82F6" /> Distribution</h3>
                 <div style={{ height: 350 }}>
@@ -1189,10 +1314,161 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                  ))}
               </div>
             </div>
+
+            {(() => {
+              // Evidence score per employee (resume signals + verified + manager + projects)
+              const scoreOf = (e: any) => {
+                let s = 0;
+                if (e.submitted) s += 15;
+                const skills = e.skills || [];
+                const verified = skills.filter((k: any) => k.verifiedBadgeLevel).length;
+                const validated = skills.filter((k: any) => k.validated || (k.managerRating || 0) > 0).length;
+                s += Math.min(verified * 10, 40);
+                s += Math.min(validated * 4, 12);
+                s += (e.certifications?.length ? 10 : 0);
+                s += Math.min((e.projects?.length || 0) * 4, 12);
+                if (skills.some((k: any) => (k.selfRating || 0) > 0)) s += 15;
+                return Math.min(100, s);
+              };
+              const scored = employees.map(e => ({ e, score: scoreOf(e) }));
+              const total = scored.length || 1;
+              const buckets = [
+                { label: 'Elite Profile (80-100)', test: (n: number) => n >= 80, color: '#10B981' },
+                { label: 'Validated (60-79)', test: (n: number) => n >= 60 && n < 80, color: '#3B82F6' },
+                { label: 'Enriched (40-59)', test: (n: number) => n >= 40 && n < 60, color: '#F59E0B' },
+                { label: 'Resume Only (< 40)', test: (n: number) => n < 40, color: '#EF4444' },
+              ].map(b => { const c = scored.filter(x => b.test(x.score)).length; return { ...b, count: c, pct: Math.round((c / total) * 100) }; });
+              const needAttention = buckets[3].count;
+
+              // Hidden talent: 3+ projects but no verified badge / no assessment
+              const hidden = employees.filter(e =>
+                (e.projects?.length || 0) >= 3 &&
+                !(e.skills || []).some((k: any) => k.verifiedBadgeLevel)
+              ).slice(0, 5);
+
+              // Supply vs demand
+              const supplyOf = (skillName: string) => employees.filter(e =>
+                (e.skills || []).some((k: any) => k.skillName === skillName && (k.verifiedBadgeLevel || k.validated))
+              ).length;
+              const demandRows = Object.keys(skillDemand).length
+                ? SKILLS.map(sk => ({ skill: sk.name, supply: supplyOf(sk.name), demand: skillDemand[sk.name] || 0 }))
+                    .map(r => ({ ...r, gap: r.demand - r.supply }))
+                    .filter(r => r.demand > 0)
+                    .sort((a, b) => a.gap - b.gap)
+                    .slice(0, 6)
+                : [];
+              const criticalGaps = demandRows.filter(r => r.gap <= -4).length;
+              const gapColor = (g: number) => g >= 0 ? '#10B981' : g >= -3 ? '#F59E0B' : '#EF4444';
+              const gapIcon = (g: number) => g >= 0 ? '✓' : g <= -4 ? '🔴' : '⚠';
+
+              return (
+                <>
+                  {/* FEATURE 2 — Workforce Visibility Health */}
+                  <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                    <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800 }}>Workforce Visibility Health</h3>
+                    <div style={{ fontSize: 12, color: T.sub, marginBottom: 18 }}>Total Employees: {employees.length}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                      {buckets.map(b => (
+                        <div key={b.label}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+                            <span style={{ color: T.text, fontWeight: 700 }}>{b.label}</span>
+                            <span style={{ color: b.color, fontWeight: 800 }}>{b.count} ({b.pct}%)</span>
+                          </div>
+                          <div style={{ height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${b.pct}%`, background: b.color, borderRadius: 999 }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {needAttention > 0 && (
+                      <div style={{ marginTop: 16, fontSize: 13, color: T.sub }}>
+                        {needAttention} employee{needAttention !== 1 ? 's' : ''} need assessment to become searchable for projects.
+                        <button onClick={() => setActiveTab('Manage Employees')} style={{ marginLeft: 10, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>View Employees</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* FEATURE 7 — Hidden Talent Discovery */}
+                  {hidden.length > 0 && (
+                    <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                      <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>🔍 Hidden Talent Discovery</h3>
+                      <div style={{ fontSize: 12, color: T.sub, marginBottom: 16 }}>Strong project history but no assessment yet — they may be underrepresented in staffing searches.</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {hidden.map(e => (
+                          <div key={e.id} style={{ fontSize: 13, color: T.text }}>
+                            • <strong>{e.name}</strong> — {e.projects?.length || 0} projects, no verified assessment
+                          </div>
+                        ))}
+                      </div>
+                      <button onClick={() => setActiveTab('Manage Employees')} style={{ marginTop: 14, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '8px 14px', borderRadius: 8, cursor: 'pointer' }}>Review Candidates</button>
+                    </div>
+                  )}
+
+                  {/* FEATURE 8 — Skill Supply vs Demand */}
+                  {demandRows.length > 0 && (
+                    <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                      <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 800 }}>Skill Supply vs Demand</h3>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ color: T.sub, textAlign: 'left' }}>
+                            <th style={{ padding: '6px 8px', fontWeight: 700 }}>Skill</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Supply</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Demand</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Gap</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {demandRows.map(r => (
+                            <tr key={r.skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
+                              <td style={{ padding: '8px', color: T.text, fontWeight: 600 }}>{r.skill}</td>
+                              <td style={{ padding: '8px', textAlign: 'right', color: T.sub }}>{r.supply}</td>
+                              <td style={{ padding: '8px', textAlign: 'right', color: T.sub }}>{r.demand}</td>
+                              <td style={{ padding: '8px', textAlign: 'right', fontWeight: 800, color: gapColor(r.gap) }}>{r.gap > 0 ? `+${r.gap}` : r.gap} {gapIcon(r.gap)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {criticalGaps > 0 && (
+                        <div style={{ marginTop: 14, fontSize: 13, color: T.sub }}>
+                          {criticalGaps} critical gap{criticalGaps !== 1 ? 's' : ''} need immediate action.
+                          <button onClick={() => navigate('/admin/bfsi')} style={{ marginLeft: 10, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>View Reskilling</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+            </div>
           )}
 
           {activeTab === 'Manage Employees' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              {/* Bulk Resume Import */}
+              <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 20, marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                  <div>
+                    <h3 style={{ margin: '0 0 4px', fontSize: 15, fontWeight: 800 }}>Bulk Employee Import</h3>
+                    <div style={{ fontSize: 12, color: T.sub }}>Import employees from resumes (PDF, up to 100). Skills, projects, certifications & experience are extracted automatically.</div>
+                  </div>
+                  <input ref={bulkInputRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={e => handleBulkResumeImport(e.target.files)} />
+                  <button disabled={bulkImporting} onClick={() => bulkInputRef.current?.click()} style={{ padding: '10px 18px', borderRadius: 10, background: bulkImporting ? T.card : '#3B82F6', color: bulkImporting ? T.sub : '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: bulkImporting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                    <Upload size={16} /> {bulkImporting ? `Processing ${bulkProgress.current} of ${bulkProgress.total}...` : 'Upload Multiple Resumes'}
+                  </button>
+                </div>
+                {bulkImporting && (
+                  <div style={{ marginTop: 14, height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${bulkProgress.total ? Math.round(bulkProgress.current / bulkProgress.total * 100) : 0}%`, background: 'linear-gradient(90deg,#3B82F6,#8B5CF6)', transition: 'width 0.3s ease' }} />
+                  </div>
+                )}
+                {bulkResult && !bulkImporting && (
+                  <div style={{ marginTop: 14, padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, fontSize: 13 }}>
+                    <div style={{ color: '#10B981', fontWeight: 800, marginBottom: bulkResult.failed > 0 ? 6 : 0 }}>✓ {bulkResult.created} profiles created · {bulkResult.skills} skills extracted</div>
+                    {bulkResult.failed > 0 && <div style={{ color: '#EF4444' }}>✗ {bulkResult.failed} resume{bulkResult.failed !== 1 ? 's' : ''} could not be parsed</div>}
+                  </div>
+                )}
+              </div>
+
               {/* Search & Filter Bar */}
               <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
                 <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
@@ -1220,7 +1496,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     gap: 6
                   }}
                 >
-                  <Filter size={14} /> Filters {(filters.role || filters.minExperience || filters.minProjects || filters.minCertifications || filters.completionRange || filters.hasProjects || filters.hasCertifications || filters.isValidated || (filters.selectedSkills || []).length > 0) ? 'â—' : ''}
+                  <Filter size={14} /> Filters {(filters.role || filters.minExperience || filters.minProjects || filters.minCertifications || filters.completionRange || filters.hasProjects || filters.hasCertifications || filters.isValidated || (filters.selectedSkills || []).length > 0) ? '●' : ''}
                 </button>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button 
@@ -1328,7 +1604,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Role Filter */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      ðŸ‘” Role
+                      👔 Role
                     </label>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {['All', 'QA', 'Senior QA', 'Lead', 'Manager', 'Dev', 'DevOps'].map(role => (
@@ -1355,7 +1631,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Experience Filter */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      ðŸ“… Experience
+                      📅 Experience
                     </label>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {['All', '0-2', '2-5', '5-8', '8+'].map(exp => (
@@ -1397,7 +1673,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   {/* Skills Filter - Checkbox List */}
                   <div style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: T.sub, marginBottom: 6, display: 'block' }}>
-                      ðŸ› ï¸ Skills
+                      🛠️ Skills
                     </label>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 4, maxHeight: 160, overflowY: 'auto', padding: 8, background: T.input, borderRadius: 8 }}>
                       {SKILLS.map(skill => (
@@ -1478,7 +1754,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, hasProjects: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      ðŸ“ Has Projects
+                      📁 Has Projects
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: T.text }}>
                       <input 
@@ -1487,7 +1763,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, hasCertifications: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      ðŸ† Has Certs
+                      🏆 Has Certs
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: T.text }}>
                       <input 
@@ -1496,7 +1772,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         onChange={e => setFilters({...filters, isValidated: e.target.checked})}
                         style={{ width: 14, height: 14, cursor: 'pointer' }}
                       />
-                      âœ… Validated
+                      ✅ Validated
                     </label>
                   </div>
                 </div>
@@ -1528,6 +1804,22 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                 })()}
               </div>
               
+              {/* Bench Status Overview */}
+              {(() => {
+                const risks = employees.map(benchRiskOf);
+                const allocated = risks.filter(r => r.label === 'Low').length;
+                const atRisk = risks.filter(r => r.label === 'High' || (r.days >= 30 && r.days < 60)).length;
+                const critical = risks.filter(r => r.label === 'Critical').length;
+                return (
+                  <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: '16px 20px', marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.5 }}>Bench Status</div>
+                    <div style={{ fontSize: 13, color: T.text }}><strong style={{ color: '#10B981' }}>{allocated}</strong> allocated / recent</div>
+                    <div style={{ fontSize: 13, color: T.text }}><strong style={{ color: '#F97316' }}>{atRisk}</strong> at risk (30+ days) ⚠</div>
+                    <div style={{ fontSize: 13, color: T.text }}><strong style={{ color: '#EF4444' }}>{critical}</strong> critical (60+ days) 🔴</div>
+                  </div>
+                );
+              })()}
+
               {/* Select-all + bulk delete toolbar */}
               {(() => {
                 const vis = computeVisibleEmployees();
@@ -1602,6 +1894,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           {e.yearsExperience > 0 && (
                             <span style={{ padding: '3px 8px', borderRadius: 4, background: T.card, color: T.sub, fontSize: 9, fontWeight: 600 }}>{e.yearsExperience} yrs exp</span>
                           )}
+                          {(() => {
+                            const r = benchRiskOf(e);
+                            return (
+                              <span title={r.days >= 0 ? `${r.days} days since last project ended` : 'No project history'} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 4, background: `${r.color}1A`, color: r.color, fontSize: 9, fontWeight: 800 }}>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: r.color }} /> {r.label} BENCH
+                              </span>
+                            );
+                          })()}
                        </div>
 
                        {/* Skills Preview */}
@@ -1620,8 +1920,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                        
                        <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <div style={{ display: 'flex', gap: 12, fontSize: 11, color: T.muted }}>
-                            {e.projects?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>ðŸ“ {e.projects.length}</span>}
-                            {e.certifications?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>ðŸ† {e.certifications.length}</span>}
+                            {e.projects?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>📁 {e.projects.length}</span>}
+                            {e.certifications?.length > 0 && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>🏆 {e.certifications.length}</span>}
                           </div>
                           <Eye size={16} color={T.muted} />
                        </div>
@@ -1649,7 +1949,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ CERTIFICATIONS TAB â”€â”€ */}
+          {/* ── CERTIFICATIONS TAB ── */}
           {activeTab === 'Certifications' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1688,12 +1988,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.certifications.length} ðŸ…</div>
+                        <div style={{ background: 'rgba(16,185,129,0.15)', color: '#10B981', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.certifications.length} 🏅</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((c: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(16,185,129,0.06)' : '#f0fdf4', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ…</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏅</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{c.cert_name || c.name || 'Certificate'}</div>
                               {(c.issuing_organization || c.issuer) && <div style={{ fontSize: 10, color: T.sub }}>{c.issuing_organization || c.issuer}</div>}
@@ -1703,7 +2003,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.certifications.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`cert_${e.id}`]: !prev[`cert_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#10B981', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.certifications.length - 3} more)`}
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.certifications.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1720,7 +2020,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ ACHIEVEMENTS TAB â”€â”€ */}
+          {/* ── ACHIEVEMENTS TAB ── */}
           {activeTab === 'Achievements' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1759,12 +2059,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(245,158,11,0.15)', color: '#F59E0B', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.achievements.length} ðŸ†</div>
+                        <div style={{ background: 'rgba(245,158,11,0.15)', color: '#F59E0B', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.achievements.length} 🏆</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((a: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(245,158,11,0.06)' : '#fffbeb', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ†</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🏆</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{a.title || a.award_title || 'Achievement'}</div>
                               {(a.award_type || a.category) && <div style={{ fontSize: 10, color: T.sub }}>{a.award_type || a.category}</div>}
@@ -1774,7 +2074,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.achievements.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`ach_${e.id}`]: !prev[`ach_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.achievements.length - 3} more)`}
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.achievements.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1791,7 +2091,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ EDUCATION TAB â”€â”€ */}
+          {/* ── EDUCATION TAB ── */}
           {activeTab === 'Education' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1830,22 +2130,22 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(139,92,246,0.15)', color: '#8B5CF6', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.education.length} ðŸŽ“</div>
+                        <div style={{ background: 'rgba(139,92,246,0.15)', color: '#8B5CF6', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.education.length} 🎓</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((ed: any, i: number) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(139,92,246,0.06)' : '#faf5ff', borderRadius: 8 }}>
-                            <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸŽ“</span>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>🎓</span>
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{ed.degree || ed.qualification || 'Degree'}</div>
-                              {(ed.institution || ed.university) && <div style={{ fontSize: 10, color: T.sub }}>{ed.institution || ed.university}{ed.year ? ` Â· ${ed.year}` : ''}</div>}
+                              {(ed.institution || ed.university) && <div style={{ fontSize: 10, color: T.sub }}>{ed.institution || ed.university}{ed.year ? ` · ${ed.year}` : ''}</div>}
                             </div>
                           </div>
                         ))}
                         {e.education.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`edu_${e.id}`]: !prev[`edu_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#8B5CF6', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.education.length - 3} more)`}
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.education.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1862,7 +2162,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ PROJECTS TAB â”€â”€ */}
+          {/* ── PROJECTS TAB ── */}
           {activeTab === 'Projects' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -1905,15 +2205,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ fontWeight: 800, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.name}</div>
                           <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
                         </div>
-                        <div style={{ background: 'rgba(249,115,22,0.15)', color: '#F97316', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.projects.length} ðŸ“</div>
+                        <div style={{ background: 'rgba(249,115,22,0.15)', color: '#F97316', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{e.projects.length} 📁</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {items.map((p: any, i: number) => {
                           const title = p.ProjectName || p.project_name || p.name || '';
-                          const sub = [p.Client || p.client, p.Domain || p.domain].filter(Boolean).join(' Â· ');
+                          const sub = [p.Client || p.client, p.Domain || p.domain].filter(Boolean).join(' · ');
                           return (
                             <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 10px', background: dark ? 'rgba(249,115,22,0.06)' : '#fff7ed', borderRadius: 8 }}>
-                              <span style={{ fontSize: 13, flexShrink: 0 }}>ðŸ“</span>
+                              <span style={{ fontSize: 13, flexShrink: 0 }}>📁</span>
                               <div style={{ minWidth: 0 }}>
                                 <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title || 'Untitled Project'}</div>
                                 {sub && <div style={{ fontSize: 10, color: T.sub }}>{sub}</div>}
@@ -1924,7 +2224,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         {e.projects.length > 3 && (
                           <button onClick={() => setExpandedCards(prev => ({ ...prev, [`proj_${e.id}`]: !prev[`proj_${e.id}`] }))}
                             style={{ marginTop: 4, padding: '6px 0', background: 'none', border: 'none', color: '#F97316', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}>
-                            {expanded ? 'â–² Show Less' : `â–¼ See More (${e.projects.length - 3} more)`}
+                            {expanded ? '▲ Show Less' : `▼ See More (${e.projects.length - 3} more)`}
                           </button>
                         )}
                       </div>
@@ -1941,9 +2241,101 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ EXPERT REVIEWS TAB â”€â”€ */}
+          {/* ── EXPERT REVIEWS TAB ── */}
           {activeTab === 'Expert Reviews' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              {/* ─── AI Proctoring: Assessment Integrity Monitor ─── */}
+              <div style={{ marginBottom: 28, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+                    🔍 Assessment Integrity Monitor
+                  </h3>
+                  <button onClick={fetchIntegrityReports} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <RefreshCw size={13} className={isLoadingIntegrity ? 'animate-spin' : ''} /> Refresh
+                  </button>
+                </div>
+
+                {isLoadingIntegrity ? (
+                  <p style={{ color: T.sub, fontSize: 13, margin: 0 }}>Loading integrity reports...</p>
+                ) : integrityReports.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: 24, color: T.sub, fontSize: 13 }}>No proctored assessments recorded yet.</div>
+                ) : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ color: T.sub, textAlign: 'left', borderBottom: `1px solid ${T.bdr}` }}>
+                          <th style={{ padding: '10px 12px' }}>Employee</th>
+                          <th style={{ padding: '10px 12px' }}>Skill</th>
+                          <th style={{ padding: '10px 12px' }}>Score</th>
+                          <th style={{ padding: '10px 12px' }}>Verdict</th>
+                          <th style={{ padding: '10px 12px' }}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {integrityReports.map((ir) => {
+                          const verdictMeta: Record<string, { label: string; color: string }> = {
+                            clean: { label: '✅ Clean', color: '#10B981' },
+                            suspicious: { label: '🟡 Suspicious', color: '#F59E0B' },
+                            high_risk: { label: '🔴 High Risk', color: '#EF4444' },
+                            compromised: { label: '🔴 Compromised', color: '#EF4444' },
+                          };
+                          const vm = verdictMeta[ir.verdict] || { label: ir.verdict || '—', color: T.sub };
+                          const flagCount = Array.isArray(ir.flags) ? ir.flags.length : 0;
+                          return (
+                            <tr key={ir.id} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                              <td style={{ padding: '12px' }}>
+                                <div style={{ fontWeight: 700, color: T.text }}>{ir.employee_name || ir.employee_id}</div>
+                                {ir.designation && <div style={{ fontSize: 11, color: T.sub }}>{ir.designation}</div>}
+                              </td>
+                              <td style={{ padding: '12px', fontWeight: 600 }}>{ir.skill_name}</td>
+                              <td style={{ padding: '12px' }}>
+                                <span style={{ fontWeight: 800, color: ir.integrity_score >= 85 ? '#10B981' : ir.integrity_score >= 65 ? '#F59E0B' : '#EF4444' }}>
+                                  {ir.integrity_score}
+                                </span>
+                              </td>
+                              <td style={{ padding: '12px' }}>
+                                <span style={{ fontWeight: 700, color: vm.color }}>{vm.label}</span>
+                              </td>
+                              <td style={{ padding: '12px' }}>
+                                {flagCount > 0 ? (
+                                  <button onClick={() => setSelectedIntegrity(selectedIntegrity?.id === ir.id ? null : ir)} style={{ padding: '4px 12px', borderRadius: 8, border: `1px solid ${vm.color}`, background: 'transparent', color: vm.color, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                                    {selectedIntegrity?.id === ir.id ? 'Hide' : (ir.verdict === 'clean' || ir.verdict === 'suspicious' ? 'View' : 'Review')}
+                                  </button>
+                                ) : (
+                                  <span style={{ fontSize: 12, color: T.sub }}>—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+
+                    {/* Expanded detail for the selected report */}
+                    {selectedIntegrity && (
+                      <div style={{ marginTop: 16, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                          <div style={{ fontWeight: 800, color: T.text, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <AlertTriangle size={15} color="#F59E0B" /> {selectedIntegrity.skill_name} — {selectedIntegrity.employee_name || selectedIntegrity.employee_id}
+                          </div>
+                          <div style={{ fontSize: 12, color: T.sub }}>
+                            📷 {selectedIntegrity.camera_enabled ? 'Camera Active' : 'No camera'} · 🤖 {selectedIntegrity.ai_enabled ? 'AI Active' : 'AI off'}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {(Array.isArray(selectedIntegrity.flags) ? selectedIntegrity.flags : []).map((f: any, i: number) => (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: T.bg, borderRadius: 8, fontSize: 12 }}>
+                              <span style={{ color: T.text, textTransform: 'capitalize' }}>{String(f.type || '').replace(/_/g, ' ')} — <span style={{ color: T.sub }}>{f.details}</span></span>
+                              <span style={{ color: T.sub, fontSize: 11 }}>{f.timestamp ? new Date(f.timestamp).toLocaleTimeString() : ''}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                 <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Shield size={20} color="#8B5CF6" /> Expert Validation Queue
@@ -1986,7 +2378,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             <td style={{ padding: '14px 16px', fontWeight: 600 }}>{r.skill_name || 'Performance Testing'}</td>
                             <td style={{ padding: '14px 16px' }}>
                               <span style={{ color: isOverdue ? '#EF4444' : T.text, fontWeight: isOverdue ? 700 : 500 }}>
-                                {new Date(r.sla_deadline).toLocaleDateString()} {isOverdue && 'âš ï¸ OVERDUE'}
+                                {new Date(r.sla_deadline).toLocaleDateString()} {isOverdue && '⚠️ OVERDUE'}
                               </span>
                             </td>
                             <td style={{ padding: '14px 16px' }}>
@@ -1999,7 +2391,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                 </span>
                                 {(r.tab_switch_count > 0 || r.copy_paste_count > 0) && (
                                   <span style={{ fontSize: 10, color: '#F59E0B', fontWeight: 600 }}>
-                                    âš ï¸ {r.tab_switch_count > 0 ? `Tab switches: ${r.tab_switch_count} ` : ''}
+                                    ⚠️ {r.tab_switch_count > 0 ? `Tab switches: ${r.tab_switch_count} ` : ''}
                                     {r.copy_paste_count > 0 ? `Copy/Paste: ${r.copy_paste_count}` : ''}
                                   </span>
                                 )}
@@ -2074,10 +2466,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <Shield size={20} color="#8B5CF6" /> {showReviewActionModal} Validation Request
                         </h3>
                         <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>
-                          Employee: <strong>{selectedReview.employee_name}</strong> Â· Zensar ID: <strong>{selectedReview.zensar_id || 'â€”'}</strong> Â· Skill: <strong>{selectedReview.skill_name || 'Performance Testing'}</strong>
+                          Employee: <strong>{selectedReview.employee_name}</strong> · Zensar ID: <strong>{selectedReview.zensar_id || '—'}</strong> · Skill: <strong>{selectedReview.skill_name || 'Performance Testing'}</strong>
                         </div>
                       </div>
-                      <button onClick={() => { setShowReviewActionModal(null); setSelectedReview(null); }} style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', fontSize: 20 }}>âœ•</button>
+                      <button onClick={() => { setShowReviewActionModal(null); setSelectedReview(null); }} style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', fontSize: 20 }}>✕</button>
                     </div>
 
                     {/* Modal Content - Dual Grid Layout */}
@@ -2491,7 +2883,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                         <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, marginBottom: 4 }}>PROJECTS</div>
                                         <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11, color: T.sub }}>
                                           {extractedEvidence.projects.map((p: any, i: number) => (
-                                            <li key={i}><strong>{p.name}</strong> Â· {p.role} ({p.duration}) Â· Team: {p.teamSize}</li>
+                                            <li key={i}><strong>{p.name}</strong> · {p.role} ({p.duration}) · Team: {p.teamSize}</li>
                                           ))}
                                         </ul>
                                       </div>
@@ -2693,7 +3085,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                         </ul>
                                       </div>
                                     ) : (
-                                      <div style={{ color: '#10B981', fontSize: 11, fontWeight: 600 }}>âœ“ Zero discrepancies between resume claims and assessment reasoning.</div>
+                                      <div style={{ color: '#10B981', fontSize: 11, fontWeight: 600 }}>✓ Zero discrepancies between resume claims and assessment reasoning.</div>
                                     )}
                                   </div>
                                 )}
@@ -2821,7 +3213,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                         <td style={{ padding: '10px 12px', textAlign: 'center', color: T.text, fontWeight: 800 }}>{sb.finalScore ?? selectedReview.score ?? 0}%</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'center', color: T.sub }}>Threshold: {sb.passThreshold ?? 60}%</td>
                                         <td style={{ padding: '10px 12px', textAlign: 'center', color: (sb.gapRemaining ?? 0) > 0 ? '#EF4444' : '#10B981', fontWeight: 800 }}>
-                                          {(sb.gapRemaining ?? 0) > 0 ? `Gap: -${sb.gapRemaining}%` : 'Passed âœ“'}
+                                          {(sb.gapRemaining ?? 0) > 0 ? `Gap: -${sb.gapRemaining}%` : 'Passed ✓'}
                                         </td>
                                       </tr>
                                     </tbody>
@@ -2851,7 +3243,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                         {c.reason ? (
                                           <div style={{ color: '#EF4444', fontStyle: 'italic', fontSize: 10, marginTop: 2 }}>{c.reason}</div>
                                         ) : (
-                                          <div style={{ color: '#10B981', fontSize: 10, marginTop: 2 }}>âœ“ Max points awarded</div>
+                                          <div style={{ color: '#10B981', fontSize: 10, marginTop: 2 }}>✓ Max points awarded</div>
                                         )}
                                       </div>
                                     ))}
@@ -2897,7 +3289,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                   </div>
                                 ) : (
                                   <div style={{ color: '#10B981', fontSize: 11, fontWeight: 600, marginTop: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
-                                    âœ“ No proctor violations flagged.
+                                    ✓ No proctor violations flagged.
                                   </div>
                                 )}
                               </div>
@@ -2952,7 +3344,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
-          {/* â”€â”€ WORKFORCE INTELLIGENCE TAB â”€â”€ */}
+          {/* ── WORKFORCE INTELLIGENCE TAB ── */}
           {activeTab === 'Workforce Intelligence' && (
             <div style={{ animation: 'fadeIn 0.4s ease', display: 'flex', flexDirection: 'column', gap: 24 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -3172,7 +3564,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: T.bg, padding: 8, borderRadius: 8, fontSize: 12 }}>
                               <span style={{ fontWeight: 600, color: '#10B981' }}>{rec.currentSkill}</span>
-                              <span style={{ color: T.sub }}>âž¡ï¸</span>
+                              <span style={{ color: T.sub }}>➡️</span>
                               <span style={{ fontWeight: 600, color: '#EC4899' }}>{rec.recommendedSkill}</span>
                             </div>
                             <div style={{ fontSize: 12, color: T.sub, fontStyle: 'italic' }}>
@@ -3243,7 +3635,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
              </div>
 
-             {/* â”€â”€ Inline Delete Confirmation â”€â”€ */}
+             {/* ── Inline Delete Confirmation ── */}
              {deleteConfirming && (
                <div style={{ 
                  margin: '0 40px 24px', padding: '16px 24px', 
@@ -3316,7 +3708,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   <div style={{ animation: 'fadeIn 0.4s' }}>
                     {popupActiveTab === 'ZenRadar' && (
                       <div>
-                        {/* â”€â”€ Full Profile Summary Card â”€â”€ */}
+                        {/* ── Full Profile Summary Card ── */}
                         <div style={{ padding: '20px 4vw 0' }}>
                           <div style={{ background: T.card, borderRadius: 20, border: `1px solid ${T.bdr}`, padding: 'min(24px, 5vw)', marginBottom: 24 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 20 }}>
@@ -3326,9 +3718,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                   {(previewUser.name || '?')[0].toUpperCase()}
                                 </div>
                                 <div>
-                                  <div style={{ fontSize: 22, fontWeight: 900, color: T.text }}>{previewUser.name || 'â€”'}</div>
-                                  <div style={{ fontSize: 13, color: '#3B82F6', fontWeight: 700, marginTop: 2 }}>{previewUser.designation || previewUser.Designation || 'â€”'}</div>
-                                  <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>ID: <b style={{color:T.text}}>{previewUser.zensar_id || previewUser.id}</b> &nbsp;|&nbsp; {previewUser.department || 'â€”'}</div>
+                                  <div style={{ fontSize: 22, fontWeight: 900, color: T.text }}>{previewUser.name || '—'}</div>
+                                  <div style={{ fontSize: 13, color: '#3B82F6', fontWeight: 700, marginTop: 2 }}>{previewUser.designation || previewUser.Designation || '—'}</div>
+                                  <div style={{ fontSize: 12, color: T.sub, marginTop: 4 }}>ID: <b style={{color:T.text}}>{previewUser.zensar_id || previewUser.id}</b> &nbsp;|&nbsp; {previewUser.department || '—'}</div>
                                 </div>
                               </div>
                               {/* Right: Stats */}
@@ -3350,21 +3742,21 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Details Grid */}
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 14, marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.bdr}` }}>
                               {[
-                                { label: 'ðŸ“§ Email',         value: previewUser.email },
-                                { label: 'ðŸ“± Phone',         value: previewUser.phone },
-                                { label: 'ðŸ“ Location',      value: previewUser.location },
-                                { label: 'ðŸ¢ Department',    value: previewUser.department },
-                                { label: 'ðŸ’¼ Years in IT',   value: previewUser.years_it ? `${previewUser.years_it} yrs` : 'â€”' },
-                                { label: 'ðŸ·ï¸ Years@Zensar',  value: previewUser.years_zensar ? `${previewUser.years_zensar} yrs` : 'â€”' },
-                                { label: 'â­ Primary Skill', value: previewUser.primary_skill || previewData?.user?.primarySkill || 'â€”' },
-                                { label: 'ðŸŽ¯ Domain',        value: previewUser.primary_domain || previewData?.user?.primaryDomain || 'â€”' },
-                                { label: 'ðŸ“š Education',     value: `${previewData?.education?.length ?? 0} record(s)` },
-                                { label: 'âœ… Validated',     value: previewUser.submitted ? 'Yes' : 'No' },
-                                { label: 'ðŸ—“ï¸ Joined',        value: previewUser.created_at ? new Date(previewUser.created_at).toLocaleDateString('en-IN') : 'â€”' },
+                                { label: '📧 Email',         value: previewUser.email },
+                                { label: '📱 Phone',         value: previewUser.phone },
+                                { label: '📍 Location',      value: previewUser.location },
+                                { label: '🏢 Department',    value: previewUser.department },
+                                { label: '💼 Years in IT',   value: previewUser.years_it ? `${previewUser.years_it} yrs` : '—' },
+                                { label: '🏷️ Years@Zensar',  value: previewUser.years_zensar ? `${previewUser.years_zensar} yrs` : '—' },
+                                { label: '⭐ Primary Skill', value: previewUser.primary_skill || previewData?.user?.primarySkill || '—' },
+                                { label: '🎯 Domain',        value: previewUser.primary_domain || previewData?.user?.primaryDomain || '—' },
+                                { label: '📚 Education',     value: `${previewData?.education?.length ?? 0} record(s)` },
+                                { label: '✅ Validated',     value: previewUser.submitted ? 'Yes' : 'No' },
+                                { label: '🗓️ Joined',        value: previewUser.created_at ? new Date(previewUser.created_at).toLocaleDateString('en-IN') : '—' },
                               ].map(({ label, value }) => (
                                 <div key={label} style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderRadius: 10, padding: '10px 14px' }}>
                                   <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
-                                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginTop: 4, wordBreak: 'break-all' }}>{value || 'â€”'}</div>
+                                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginTop: 4, wordBreak: 'break-all' }}>{value || '—'}</div>
                                 </div>
                               ))}
                             </div>
@@ -3372,12 +3764,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Education records if any */}
                             {previewData?.education && previewData.education.length > 0 && (
                               <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸŽ“ Education</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🎓 Education</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                                   {previewData.education.map((ed: any, i: number) => (
                                     <div key={i} style={{ background: dark ? 'rgba(59,130,246,0.08)' : '#eff6ff', borderRadius: 10, padding: '8px 14px', fontSize: 12 }}>
-                                      <div style={{ fontWeight: 800, color: T.text }}>{ed.degree || ed.Degree || ed.course || 'â€”'}</div>
-                                      <div style={{ color: T.sub, marginTop: 2 }}>{ed.institution || ed.college || ed.College || 'â€”'} {ed.year || ed.Year ? `Â· ${ed.year || ed.Year}` : ''}</div>
+                                      <div style={{ fontWeight: 800, color: T.text }}>{ed.degree || ed.Degree || ed.course || '—'}</div>
+                                      <div style={{ color: T.sub, marginTop: 2 }}>{ed.institution || ed.college || ed.College || '—'} {ed.year || ed.Year ? `· ${ed.year || ed.Year}` : ''}</div>
                                     </div>
                                   ))}
                                 </div>
@@ -3387,11 +3779,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Certifications preview */}
                             {previewUser.certifications?.length > 0 && (
                               <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸ… Certifications ({previewUser.certifications.length})</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🏅 Certifications ({previewUser.certifications.length})</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                   {previewUser.certifications.slice(0, 6).map((c: any, i: number) => (
                                     <span key={i} style={{ background: dark ? 'rgba(139,92,246,0.12)' : '#f5f3ff', color: '#8B5CF6', borderRadius: 8, padding: '4px 12px', fontSize: 11, fontWeight: 700 }}>
-                                      {c.CertName || c.cert_name || c.name || 'â€”'}
+                                      {c.CertName || c.cert_name || c.name || '—'}
                                     </span>
                                   ))}
                                   {previewUser.certifications.length > 6 && <span style={{ fontSize: 11, color: T.sub, padding: '4px 8px' }}>+{previewUser.certifications.length - 6} more</span>}
@@ -3402,11 +3794,11 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {/* Projects preview */}
                             {previewUser.projects?.length > 0 && (
                               <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${T.bdr}` }}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>ðŸš€ Projects ({previewUser.projects.length})</div>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', marginBottom: 10 }}>🚀 Projects ({previewUser.projects.length})</div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                   {previewUser.projects.slice(0, 5).map((p: any, i: number) => (
                                     <span key={i} style={{ background: dark ? 'rgba(245,158,11,0.1)' : '#fffbeb', color: '#F59E0B', borderRadius: 8, padding: '4px 12px', fontSize: 11, fontWeight: 700 }}>
-                                      {p.ProjectName || p.project_name || p.name || 'â€”'}
+                                      {p.ProjectName || p.project_name || p.name || '—'}
                                     </span>
                                   ))}
                                   {previewUser.projects.length > 5 && <span style={{ fontSize: 11, color: T.sub, padding: '4px 8px' }}>+{previewUser.projects.length - 5} more</span>}
@@ -3631,7 +4023,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
             <div style={{ padding: '24px 28px 28px' }}>
 
-              {/* â”€â”€ RESUME UPLOAD SCANNER â”€â”€ */}
+              {/* ── RESUME UPLOAD SCANNER ── */}
               <div
                 onClick={() => !resumeScanLoading && resumeFileRef.current?.click()}
                 onDragOver={e => e.preventDefault()}
@@ -3670,7 +4062,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                     <CheckCircle2 size={28} style={{ color: '#10B981' }} />
                     <div style={{ fontSize: 13, fontWeight: 700, color: '#10B981' }}>Resume Scanned Successfully!</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Form auto-filled â†“ â€” review & complete missing fields</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Form auto-filled ↓ — review & complete missing fields</div>
                     <button onClick={e => { e.stopPropagation(); resumeFileRef.current?.click(); }} style={{ fontSize: 11, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', marginTop: 2 }}>Upload different resume</button>
                   </div>
                 ) : (
@@ -3679,10 +4071,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       <FileUp size={24} style={{ color: '#3B82F6' }} />
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 800, color: '#3B82F6' }}>Upload Resume to Auto-Fill</div>
-                    <div style={{ fontSize: 11, color: T.sub }}>Drag & drop or click â€” PDF, DOC, TXT supported</div>
+                    <div style={{ fontSize: 11, color: T.sub }}>Drag & drop or click — PDF, DOC, TXT supported</div>
                     <div style={{ fontSize: 10, color: T.sub, background: dark ? 'rgba(59,130,246,0.08)' : '#dbeafe', padding: '3px 10px', borderRadius: 99, marginTop: 2 }}>
                       <Sparkles size={10} style={{ display: 'inline', marginRight: 4 }} />
-                      AI extracts: Name Â· Phone Â· Email Â· Designation Â· Location Â· Experience
+                      AI extracts: Name · Phone · Email · Designation · Location · Experience
                     </div>
                   </div>
                 )}
@@ -3774,17 +4166,17 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         <input type="password" value={newEmployee.confirmPassword} onChange={e => setNewEmployee({ ...newEmployee, confirmPassword: e.target.value })} placeholder="Repeat password" style={{ width: '100%', padding: '13px 16px 13px 40px', borderRadius: 12, border: `1.5px solid ${newEmployee.confirmPassword ? (newEmployee.confirmPassword === newEmployee.password ? '#10B981' : '#EF4444') : T.bdr}`, background: T.input, color: T.text, fontSize: 14, outline: 'none', boxSizing: 'border-box' as const }} />
                       </div>
                       {newEmployee.confirmPassword && newEmployee.confirmPassword !== newEmployee.password && (
-                        <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>âš  Passwords do not match</div>
+                        <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>⚠ Passwords do not match</div>
                       )}
                       {newEmployee.confirmPassword && newEmployee.confirmPassword === newEmployee.password && (
-                        <div style={{ fontSize: 11, color: '#10B981', marginTop: 4 }}>âœ… Passwords match</div>
+                        <div style={{ fontSize: 11, color: '#10B981', marginTop: 4 }}>✅ Passwords match</div>
                       )}
                     </div>
                   </>
                 );
               })()}
 
-              {/* â”€â”€ Inline Email Warning Banner â”€â”€ */}
+              {/* ── Inline Email Warning Banner ── */}
               {emailWarningConfirmed && (
                 <div style={{
                   marginTop: 16, padding: '14px 16px',
@@ -3808,13 +4200,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       onClick={() => setEmailWarningConfirmed(false)}
                       style={{ flex: 1, padding: '9px', borderRadius: 8, border: '1px solid rgba(245,158,11,0.3)', background: 'none', color: '#F59E0B', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}
                     >
-                      âœï¸ Change Email
+                      ✏️ Change Email
                     </button>
                     <button
                       onClick={() => handleAddEmployee(false, true)}
                       style={{ flex: 2, padding: '9px', borderRadius: 8, border: 'none', background: '#F59E0B', color: '#fff', fontWeight: 800, cursor: 'pointer', fontSize: 12 }}
                     >
-                      âœ… Yes, Create Anyway
+                      ✅ Yes, Create Anyway
                     </button>
                   </div>
                 </div>
@@ -3895,7 +4287,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             setShowAddEmployeeModal(true);
           }}
           onSuccess={() => {
-            // Employee was created and data saved inside AdminResumeUploadPage â€” just clean up
+            // Employee was created and data saved inside AdminResumeUploadPage — just clean up
             setShowResumeUploadPage(false);
             setShowAddEmployeeModal(false);
             setResumeScanned(false);

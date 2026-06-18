@@ -69,7 +69,6 @@ export default function CertificationsPage({
         setShowModal(false);
         toast.success(editingCert ? 'Credential updated' : 'Certification added');
         await reload();
-        if (!isPopup) window.location.reload();
       } else {
         toast.error(res.error || 'Failed to sync');
       }
@@ -91,7 +90,6 @@ export default function CertificationsPage({
       if (resp.ok) {
         toast.success('Certification removed');
         await reload();
-        if (!isPopup) window.location.reload();
       } else {
         toast.error('Failed to remove');
       }

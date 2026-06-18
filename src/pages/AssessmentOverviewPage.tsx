@@ -253,12 +253,44 @@ export default function AssessmentOverviewPage() {
     { label: 'Tertiary', skill: candidateProfile.tertiarySkill, score: candidateProfile.tertiaryScore, yrs: taxonomy.tertiary.estimatedYears, color: '#8B5CF6', border: '1px solid rgba(139,92,246,0.25)', bg: 'rgba(139,92,246,0.05)' },
   ];
 
-  const pathFormats: Record<string, { rounds: string; duration: string; pass: string }> = {
-    Beginner:     { rounds: '20 MCQ → 5 Tool ID → 2 Practical', duration: '30 min', pass: '60%' },
-    Intermediate: { rounds: '15 MCQ → 1 Coding → 2 Scenarios → 1 Framework', duration: '60 min', pass: '65%' },
-    Expert:       { rounds: '5 Scenarios → 1 Capstone → 3 Mentoring → 6 Questionnaire', duration: '60 min', pass: '70%' },
+  const pathFormats: Record<string, { rounds: string; duration: string; pass: string; roundCount: number; weights: string }> = {
+    Beginner:     { rounds: '20 MCQ → 5 Tool ID → 2 Practical', duration: '30 min', pass: '60%', roundCount: 3, weights: 'MCQ 50% · Tool ID 20% · Practical 30%' },
+    Intermediate: { rounds: '15 MCQ → 1 Coding → 2 Scenarios → 1 Framework', duration: '60 min', pass: '65%', roundCount: 4, weights: 'MCQ 20% · Coding 35% · Scenarios 30% · Framework 15%' },
+    Expert:       { rounds: '5 Scenarios → 1 Capstone → 3 Mentoring → 6 Questionnaire', duration: '60 min', pass: '70%', roundCount: 4, weights: 'Scenarios 25% · Capstone 40% · Mentoring 20% · Questionnaire 15%' },
   };
   const fmt = pathFormats[candidateProfile.path];
+
+  // ── Skill Trust Engine: evidence-based confidence per skill (pre-assessment) ──
+  const computeSkillTrust = (skillName: string) => {
+    const sources: { label: string; pts: number }[] = [];
+    const sk = String(skillName || '').toLowerCase();
+    if (!sk) return { score: 0, sources };
+
+    // Resume claim (the skill was extracted from the resume)
+    sources.push({ label: 'Resume claim', pts: 10 });
+
+    // Project usage
+    const projHits = (candidateProfile.projects || []).filter((p: any) => {
+      const blob = [p.ProjectName, p.name, p.Description, p.description, p.Role, p.role,
+        ...(p.Technologies || p.technologies || [])].join(' ').toLowerCase();
+      return blob.includes(sk);
+    }).length;
+    if (projHits >= 2) sources.push({ label: `Used in ${projHits} projects`, pts: 15 });
+    else if (projHits === 1) sources.push({ label: 'Used in 1 project', pts: 8 });
+
+    // Self-claimed level
+    const selfRated = (candidateProfile.skills || []).some((s: any) =>
+      String(s.skillName || '').toLowerCase() === sk && (s.selfRating || 0) > 0);
+    if (selfRated) sources.push({ label: 'Self-rated', pts: 5 });
+
+    // Certification detected
+    const certHit = (candidateProfile.certifications || []).some((c: any) =>
+      String(typeof c === 'string' ? c : (c.CertName || c.certName || c.name || '')).toLowerCase().includes(sk));
+    if (certHit) sources.push({ label: 'Certification detected', pts: 10 });
+
+    const score = Math.min(100, sources.reduce((n, s) => n + s.pts, 0));
+    return { score, sources };
+  };
 
   return (
     <div style={{ minHeight:'100vh', background: T.bg, color: T.text, padding:'28px 5vw' }}>
@@ -306,6 +338,7 @@ export default function AssessmentOverviewPage() {
                       <div style={{ fontSize: 10, fontWeight: 700, color: s.color, textTransform:'uppercase', letterSpacing: 1, marginBottom: 4 }}>{s.label}</div>
                       <div style={{ fontSize: 16, fontWeight: 900, color: T.text }}>{s.skill}</div>
                       <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>{formatExperience(s.yrs)}</div>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>Assessment: {fmt.duration} · {fmt.roundCount} rounds</div>
                     </div>
                     <div style={{ textAlign:'right' }}>
                       <div style={{ fontSize: 22, fontWeight: 900, color: s.color }}>{s.score}</div>
@@ -314,6 +347,30 @@ export default function AssessmentOverviewPage() {
                   </div>
                 </div>
               ))}
+            </div>
+
+            {/* Skill Trust Profile — evidence-based confidence */}
+            <div style={{ background: T.card, border:`1px solid ${T.bdr}`, borderRadius: 14, padding: 20, marginTop: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 6 }}>Your Skill Trust Profile</div>
+              <div style={{ fontSize: 11, color: T.sub, marginBottom: 16 }}>How your skills are verified before assessment:</div>
+              {skills3.map(s => {
+                const trust = computeSkillTrust(s.skill);
+                return (
+                  <div key={s.label} style={{ marginBottom: 16 }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{s.skill}</span>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: s.color }}>{trust.score}/100</span>
+                    </div>
+                    <div style={{ height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.08)', overflow: 'hidden', marginBottom: 6 }}>
+                      <div style={{ height: '100%', width: `${trust.score}%`, borderRadius: 999, background: s.color, transition: 'width 0.6s ease' }} />
+                    </div>
+                    <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}>
+                      Sources: {trust.sources.map(src => `${src.label} (+${src.pts})`).join(' · ')}
+                      <span style={{ color: s.color, fontWeight: 700 }}> → Take assessment to reach 70+</span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -326,6 +383,7 @@ export default function AssessmentOverviewPage() {
 
               <div style={{ display:'flex', flexDirection:'column', gap: 8, marginBottom: 16 }}>
                 <div style={{ fontSize: 11, color: T.text, lineHeight: 1.5 }}><strong>Format:</strong> {fmt.rounds}</div>
+                <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}><strong>Scoring:</strong> {fmt.weights}</div>
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8 }}>
                   <div style={{ padding: 10, background:'rgba(255,255,255,0.02)', borderRadius: 8, borderLeft:`3px solid ${pathColor}` }}>
                     <div style={{ fontSize: 10, color: T.muted, marginBottom: 2 }}>Duration</div>

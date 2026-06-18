@@ -95,6 +95,7 @@ export const TECH_SKILL_MAP: Record<string, CanonicalSkill> = {
 
   // ── Java ──
   'java': 'Java',
+  'groovy': 'Java',
   'spring': 'Java',
   'spring boot': 'Java',
   'springframework': 'Java',
@@ -185,10 +186,22 @@ export const TECH_SKILL_MAP: Record<string, CanonicalSkill> = {
   'k6': 'Performance Testing',
   'gatling': 'Performance Testing',
   'loadrunner': 'Performance Testing',
+  'load runner': 'Performance Testing',
   'neoload': 'Performance Testing',
   'locust': 'Performance Testing',
   'nfr testing': 'Performance Testing',
   'performance engineer': 'Performance Testing',
+  'testrtc': 'Performance Testing',
+  'appdynamics': 'Performance Testing',
+  'app dynamics': 'Performance Testing',
+  'datadog': 'Performance Testing',
+  'data dog': 'Performance Testing',
+  'grafana': 'Performance Testing',
+  'kibana': 'Performance Testing',
+  'dynatrace': 'Performance Testing',
+  'e2e performance': 'Performance Testing',
+  'workload model': 'Performance Testing',
+  'bottleneck': 'Performance Testing',
 
   // ── Security Testing ──
   'security testing': 'Security Testing',

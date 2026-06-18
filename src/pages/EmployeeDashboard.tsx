@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/lib/AppContext';
-import { apiGetSkills } from '@/lib/api';
+import { apiGetSkills, API_BASE } from '@/lib/api';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck } from 'lucide-react';
 
@@ -36,19 +36,57 @@ export default function EmployeeDashboard({
 
   // ── Verified ZenAssess badges — always fetched fresh from the DB on mount ──
   // (verified_badge_level only; never derived from self_rating or cache)
-  const [verifiedSkillBadges, setVerifiedSkillBadges] = useState<{ skill: string; level: string }[]>([]);
+  const [verifiedSkillBadges, setVerifiedSkillBadges] = useState<{ skill: string; level: string; date?: string }[]>([]);
+  const [openRoleMatches, setOpenRoleMatches] = useState<number | null>(null);
+  const [benchmark, setBenchmark] = useState<number | null>(null);
+
+  // Industry benchmark = average capability across all employees (best-effort)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/employees`);
+        if (!res.ok) return;
+        const json = await res.json();
+        const emps = json.employees || [];
+        const scores = emps
+          .map((e: any) => Number(e.overall_capability ?? e.overallCapability ?? 0))
+          .filter((n: number) => n > 0);
+        if (scores.length >= 1) setBenchmark(Math.round(scores.reduce((a: number, b: number) => a + b, 0) / scores.length));
+      } catch { /* benchmark unavailable — line hidden */ }
+    })();
+  }, []);
   useEffect(() => {
     if (!employeeId) return;
     (async () => {
       try {
         const skills = await apiGetSkills(employeeId);
         const verified = (skills || [])
-          .map((s: any) => ({ skill: s.skillName || s.skill_name, level: s.verifiedBadgeLevel || s.verified_badge_level }))
+          .map((s: any) => ({ skill: s.skillName || s.skill_name, level: s.verifiedBadgeLevel || s.verified_badge_level, date: s.lastValidationDate || s.last_validated_date }))
           .filter((s: any) => s.skill && s.level);
         setVerifiedSkillBadges(verified);
       } catch { /* no verified badges available — section stays empty */ }
     })();
   }, [employeeId]);
+
+  // ── Open BFSI roles that match the employee's verified skills (best-effort) ──
+  useEffect(() => {
+    if (verifiedSkillBadges.length === 0) { setOpenRoleMatches(null); return; }
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/bfsi/roles`);
+        if (!res.ok) return;
+        const json = await res.json();
+        const roles = json.roles || json || [];
+        if (!Array.isArray(roles) || roles.length === 0) return;
+        const names = verifiedSkillBadges.map(b => String(b.skill).toLowerCase()).filter(n => n.length >= 3);
+        const matches = roles.filter((r: any) => {
+          const blob = JSON.stringify(r || {}).toLowerCase();
+          return names.some(n => blob.includes(n));
+        }).length;
+        setOpenRoleMatches(matches);
+      } catch { /* ignore — section degrades gracefully */ }
+    })();
+  }, [verifiedSkillBadges]);
 
   const { dark } = useDark();
   const T = mkTheme(dark);
@@ -213,9 +251,27 @@ export default function EmployeeDashboard({
                   <span style={{ color: T.muted, fontWeight: 600 }}> · {user.designation || user.Designation || 'Quality Engineer'} · {zid}</span>
                 </div>
               </div>
-              <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 3 }}>
-                <span style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: T.text }}>{overallScore}</span>
-                <span style={{ fontSize: 11, color: T.muted }}>/100</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 9, textTransform: 'uppercase', color: T.muted, fontWeight: 700, letterSpacing: '0.05em' }}>Score</div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
+                    <span style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: T.text }}>{overallScore}</span>
+                    <span style={{ fontSize: 11, color: T.muted }}>/100</span>
+                  </div>
+                </div>
+                {(() => {
+                  const evidenceSources = verifiedSkillBadges.length + safeCerts.length + safeProjects.length;
+                  const trust = evidenceSources >= 6 ? { label: 'High', color: '#10B981' } : evidenceSources >= 3 ? { label: 'Medium', color: '#F59E0B' } : { label: 'Low', color: '#EF4444' };
+                  return (
+                    <div style={{ textAlign: 'right' }} title="Trust increases when you complete ZenAssess, verify certifications, and get manager validation.">
+                      <div style={{ fontSize: 9, textTransform: 'uppercase', color: T.muted, fontWeight: 700, letterSpacing: '0.05em' }}>Trust</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                        <span style={{ fontSize: 14, fontWeight: 800, color: trust.color }}>{trust.label}</span>
+                        <span style={{ width: 9, height: 9, borderRadius: '50%', background: trust.color, boxShadow: `0 0 8px ${trust.color}` }} />
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -265,6 +321,26 @@ export default function EmployeeDashboard({
 
 
 
+          {/* SKILL DECAY WARNING — badge older than 12 months */}
+          {(() => {
+            const now = Date.now();
+            const YEAR = 365 * 24 * 3600 * 1000;
+            const old = verifiedSkillBadges
+              .filter(b => b.date && (now - new Date(b.date).getTime()) > YEAR)
+              .map(b => ({ ...b, months: Math.round((now - new Date(b.date!).getTime()) / (30 * 24 * 3600 * 1000)) }));
+            if (old.length === 0) return null;
+            const first = old[0];
+            return (
+              <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 12, padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: T.text }}>
+                  <AlertTriangle size={18} color="#F59E0B" />
+                  <span>Your <strong>{first.skill}</strong> badge was earned {first.months} months ago{old.length > 1 ? ` (and ${old.length - 1} other${old.length > 2 ? 's' : ''} are ageing)` : ''}. Re-assess to keep your profile current.</span>
+                </div>
+                <button onClick={() => navigate('/employee/zenassess')} style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', color: '#F59E0B', fontWeight: 800, fontSize: 12, padding: '8px 14px', borderRadius: 9, cursor: 'pointer', flexShrink: 0 }}>Re-assess</button>
+              </div>
+            );
+          })()}
+
           {/* MIDDLE SECTION — Personnel Hub Command Deck */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
              {[
@@ -287,6 +363,162 @@ export default function EmployeeDashboard({
                 </div>
              ))}
           </div>
+
+          {/* HOW YOUR SCORE IS CALCULATED */}
+          {(() => {
+            const signals = [
+              { label: 'Resume signals', pts: (safeProjects.length > 0 || safeCerts.length > 0 || expertCount > 0) ? 15 : 0, action: 'Upload your resume via ZenScan', path: '/employee/resume-upload' },
+              { label: 'Skills assessed', pts: verifiedSkillBadges.length > 0 ? 20 : 0, action: 'Complete ZenAssess', path: '/employee/zenassess' },
+              { label: 'Certifications', pts: safeCerts.length > 0 ? 10 : 0, action: 'Add a certification', path: '/employee/certifications' },
+              { label: 'Manager validation', pts: 0, action: 'Pending manager review', path: '/employee/skills' },
+              { label: 'Project history', pts: safeProjects.length > 0 ? 12 : 0, action: 'Add a project', path: '/employee/projects' },
+            ];
+            const total = Math.min(100, signals.reduce((n, s) => n + s.pts, 0));
+            const topAction = signals.find(s => s.pts === 0 && s.label !== 'Manager validation') || signals.find(s => s.pts === 0);
+            return (
+              <div style={{ ...cardStyle }}>
+                <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>How Your Score Is Calculated</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {signals.map(s => (
+                    <div key={s.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 }}>
+                      <span style={{ color: T.sub }}>{s.label}</span>
+                      <span style={{ fontWeight: 800, color: s.pts > 0 ? '#10B981' : T.muted }}>
+                        {s.pts > 0 ? `+${s.pts} pts` : `+0 pts`} {s.pts === 0 && s.label !== 'Manager validation' ? <span style={{ fontWeight: 500, color: T.muted }}>({s.action.toLowerCase()})</span> : s.label === 'Manager validation' && s.pts === 0 ? <span style={{ fontWeight: 500, color: T.muted }}>(pending)</span> : null}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ borderTop: `1px solid ${T.bdr}`, marginTop: 12, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Profile evidence total</span>
+                  <span style={{ fontSize: 18, fontWeight: 900, color: T.text }}>{total}/100</span>
+                </div>
+                {benchmark !== null && benchmark > 0 && (
+                  <div style={{ fontSize: 12, color: T.sub, marginTop: 8 }}>
+                    Team benchmark: <strong style={{ color: T.text }}>{benchmark}/100</strong> — you are {total >= benchmark ? <span style={{ color: '#10B981', fontWeight: 700 }}>at or above average</span> : <span style={{ color: '#F59E0B', fontWeight: 700 }}>below average</span>}.
+                  </div>
+                )}
+                {topAction && (
+                  <div onClick={() => navigate(topAction.path)} style={{ marginTop: 12, fontSize: 13, color: '#3B82F6', fontWeight: 700, cursor: 'pointer' }}>
+                    Top action: {topAction.action} →
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ALLOCATION READINESS + CAREER MOMENTUM */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24 }}>
+            {/* Allocation Readiness */}
+            <div style={{ ...cardStyle, flex: '1 1 320px', minWidth: 0 }}>
+              <h3 style={{ margin: '0 0 4px', fontSize: 16 }}>Your Allocation Readiness</h3>
+              <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>You currently appear in searches for:</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+                {verifiedSkillBadges.length > 0 ? verifiedSkillBadges.slice(0, 5).map(b => (
+                  <div key={b.skill} style={{ fontSize: 13, color: T.text }}>
+                    <span style={{ color: '#10B981', fontWeight: 800 }}>✓</span> {b.skill} <span style={{ color: T.muted }}>({b.level})</span>
+                  </div>
+                )) : (
+                  <div style={{ fontSize: 13, color: T.sub }}>Complete an assessment to appear in verified staffing searches.</div>
+                )}
+                {safeExpertSkills.filter(s => !verifiedSkillBadges.some(b => b.skill === s)).slice(0, 3).map(s => (
+                  <div key={s} style={{ fontSize: 13, color: T.sub }}>
+                    <span style={{ color: T.muted, fontWeight: 800 }}>○</span> {s} <span style={{ color: T.muted }}>(not yet verified)</span>
+                  </div>
+                ))}
+              </div>
+              {openRoleMatches !== null && openRoleMatches > 0 && (
+                <div style={{ fontSize: 13, color: T.text, marginBottom: 14 }}>
+                  <strong>{openRoleMatches}</strong> open project{openRoleMatches !== 1 ? 's' : ''} match your verified skills.
+                </div>
+              )}
+              <button onClick={() => navigate('/employee/zenassess')} style={{ padding: '10px 18px', borderRadius: 10, background: '#3B82F6', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Start Assessment</button>
+            </div>
+
+            {/* Career Momentum */}
+            {(() => {
+              const nextGradeMap: Record<string, string> = { F1: 'E1', E1: 'E2', E2: 'D', D: 'C', C: '' };
+              const gradeReq: Record<string, number> = { F1: 1, E1: 4, E2: 7, D: 13, C: 18 };
+              const g = String(grade).toUpperCase().replace(/[^A-Z0-9]/g, '');
+              const nextG = nextGradeMap[g] ?? '';
+              const years = Number(user.years_it ?? user.yearsIT ?? (user as any).YearsIT ?? 0);
+              const verifiedCount = verifiedSkillBadges.length;
+              const domains = Array.from(new Set(safeProjects.map((p: any) => p.Domain || p.domain).filter(Boolean)));
+              const nextReq = gradeReq[nextG] || gradeReq[g] || 4;
+              const readiness = Math.round(
+                Math.min(years / nextReq, 1) * 25 +
+                Math.min(verifiedCount / 3, 1) * 25 +
+                (overallScore / 100) * 25 +
+                (domains.length > 0 ? 15 : 0)
+              );
+              const monthsBase = Math.max(3, Math.round((100 - readiness) / 100 * 24));
+              const have: string[] = [];
+              if (years >= nextReq * 0.7) have.push(`${years}+ years experience`);
+              if (verifiedCount >= 2) have.push(`${verifiedCount} verified skills`);
+              if (domains.length > 0) have.push(`${domains[0]} domain experience`);
+              const need: string[] = [];
+              if (verifiedCount < 3) need.push(`${3 - verifiedCount} more verified skill${3 - verifiedCount !== 1 ? 's' : ''}`);
+              need.push('Lead project evidence');
+              need.push('Manager recommendation');
+              return (
+                <div style={{ ...cardStyle, flex: '1 1 320px', minWidth: 0 }}>
+                  <h3 style={{ margin: '0 0 12px', fontSize: 16 }}>Your Career Momentum</h3>
+                  <div style={{ fontSize: 12, color: T.sub }}>Current Level: <strong style={{ color: T.text }}>{user.designation || user.Designation || 'QA Engineer'} ({grade})</strong></div>
+                  {nextG ? (
+                    <>
+                      <div style={{ fontSize: 12, color: T.sub, marginBottom: 10 }}>Next Level: <strong style={{ color: T.text }}>{nextG}</strong></div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: T.muted, marginBottom: 4 }}><span>Readiness</span><span style={{ fontWeight: 800, color: '#3B82F6' }}>{readiness}%</span></div>
+                      <div style={{ height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.08)', overflow: 'hidden', marginBottom: 14 }}>
+                        <div style={{ height: '100%', width: `${readiness}%`, borderRadius: 999, background: 'linear-gradient(90deg,#3B82F6,#8B5CF6)', transition: 'width 0.6s ease' }} />
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 12 }}>
+                        <div>
+                          <div style={{ fontSize: 10, textTransform: 'uppercase', color: T.muted, fontWeight: 700, marginBottom: 6 }}>What you have</div>
+                          {have.length ? have.map(h => <div key={h} style={{ fontSize: 12, color: T.text, marginBottom: 4 }}><span style={{ color: '#10B981' }}>✓</span> {h}</div>) : <div style={{ fontSize: 12, color: T.muted }}>Building foundation</div>}
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, textTransform: 'uppercase', color: T.muted, fontWeight: 700, marginBottom: 6 }}>What you need</div>
+                          {need.map(n => <div key={n} style={{ fontSize: 12, color: T.sub, marginBottom: 4 }}><span style={{ color: T.muted }}>○</span> {n}</div>)}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 12, color: T.muted }}>At current pace: <strong style={{ color: T.text }}>~{monthsBase} months</strong> · With actions: <strong style={{ color: '#10B981' }}>~{Math.max(2, Math.round(monthsBase / 2))} months</strong> <span style={{ opacity: 0.7 }}>(estimate)</span></div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 13, color: T.sub, marginTop: 8 }}>You are at the top grade band — focus on leadership and mentoring impact.</div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* WHAT IMPROVES YOUR SCORE */}
+          {(() => {
+            const actions = [
+              verifiedSkillBadges.length === 0
+                ? { label: 'Take a skill assessment', pts: '+20 pts', path: '/employee/zenassess' }
+                : { label: 'Verify another skill in ZenAssess', pts: '+20 pts', path: '/employee/zenassess' },
+              safeCerts.length === 0
+                ? { label: 'Add & verify a certification', pts: '+10 pts', path: '/employee/certifications' }
+                : { label: 'Keep certifications current', pts: '+10 pts', path: '/employee/certifications' },
+              { label: 'Get manager validation on a skill', pts: '+12 pts', path: '/employee/skills' },
+            ].slice(0, 3);
+            return (
+              <div style={{ ...cardStyle }}>
+                <h3 style={{ margin: '0 0 4px', fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>🎯 Improve Your Profile Score</h3>
+                <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>Completing these puts you in the top 30% of staffing searches.</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {actions.map((a, i) => (
+                    <div key={a.path + i} onClick={() => navigate(a.path)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '12px 16px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', cursor: 'pointer' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: '#3B82F6' }}>{['①','②','③'][i]}</span>
+                        <span style={{ fontSize: 13, color: T.text }}>{a.label}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: '#10B981', flexShrink: 0 }}>{a.pts}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* BOTTOM SECTION */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24 }}>
