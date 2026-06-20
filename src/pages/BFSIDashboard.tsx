@@ -2701,8 +2701,8 @@ export default function BFSIDashboard() {
 
               {/* Loading State */}
               {matchLoading && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 2500, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(8px)' }}>
-                  <div style={{ background: T.card, borderRadius: 24, padding: 48, textAlign: 'center', border: `1px solid ${T.bdr}` }}>
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 2500, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(8px)' }}>
+                  <div style={{ background: T.cardSolid, borderRadius: 24, padding: 48, textAlign: 'center', border: `1px solid ${T.bdr}` }}>
                     <div style={{ width: 64, height: 64, border: '4px solid #e2e8f0', borderTopColor: COLORS.success, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 24px' }} />
                     <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginBottom: 8 }}>Finding Perfect Matches...</div>
                     <div style={{ fontSize: 13, color: T.sub }}>Analyzing {workforce.filter(w => w.status === 'Available-Pool' || w.status === 'Deallocating').length} employees</div>
@@ -3470,9 +3470,9 @@ export default function BFSIDashboard() {
       {/* ZENFINDER SCORE BREAKDOWN POPUP */}
       {/* ══════════════════════════════════════════════════════════════ */}
       {zfScorePopup && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(8px)' }}
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(8px)' }}
           onClick={() => setZfScorePopup(null)}>
-          <div style={{ background: T.card, borderRadius: 20, border: `2px solid ${COLORS.purple}`, maxWidth: 680, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 32px 80px rgba(139,92,246,0.3)' }}
+          <div style={{ background: T.cardSolid, borderRadius: 20, border: `2px solid ${COLORS.purple}`, maxWidth: 680, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 32px 80px rgba(139,92,246,0.3)' }}
             onClick={e => e.stopPropagation()}>
 
             {/* Header */}
@@ -3573,7 +3573,7 @@ export default function BFSIDashboard() {
       {/* ══════════════════════════════════════════════════════════════ */}
       {matchResults && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }} onClick={() => setMatchResults(null)}>
-          <div style={{ background: T.card, borderRadius: 24, border: `2px solid ${COLORS.success}`, maxWidth: 1400, width: '100%', maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 40px 100px rgba(16,185,129,0.3)' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `2px solid ${COLORS.success}`, maxWidth: 1400, width: '100%', maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 40px 100px rgba(16,185,129,0.3)' }} onClick={e => e.stopPropagation()}>
             
             {/* Header */}
             <div style={{ padding: '24px 32px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -3865,7 +3865,7 @@ export default function BFSIDashboard() {
         const dmAllocate = () => (dm as any).rank === 1 ? runAllocation(dm, 'assign') : (setDetailModal(null), setOverridePrompt({ employee: dm, type: 'assign' }));
         const dmReserve = () => (dm as any).rank === 1 ? runAllocation(dm, 'reserve') : (setDetailModal(null), setOverridePrompt({ employee: dm, type: 'reserve' }));
         return (
-          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.78)', zIndex: 3500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={() => setDetailModal(null)}>
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 3500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={() => setDetailModal(null)}>
             <div onClick={e => e.stopPropagation()} style={{ width: 560, maxWidth: '90vw', maxHeight: '80vh', overflowY: 'auto', background: dark ? '#1a1f2e' : '#ffffff', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.1)', boxShadow: '0 40px 100px rgba(0,0,0,0.5)', padding: 24 }}>
               {/* Modal header */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
@@ -3960,7 +3960,7 @@ export default function BFSIDashboard() {
       {/* ── JD Modal ── */}
       {jdModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }} onClick={() => setJdModal(null)}>
-          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 800, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 800, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(135deg,#3b82f6,#6366f1)' }}>
               <div>
                 <div style={{ fontSize: 10, fontWeight: 900, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 4 }}>Job Description</div>
@@ -3978,7 +3978,7 @@ export default function BFSIDashboard() {
       {/* ── Zen Matrix Modal ── */}
       {skillMatrixModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }} onClick={() => setSkillMatrixModal(null)}>
-          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 600, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 600, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(135deg,#10b981,#059669)' }}>
               <div>
                 <div style={{ fontSize: 10, fontWeight: 900, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 4 }}>Zen Matrix</div>
@@ -4044,7 +4044,7 @@ export default function BFSIDashboard() {
       {/* ── Admin Override Reason Modal ── */}
       {overridePrompt && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
-          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: 11, fontWeight: 900, color: '#EF4444', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
               <AlertTriangle size={14} /> Admin Override Alert
             </div>
@@ -4081,7 +4081,7 @@ export default function BFSIDashboard() {
       {/* ── Log Outcome Modal ── */}
       {outcomeModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
-          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
               <CheckCircle size={14} /> Log Project Outcome & Release
             </div>
@@ -4139,7 +4139,7 @@ export default function BFSIDashboard() {
       {/* MODALS */}
       {selectedMetric && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }} onClick={() => { setSelectedMetric(null); setModalSearch(''); setModalLocationFilter('All'); }}>
-          <div style={{ background: T.card, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 1100, width: '100%', maxHeight: '85vh', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 1100, width: '100%', maxHeight: '85vh', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: dark ? 'rgba(0,0,0,0.2)' : '#fff' }}>
               <div>
                 <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>{selectedMetric.metric}</h2>

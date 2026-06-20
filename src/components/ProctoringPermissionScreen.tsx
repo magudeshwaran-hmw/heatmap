@@ -129,13 +129,13 @@ export default function ProctoringPermissionScreen({
       <div
         style={{
           position: 'fixed', inset: 0, zIndex: 9600,
-          background: dark ? 'rgba(5,11,24,0.95)' : 'rgba(15,23,42,0.6)',
+          background: dark ? 'rgba(5,11,24,0.95)' : 'rgba(15,23,42,0.85)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
         }}
       >
         <div
           style={{
-            width: '100%', maxWidth: 460, background: T.card, border: `1px solid ${T.bdr}`,
+            width: '100%', maxWidth: 460, background: T.cardSolid, border: `1px solid ${T.bdr}`,
             borderRadius: 20, padding: 32, textAlign: 'center', boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
           }}
           className="fadeIn"
@@ -160,14 +160,14 @@ export default function ProctoringPermissionScreen({
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 9500,
-        background: dark ? 'rgba(5,11,24,0.92)' : 'rgba(15,23,42,0.55)',
+        background: dark ? 'rgba(5,11,24,0.92)' : 'rgba(15,23,42,0.85)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
         overflowY: 'auto',
       }}
     >
       <div
         style={{
-          width: '100%', maxWidth: 520, background: T.card, border: `1px solid ${T.bdr}`,
+          width: '100%', maxWidth: 520, background: T.cardSolid, border: `1px solid ${T.bdr}`,
           borderRadius: 20, padding: 28, boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
         }}
         className="fadeIn"

@@ -183,6 +183,8 @@ upload. There are no pre-seeded employee accounts after cleanup.
 | Camera not working in ZenAssess | 1) Confirm the browser has camera permission. 2) Browser settings → Privacy → Camera → allow `localhost`. 3) Refresh and retry. Camera needs `localhost` or HTTPS. |
 | "Iris tracking not loaded" in console | Non-critical. The assessment still works — face + head detection stay active. Check the console for the specific load error. |
 | Models loading slowly on first use | First load can take 10–30s (models load/cache). After that they're cached in the browser and load instantly. |
+| `GITHUB_ERROR:401` | An invalid/expired token is set in `GITHUB_TOKEN`. Either: 1) Remove `GITHUB_TOKEN` from `.env` entirely (leave it blank) — ZenCode works fine without it; or 2) Generate a fresh token at github.com/settings/tokens. |
+| GitHub analysis shows "rate limit reached" | Without a token, GitHub allows 60 requests/hour — enough for ~15–20 repositories. Either: 1) Wait 1 hour and reconnect; or 2) Add a free GitHub token to `.env` for 5000 requests/hour. |
 
 ---
 

@@ -484,7 +484,7 @@ export default function AuthPage() {
 
       {showMsModal && (
         <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(4,9,28,0.7)',
+          position: 'fixed', inset: 0, background: 'rgba(4,9,28,0.8)',
           backdropFilter: 'blur(10px)', zIndex: 999, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }} className="fadeIn">

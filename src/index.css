@@ -236,14 +236,24 @@
   .sk-modal-body { padding: 20px !important; }
 
   /* Ensure modal and tables sizing fits screen */
+  div[style*="max-width: 1400"],
   div[style*="width: 100%"][style*="max-width: 1300"],
   div[style*="max-width: 1300"],
   div[style*="max-width: 1200"],
   div[style*="max-width: 1100"],
+  div[style*="max-width: 1000"],
   div[style*="max-width: 900"] {
     max-width: 95vw !important;
     height: auto !important;
     max-height: 95vh !important;
+  }
+
+  /* Proctoring camera PIP — shrink + hug corner so it never covers content */
+  .sk-proctor-pip {
+    transform: scale(0.82);
+    transform-origin: bottom right;
+    bottom: 8px !important;
+    right: 8px !important;
   }
   
   /* Prevent horizontal scrolling app wide */

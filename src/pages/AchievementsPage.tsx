@@ -256,7 +256,7 @@ export default function AchievementsPage({
       {/* Modal */}
       {showModal && (
         <div style={{ position: 'fixed', inset: 0, background: dark ? '#0f0f1a' : '#f5f5f5', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-          <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 540, maxHeight: '90vh', overflow: 'auto' }}>
+          <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 540, maxHeight: '90vh', overflow: 'auto' }}>
             <div style={{ padding: '24px 28px', borderBottom: `1px solid ${T.bdr}` }}>
               <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>{editingAchievement ? 'Edit Achievement' : 'Add Achievement'}</h2>
             </div>

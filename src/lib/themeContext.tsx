@@ -48,6 +48,9 @@ export function mkTheme(dark: boolean) {
     muted:    dark ? 'rgba(255,255,255,0.32)'       : 'rgba(15,23,42,0.40)',
     card:     dark ? 'rgba(255,255,255,0.06)'       : 'rgba(255,255,255,0.85)',
     cardHov:  dark ? 'rgba(255,255,255,0.10)'       : 'rgba(255,255,255,0.96)',
+    // Fully OPAQUE surface for modal/popup panels & dropdowns — never let page
+    // content bleed through. Matches the solid surface used by fixed modals.
+    cardSolid: dark ? '#0F172A'                     : '#FFFFFF',
     bdr:      dark ? 'rgba(255,255,255,0.10)'       : 'rgba(99,102,241,0.20)',
     input:    dark ? 'rgba(255,255,255,0.07)'       : 'rgba(255,255,255,0.90)',
     inputBdr: dark ? 'rgba(255,255,255,0.15)'       : 'rgba(99,102,241,0.30)',

@@ -279,7 +279,7 @@ export default function ProjectsPage({
       {showModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: dark ? '#0f0f1a' : '#f5f5f5' }}>
           <div onClick={() => setShowModal(false)} style={{ position: 'absolute', inset: 0 }} />
-          <form onSubmit={handleSave} style={{ position: 'relative', background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 700, padding: 32, boxShadow: '0 20px 40px rgba(0,0,0,0.5)', fontFamily: "'Inter', sans-serif", maxHeight: '90vh', overflowY: 'auto' }}>
+          <form onSubmit={handleSave} style={{ position: 'relative', background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 700, padding: 32, boxShadow: '0 20px 40px rgba(0,0,0,0.5)', fontFamily: "'Inter', sans-serif", maxHeight: '90vh', overflowY: 'auto' }}>
             <h2 style={{ fontSize: 20, fontWeight: 800, color: T.text, margin: '0 0 20px' }}>{editingProj ? 'Edit Project' : 'Add Project'}</h2>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

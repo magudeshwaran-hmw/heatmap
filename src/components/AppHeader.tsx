@@ -1,11 +1,17 @@
 import { useAuth } from '@/lib/authContext';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, Menu, X, Sun, Moon, LayoutDashboard, User, Landmark } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import {
+  LogOut, Menu, X, Sun, Moon, ChevronDown,
+  LayoutDashboard, Landmark, Radar, Grid3x3, ClipboardCheck,
+  Bot, Code2, FolderKanban, GraduationCap, BadgeCheck, Trophy,
+} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { checkLLMStatus } from '@/lib/llm';
 import { ZensarLogo } from '@/components/ZensarLogo';
 import { useApp } from '@/lib/AppContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
+
+type NavItem = { label: string; path: string; icon: React.ComponentType<{ size?: number }> };
 
 export default function AppHeader() {
   const { isLoggedIn, role, name, logout } = useAuth();
@@ -13,11 +19,14 @@ export default function AppHeader() {
   const navigate  = useNavigate();
   const location  = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [moreOpen, setMoreOpen]     = useState(false);
   const [llmStatus, setLlmStatus]   = useState<{ online: boolean; mode: string } | null>(null);
-  const [testingMode, setTestingMode] = useState(() => localStorage.getItem('testing_mode') === 'true');
 
   const { dark, toggleDark } = useDark();
   const T = mkTheme(dark);
+
+  const desktopMoreRef = useRef<HTMLDivElement>(null);
+  const tabletMenuRef  = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     checkLLMStatus().then(s => setLlmStatus(s));
@@ -25,37 +34,58 @@ export default function AppHeader() {
     return () => clearInterval(iv);
   }, []);
 
+  // Close dropdown on outside click / Escape
   useEffect(() => {
-    const handleTestingChange = () => {
-      setTestingMode(localStorage.getItem('testing_mode') === 'true');
+    if (!moreOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (desktopMoreRef.current?.contains(t)) return;
+      if (tabletMenuRef.current?.contains(t)) return;
+      setMoreOpen(false);
     };
-    window.addEventListener('testing_mode_changed', handleTestingChange);
-    return () => window.removeEventListener('testing_mode_changed', handleTestingChange);
-  }, []);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [moreOpen]);
+
+  // Close menus on route change
+  useEffect(() => { setMoreOpen(false); setMobileOpen(false); }, [location.pathname]);
 
   const displayName  = appData?.user?.Name || name || '…';
   const active       = (p: string) => location.pathname === p;
 
-  const empNavItems = [
-    { label: 'ZenRadar',      path: '/employee/dashboard' },
-    { label: 'ZenMatrix',     path: '/employee/skills' },
-    { label: 'ZenAssess',     path: '/employee/zenassess' },
-    { label: 'ZenAICoach',    path: '/employee/ai' },
-    { label: 'My Projects',   path: '/employee/projects' },
-    { label: 'My Education',  path: '/employee/education' },
-    { label: 'My Certification', path: '/employee/certifications' },
-    { label: 'My Awards',     path: '/employee/achievements' },
+  // PRIMARY items (direct top-level links on desktop)
+  const empPrimary: NavItem[] = [
+    { label: 'ZenRadar',  path: '/employee/dashboard', icon: Radar },
+    { label: 'ZenMatrix', path: '/employee/skills',    icon: Grid3x3 },
+    { label: 'ZenAssess', path: '/employee/zenassess', icon: ClipboardCheck },
+  ];
+  // MORE items (inside the "More ▾" dropdown on desktop)
+  const empMore: NavItem[] = [
+    { label: 'ZenAICoach',       path: '/employee/ai',                  icon: Bot },
+    { label: 'ZenCode',          path: '/employee/github-intelligence', icon: Code2 },
+    { label: 'My Projects',      path: '/employee/projects',            icon: FolderKanban },
+    { label: 'My Education',     path: '/employee/education',           icon: GraduationCap },
+    { label: 'My Certification', path: '/employee/certifications',      icon: BadgeCheck },
+    { label: 'My Awards',        path: '/employee/achievements',        icon: Trophy },
   ];
 
-  const adminNavItems = [
-    { label: 'ZenRadar', path: '/admin', icon: LayoutDashboard },
+  const adminPrimary: NavItem[] = [
+    { label: 'ZenRadar',     path: '/admin',      icon: LayoutDashboard },
     { label: 'ZenTalentHub', path: '/admin/bfsi', icon: Landmark },
   ];
+  const adminMore: NavItem[] = [];
 
-  const navItems = role === 'admin' ? adminNavItems : empNavItems;
+  const primaryItems = role === 'admin' ? adminPrimary : empPrimary;
+  const moreItems    = role === 'admin' ? adminMore    : empMore;
+  const allItems     = [...primaryItems, ...moreItems];
 
-  const headerStyle = {
-    position: 'sticky' as const, top: 0, zIndex: 100,
+  const moreActive = moreItems.some(i => active(i.path));
+  const anyActive  = allItems.some(i => active(i.path));
+
+  const headerStyle: React.CSSProperties = {
+    position: 'sticky', top: 0, zIndex: 100,
     height: 60,
     background: dark ? 'rgba(10,10,15,0.92)' : '#ffffff',
     borderBottom: `1px solid ${T.bdr}`,
@@ -64,19 +94,55 @@ export default function AppHeader() {
     WebkitBackdropFilter: 'blur(20px)',
   };
 
-  const innerStyle = {
+  const innerStyle: React.CSSProperties = {
     maxWidth: '100%', margin: '0', height: '100%',
-    padding: '0 20px', display: 'flex', position: 'relative' as const,
+    padding: '0 20px', display: 'flex', position: 'relative',
     alignItems: 'center', justifyContent: 'space-between', gap: 8,
   };
 
+  // Top-level inline nav link (primary items + "More" trigger) — unchanged styling
   const navBtn = (isActive: boolean): React.CSSProperties => ({
     padding: '6px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
     background: isActive ? (dark ? 'rgba(59,130,246,0.15)' : '#EFF6FF') : 'transparent',
     color: isActive ? '#3B82F6' : T.sub,
     fontSize: 12, fontWeight: isActive ? 700 : 500, transition: 'all 0.2s',
-    display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' as const,
+    display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
     flexShrink: 0,
+  });
+
+  // Dropdown panel item (icon + label) — solid opaque panel rows
+  const dropItemStyle = (isActive: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+    padding: '10px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
+    textAlign: 'left', whiteSpace: 'nowrap', fontSize: 13,
+    fontWeight: isActive ? 700 : 600, transition: 'all 0.15s',
+    background: isActive ? (dark ? 'rgba(59,130,246,0.15)' : '#EFF6FF') : 'transparent',
+    color: isActive ? '#3B82F6' : T.sub,
+  });
+
+  const panelStyle: React.CSSProperties = {
+    position: 'absolute', top: 'calc(100% + 8px)', right: 0,
+    minWidth: 210,
+    background: T.cardSolid,                // SOLID opaque — Task 3 compliant
+    border: `1px solid ${T.bdr}`,
+    borderRadius: 12,
+    boxShadow: '0 16px 40px rgba(0,0,0,0.4)',
+    padding: 6, zIndex: 1001,
+    display: 'flex', flexDirection: 'column', gap: 2,
+  };
+
+  const renderDropdownItems = (items: NavItem[]) => items.map(item => {
+    const Icon = item.icon; const a = active(item.path);
+    return (
+      <button key={item.path}
+        style={dropItemStyle(a)}
+        onClick={() => { navigate(item.path); setMoreOpen(false); }}
+        onMouseEnter={e => { if (!a) e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'; }}
+        onMouseLeave={e => { if (!a) e.currentTarget.style.background = 'transparent'; }}
+      >
+        <Icon size={16} /> {item.label}
+      </button>
+    );
   });
 
   return (
@@ -87,55 +153,41 @@ export default function AppHeader() {
           <ZensarLogo size="sm" />
         </div>
 
-        {/* Nav — centered absolutely between logo and right controls */}
-        <nav style={{ display: 'flex', alignItems: 'center', gap: 2, position: 'absolute', left: '50%', transform: 'translateX(-50%)', overflowX: 'auto', scrollbarWidth: 'none' }} className="sk-hide-mobile">
-          {isLoggedIn ? (
-            navItems.map(item => (
-              <button key={item.path}
-                style={navBtn(active(item.path))}
-                onClick={() => navigate(item.path)}
-              >
+        {/* DESKTOP nav (≥1024px) — primary links + "More ▾" dropdown, centered */}
+        {isLoggedIn ? (
+          <nav className="sk-nav-d" style={{ alignItems: 'center', gap: 2, position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+            {primaryItems.map(item => (
+              <button key={item.path} style={navBtn(active(item.path))} onClick={() => navigate(item.path)}>
                 {item.label}
               </button>
-            ))
-          ) : (
-            <>
-              <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('about-tool')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>About</button>
-              <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('key-benefits')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>Features</button>
-              <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('how-it-works')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>Process</button>
-            </>
-          )}
-        </nav>
+            ))}
+            {moreItems.length > 0 && (
+              <div ref={desktopMoreRef} style={{ position: 'relative' }}>
+                <button
+                  style={navBtn(moreActive)}
+                  onClick={() => setMoreOpen(o => !o)}
+                  aria-haspopup="menu" aria-expanded={moreOpen}
+                >
+                  More <ChevronDown size={14} style={{ transform: moreOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+                </button>
+                {moreOpen && (
+                  <div role="menu" style={panelStyle}>
+                    {renderDropdownItems(moreItems)}
+                  </div>
+                )}
+              </div>
+            )}
+          </nav>
+        ) : (
+          <nav className="sk-nav-dt" style={{ alignItems: 'center', gap: 2, position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+            <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('about-tool')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>About</button>
+            <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('key-benefits')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>Features</button>
+            <button onClick={() => { if(location.pathname!=='/') navigate('/'); setTimeout(()=>document.getElementById('how-it-works')?.scrollIntoView({behavior:'smooth'}), 100); }} style={navBtn(false)}>Process</button>
+          </nav>
+        )}
 
         {/* Right — Active Session Details */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          
-          {/* Testing Mode */}
-          <button 
-            onClick={() => {
-              const current = localStorage.getItem('testing_mode') === 'true';
-              localStorage.setItem('testing_mode', !current ? 'true' : 'false');
-              window.dispatchEvent(new Event('testing_mode_changed'));
-              setTestingMode(!current);
-            }} 
-            style={{
-              border: 'none', 
-              color: testingMode ? '#EF4444' : T.sub, 
-              cursor: 'pointer',
-              padding: '6px 10px', 
-              borderRadius: 12, 
-              transition: 'all 0.2s',
-              background: testingMode ? 'rgba(239,68,68,0.15)' : (dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'),
-              fontSize: 11,
-              fontWeight: 800,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4
-            }}
-            title="Toggle Testing Mode"
-          >
-            🧪 <span className="sk-hide-mobile">{testingMode ? 'Testing ON' : 'Testing OFF'}</span>
-          </button>
 
           {/* Theme */}
           <button onClick={toggleDark} style={{
@@ -149,19 +201,19 @@ export default function AppHeader() {
           {isLoggedIn && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ 
-                    width: 10, height: 10, borderRadius: '50%', 
-                    background: llmStatus?.online ? '#10B981' : '#EF4444', 
+                  <div style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: llmStatus?.online ? '#10B981' : '#EF4444',
                     boxShadow: llmStatus?.online ? '0 0 10px #10B981' : '0 0 10px #EF4444',
                     transition: '0.3s'
                   }} />
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, letterSpacing: -0.3, whiteSpace: 'nowrap' }}>{displayName.split(' ')[0]}</div>
+                  <div className="sk-hide-mobile" style={{ fontSize: 13, fontWeight: 700, color: T.text, letterSpacing: -0.3, whiteSpace: 'nowrap' }}>{displayName.split(' ')[0]}</div>
                </div>
-               <button 
+               <button
                  onClick={() => { logout(); navigate('/login'); }}
-                 style={{ 
-                   display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderRadius: 12, 
-                   background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.1)', 
+                 style={{
+                   display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderRadius: 12,
+                   background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.1)',
                    color: '#EF4444', fontWeight: 800, fontSize: 13, cursor: 'pointer', transition: '0.2s'
                  }}
                  title="Logout"
@@ -180,8 +232,28 @@ export default function AppHeader() {
             }}>Login</button>
           )}
 
+          {/* TABLET menu trigger (768–1023px) — collapses ALL nav into one dropdown */}
           {isLoggedIn && (
-            <button className="sk-show-mobile" onClick={() => setMobileOpen(v => !v)}
+            <div ref={tabletMenuRef} className="sk-nav-t" style={{ position: 'relative' }}>
+              <button
+                onClick={() => setMoreOpen(o => !o)}
+                aria-haspopup="menu" aria-expanded={moreOpen}
+                style={navBtn(anyActive)}
+                title="Menu"
+              >
+                <Menu size={18} /> <ChevronDown size={14} style={{ transform: moreOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+              </button>
+              {moreOpen && (
+                <div role="menu" style={panelStyle}>
+                  {renderDropdownItems(allItems)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* MOBILE hamburger (<768px) — opens slide drawer */}
+          {isLoggedIn && (
+            <button className="sk-nav-m" onClick={() => setMobileOpen(v => !v)}
               style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', padding: 4 }}>
               {mobileOpen ? <X size={24} /> : <Menu size={24} />}
             </button>
@@ -189,41 +261,77 @@ export default function AppHeader() {
         </div>
       </div>
 
+      {/* MOBILE drawer (<768px) — all nav items as one flat list */}
       {mobileOpen && isLoggedIn && (
         <>
-          {/* Backdrop overlay */}
+          {/* Backdrop overlay — fully opaque per modal standard */}
           <div
             onClick={() => setMobileOpen(false)}
-            style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.5)', zIndex: 9998 }}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 1000 }}
           />
           {/* Side drawer */}
-          <div style={{ background: dark ? 'rgba(10,10,15,0.98)' : T.card, borderRight: `1px solid ${T.bdr}`, padding: '12px 16px', position: 'fixed', top: 0, left: 0, height: '100vh', width: 280, zIndex: 9999, overflowY: 'auto', boxShadow: '4px 0 24px rgba(0,0,0,0.3)' }}>
+          <div style={{ background: T.cardSolid, borderRight: `1px solid ${T.bdr}`, padding: '12px 16px', position: 'fixed', top: 0, left: 0, height: '100vh', width: 280, maxWidth: '85vw', zIndex: 1001, overflowY: 'auto', boxShadow: '4px 0 24px rgba(0,0,0,0.4)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 16, marginBottom: 8, borderBottom: `1px solid ${T.bdr}` }}>
               <ZensarLogo size="sm" />
               <button onClick={() => setMobileOpen(false)} style={{ background: 'none', border: 'none', color: T.sub, cursor: 'pointer', padding: 4 }}><X size={20} /></button>
             </div>
-            {navItems.map(item => (
-              <button key={item.path}
-                onClick={() => { navigate(item.path); setMobileOpen(false); }}
-                style={{
-                  display: 'block', width: '100%', textAlign: 'left', padding: '12px 14px',
-                  borderRadius: 10, marginBottom: 6,
-                  background: active(item.path) ? '#3B82F6' : 'transparent',
-                  color: active(item.path) ? '#fff' : T.sub,
-                  border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700
-                }}>
-                {item.label}
-              </button>
-            ))}
+
+            <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 1.5, padding: '8px 14px 4px' }}>Main</div>
+            {primaryItems.map(item => {
+              const Icon = item.icon;
+              return (
+                <button key={item.path}
+                  onClick={() => { navigate(item.path); setMobileOpen(false); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '12px 14px',
+                    borderRadius: 10, marginBottom: 4,
+                    background: active(item.path) ? '#3B82F6' : 'transparent',
+                    color: active(item.path) ? '#fff' : T.sub,
+                    border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700
+                  }}>
+                  <Icon size={16} /> {item.label}
+                </button>
+              );
+            })}
+
+            {moreItems.length > 0 && (
+              <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 1.5, padding: '12px 14px 4px' }}>Tools</div>
+            )}
+            {moreItems.map(item => {
+              const Icon = item.icon;
+              return (
+                <button key={item.path}
+                  onClick={() => { navigate(item.path); setMobileOpen(false); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '12px 14px',
+                    borderRadius: 10, marginBottom: 4,
+                    background: active(item.path) ? '#3B82F6' : 'transparent',
+                    color: active(item.path) ? '#fff' : T.sub,
+                    border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700
+                  }}>
+                  <Icon size={16} /> {item.label}
+                </button>
+              );
+            })}
           </div>
         </>
       )}
 
       <style>{`
-        @media(max-width:900px){.sk-hide-mobile{display:none!important}}
-        @media(min-width:901px){.sk-show-mobile{display:none!important}}
-        nav::-webkit-scrollbar { display: none; }
-        nav { -ms-overflow-style: none; scrollbar-width: none; }
+        /* 3-tier nav: desktop (≥1024) · tablet (768–1023) · mobile (<768) */
+        .sk-nav-d  { display: flex; }
+        .sk-nav-dt { display: flex; }
+        .sk-nav-t  { display: none; }
+        .sk-nav-m  { display: none; }
+        @media (max-width: 1023px) {
+          .sk-nav-d { display: none !important; }
+          .sk-nav-t { display: flex !important; }
+        }
+        @media (max-width: 767px) {
+          .sk-nav-dt { display: none !important; }
+          .sk-nav-t  { display: none !important; }
+          .sk-nav-m  { display: flex !important; }
+        }
       `}</style>
     </header>
   );

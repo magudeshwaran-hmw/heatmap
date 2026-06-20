@@ -1672,6 +1672,101 @@ async function syncDatabaseSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_bfsi_assignments_role ON bfsi_assignments(role_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_bfsi_summary_skill ON bfsi_summary_data(primary_skill)`);
 
+    // ── GitHub Intelligence Engine (ZenCode) tables ──
+    await query(`
+      CREATE TABLE IF NOT EXISTS github_profiles (
+        id SERIAL PRIMARY KEY,
+        employee_id VARCHAR UNIQUE,
+        github_username VARCHAR,
+        consent_given BOOLEAN DEFAULT false,
+        connected_at TIMESTAMP,
+        name VARCHAR,
+        bio TEXT,
+        company VARCHAR,
+        location VARCHAR,
+        blog VARCHAR,
+        twitter VARCHAR,
+        public_repos INTEGER,
+        followers INTEGER,
+        following INTEGER,
+        account_created_at TIMESTAMP,
+        developer_score INTEGER DEFAULT 0,
+        profile_completeness INTEGER DEFAULT 0,
+        last_analyzed_at TIMESTAMP,
+        analysis_status VARCHAR DEFAULT 'pending',
+        error_message TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS github_repositories (
+        id SERIAL PRIMARY KEY,
+        employee_id VARCHAR,
+        repo_name VARCHAR,
+        repo_full_name VARCHAR,
+        description TEXT,
+        is_fork BOOLEAN DEFAULT false,
+        is_private BOOLEAN DEFAULT false,
+        stars INTEGER DEFAULT 0,
+        forks INTEGER DEFAULT 0,
+        watchers INTEGER DEFAULT 0,
+        open_issues INTEGER DEFAULT 0,
+        topics JSONB DEFAULT '[]',
+        size_kb INTEGER,
+        default_branch VARCHAR,
+        license VARCHAR,
+        homepage_url VARCHAR,
+        created_at_github TIMESTAMP,
+        updated_at_github TIMESTAMP,
+        own_commit_count INTEGER DEFAULT 0,
+        total_commit_count INTEGER DEFAULT 0,
+        contribution_percentage INTEGER DEFAULT 0,
+        trivial_commit_ratio INTEGER DEFAULT 0,
+        fork_credit_eligible BOOLEAN DEFAULT true,
+        health_score INTEGER DEFAULT 0,
+        documentation_score INTEGER DEFAULT 0,
+        project_category VARCHAR,
+        languages JSONB DEFAULT '{}',
+        frameworks_detected JSONB DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS github_skill_evidence (
+        id SERIAL PRIMARY KEY,
+        employee_id VARCHAR,
+        skill_name VARCHAR,
+        evidence_count INTEGER DEFAULT 0,
+        confidence_score INTEGER DEFAULT 0,
+        freshness_score INTEGER DEFAULT 0,
+        last_evidence_date TIMESTAMP,
+        source_repos JSONB DEFAULT '[]',
+        evidence_level VARCHAR,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(employee_id, skill_name)
+      )
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS github_workforce_readiness (
+        id SERIAL PRIMARY KEY,
+        employee_id VARCHAR,
+        role_name VARCHAR,
+        match_percentage INTEGER,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Integration columns on the existing skills table (ZenMatrix)
+    await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS github_evidence_score INTEGER DEFAULT 0`);
+    await query(`ALTER TABLE skills ADD COLUMN IF NOT EXISTS github_suggested_level VARCHAR`);
+
+    await query(`CREATE INDEX IF NOT EXISTS idx_github_repos_emp ON github_repositories(employee_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_github_skill_evidence_emp ON github_skill_evidence(employee_id)`);
+
     // Initialize Phase 1 (Security) and Phase 2 (ZenAssess) tables
     await ensureSecurityTables();
     await ensurePhase2Tables();
@@ -7935,6 +8030,610 @@ app.post('/api/zenassess/evaluate-github', async (req, res) => {
   } catch (err) {
     console.error('❌ GitHub eval error:', err.message);
     res.status(500).json({ error: err.message, score: 0 });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// GITHUB INTELLIGENCE ENGINE (ZenCode)
+// ════════════════════════════════════════════════════════════
+
+const GITHUB_API = 'https://api.github.com';
+
+const githubFetch = async (path, retries = 2) => {
+  const rawToken = process.env.GITHUB_TOKEN;
+  const token = typeof rawToken === 'string' ? rawToken.trim() : '';
+
+  const buildHeaders = (includeAuth) => {
+    const h = {
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'ZenSkillNavigator',
+      'X-GitHub-Api-Version': '2022-11-28'
+    };
+    if (includeAuth && token.length > 20) {
+      h['Authorization'] = `Bearer ${token}`;
+    }
+    return h;
+  };
+
+  const hasToken = token.length > 20;
+
+  try {
+    let res = await fetch(`${GITHUB_API}${path}`, { headers: buildHeaders(hasToken) });
+
+    const remaining = res.headers.get('x-ratelimit-remaining');
+    const limit = res.headers.get('x-ratelimit-limit');
+    console.log(`[GitHub API] ${path} -> ${res.status} | rate: ${remaining}/${limit} | auth: ${hasToken}`);
+
+    // If we sent a token and got 401, the token is bad — retry clean with NO
+    // auth header at all.
+    if (res.status === 401 && hasToken) {
+      console.warn('[GitHub API] Token rejected (401). Retrying unauthenticated.');
+      res = await fetch(`${GITHUB_API}${path}`, { headers: buildHeaders(false) });
+      console.log(`[GitHub API] retry -> ${res.status}`);
+    }
+
+    if (res.status === 404) {
+      throw new Error('NOT_FOUND');
+    }
+
+    if (res.status === 403) {
+      const rem = res.headers.get('x-ratelimit-remaining');
+      if (rem === '0') {
+        throw new Error('RATE_LIMIT:' + (res.headers.get('x-ratelimit-reset') || ''));
+      }
+      if (retries > 0) {
+        await new Promise(r => setTimeout(r, 2000));
+        return githubFetch(path, retries - 1);
+      }
+      throw new Error('GITHUB_ERROR:403');
+    }
+
+    // Any remaining non-401, non-404, non-403 failure (including a 401 that
+    // persisted even after the no-auth retry — which means the endpoint itself
+    // requires auth, not that our token is bad).
+    if (!res.ok) {
+      if (res.status === 401) {
+        // Endpoint genuinely requires auth and we have none — surface a clear
+        // message instead of a raw crash.
+        throw new Error('AUTH_REQUIRED');
+      }
+      if (retries > 0) {
+        await new Promise(r => setTimeout(r, 1000));
+        return githubFetch(path, retries - 1);
+      }
+      throw new Error(`GITHUB_ERROR:${res.status}`);
+    }
+
+    return await res.json();
+
+  } catch (err) {
+    if (err.message.startsWith('RATE_LIMIT') ||
+        err.message === 'NOT_FOUND' ||
+        err.message === 'AUTH_REQUIRED') {
+      throw err;
+    }
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 1000));
+      return githubFetch(path, retries - 1);
+    }
+    throw err;
+  }
+};
+
+// Unauthenticated GitHub allows 60 requests/hour. We stay under that with a safety
+// margin and track how many calls an analysis run has spent. Reset at the start of
+// each analyzeGitHubProfile() run.
+const RATE_LIMIT_BUDGET = 50;
+let apiCallsUsed = 0;
+
+function calculateReadmeScore(content) {
+  if (!content) return 0;
+  let score = 0;
+  if (content.length > 500) score += 20;
+  if (/install/i.test(content)) score += 15;
+  if (/usage|getting started/i.test(content)) score += 15;
+  if (/api/i.test(content)) score += 10;
+  if (/deploy/i.test(content)) score += 15;
+  if (/architecture/i.test(content)) score += 15;
+  if (content.includes('```')) score += 10;
+  return Math.min(100, score);
+}
+
+function calculateRepoHealth(data) {
+  let score = 0;
+  if (data.hasDescription) score += 10;
+  if (data.hasTopics) score += 10;
+  if (data.hasLicense) score += 10;
+  if (data.hasReadme) score += 15;
+  score += Math.min(20, data.readmeScore * 0.2);
+  score += Math.min(15, Math.log10(data.stars + 1) * 5);
+  if (data.monthsOld < 6) score += 20;
+  else if (data.monthsOld < 12) score += 10;
+  else if (data.monthsOld < 24) score += 5;
+  if (!data.forkCreditEligible) score = score * 0.3;
+  return Math.min(100, Math.round(score));
+}
+
+function calculateDeveloperScore(data) {
+  let score = 0;
+  score += Math.min(30, Math.log10(data.publicRepos + 1) * 15);
+  score += Math.min(30, data.avgDocScore * 0.3);
+  score += Math.min(40, data.analyzedRepoCount * 4);
+  return Math.min(100, Math.round(score));
+}
+
+async function detectFrameworks(repoFullName) {
+  // Rate-limit friendly: list the repo root ONCE (1 call) and detect from file
+  // names, then download only package.json content if present (+1 call max) — for
+  // the deepest dependency signals. This replaces the old per-file approach that
+  // cost up to 12 calls per repo (impossible under the 60/hr unauthenticated cap).
+  const detected = [];
+
+  try {
+    const contents = await githubFetch(`/repos/${repoFullName}/contents/`);
+    apiCallsUsed++;
+
+    if (!Array.isArray(contents)) return [];
+
+    const fileNames = contents.map(f => f.name.toLowerCase());
+
+    // Detect from FILE NAMES only (no content download needed).
+    const fileSignals = {
+      'package.json': ['npm'],
+      'requirements.txt': ['python-deps'],
+      'dockerfile': ['Docker'],
+      'docker-compose.yml': ['Docker Compose'],
+      'cargo.toml': ['Rust'],
+      'go.mod': ['Go'],
+      'pom.xml': ['Maven/Java'],
+      'build.gradle': ['Gradle/Java'],
+      'next.config.js': ['Next.js'],
+      'vite.config.js': ['Vite'],
+      'vite.config.ts': ['Vite'],
+      'pyproject.toml': ['Python'],
+      'main.tf': ['Terraform'],
+      'manage.py': ['Django'],
+      'angular.json': ['Angular'],
+      'vue.config.js': ['Vue']
+    };
+
+    Object.entries(fileSignals).forEach(([file, frameworks]) => {
+      if (fileNames.includes(file)) detected.push(...frameworks);
+    });
+
+    // Only fetch package.json CONTENT if it exists (+1 call max, not 12) — gives
+    // the deepest signal (React, Express, etc.).
+    if (fileNames.includes('package.json')) {
+      try {
+        const pkgFile = contents.find(f => f.name.toLowerCase() === 'package.json');
+        const pkgContent = await githubFetch(`/repos/${repoFullName}/contents/${pkgFile.name}`);
+        apiCallsUsed++;
+        const decoded = Buffer.from(pkgContent.content, 'base64').toString('utf-8').toLowerCase();
+
+        if (decoded.includes('"react"')) detected.push('React');
+        if (decoded.includes('"express"')) detected.push('Express');
+        if (decoded.includes('"@angular/core"')) detected.push('Angular');
+        if (decoded.includes('"vue"')) detected.push('Vue');
+        if (decoded.includes('"next"')) detected.push('Next.js');
+        if (decoded.includes('"typescript"')) detected.push('TypeScript');
+      } catch {
+        // package.json fetch failed — skip silently; file-name signals already captured.
+      }
+    }
+  } catch {
+    // Root contents fetch failed (empty repo, etc.) — skip.
+  }
+
+  return [...new Set(detected)];
+}
+
+function classifyProject(languages, frameworks, readme, topics) {
+  const fw = frameworks.map(f => f.toLowerCase());
+  const langs = Object.keys(languages).map(l => l.toLowerCase());
+  const text = (readme + ' ' + topics.join(' ')).toLowerCase();
+
+  if (fw.some(f => ['langchain', 'langgraph', 'crewai', 'autogen'].includes(f))) return 'Agentic AI';
+  if (text.includes('rag') || text.includes('vector database') || text.includes('embedding')) return 'Generative AI';
+  if (fw.includes('tensorflow') || fw.includes('pytorch') || fw.includes('scikit-learn'))
+    return (text.includes('train') || text.includes('model')) ? 'Machine Learning' : 'AI';
+  if (fw.includes('docker') && fw.includes('kubernetes')) return 'DevOps';
+  if (fw.some(f => ['react', 'next.js', 'angular', 'vue'].includes(f)) &&
+      fw.some(f => ['express', 'fastapi', 'django', 'flask', 'spring boot'].includes(f))) return 'Full Stack';
+  if (fw.some(f => ['react', 'next.js', 'angular', 'vue'].includes(f))) return 'Frontend';
+  if (fw.some(f => ['express', 'fastapi', 'django', 'flask', 'spring boot'].includes(f))) return 'Backend';
+  if (langs.includes('swift') || langs.includes('kotlin') || text.includes('android') || text.includes('ios')) return 'Mobile';
+  if (text.includes('terraform') || text.includes('aws') || text.includes('azure')) return 'Cloud';
+  if (text.includes('blockchain') || text.includes('solidity')) return 'Blockchain';
+  return 'General';
+}
+
+function mapToCanonicalSkill(input) {
+  const map = {
+    'python': 'Python', 'javascript': 'JavaScript', 'typescript': 'TypeScript',
+    'java': 'Java', 'c#': 'C#', 'selenium': 'Selenium', 'docker': 'Docker',
+    'jenkins': 'Jenkins', 'sql': 'SQL', 'postgresql': 'SQL',
+    'mongodb': 'Database Testing', 'react': 'JavaScript', 'express': 'JavaScript',
+    'fastapi': 'Python', 'django': 'Python', 'flask': 'Python',
+    'spring boot': 'Java', 'git': 'Git'
+  };
+  return map[input.toLowerCase()] || null;
+}
+
+async function analyzeGitHubProfile(employeeId, username) {
+  await query(`UPDATE github_profiles SET analysis_status = 'analyzing' WHERE employee_id = $1`, [employeeId]);
+
+  // Reset the per-run API call budget (unauthenticated = 60 calls/hour).
+  apiCallsUsed = 0;
+
+  try {
+    const repos = await githubFetch(`/users/${username}/repos?per_page=100&sort=updated`);
+    apiCallsUsed++;
+
+    // Clear prior repo rows so re-analysis doesn't duplicate
+    await query(`DELETE FROM github_repositories WHERE employee_id = $1`, [employeeId]);
+
+    // Without auth we have ~58 calls left. Each repo costs roughly:
+    //   1 (directory listing) + 0-1 (package.json) + 1 (languages) + 0-1 (readme).
+    // Process the top 15 most recently updated repos to stay safely within budget.
+    const reposToAnalyze = repos
+      .filter(r => !r.archived)
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      .slice(0, 15);
+
+    console.log(`Analyzing ${reposToAnalyze.length} of ${repos.length} repos (unauthenticated rate limit safety)`);
+
+    const skillEvidence = {};
+    let totalDocScore = 0;
+    let analyzedRepoCount = 0;
+
+    for (const repo of reposToAnalyze) {
+      try {
+      const updatedDate = new Date(repo.updated_at);
+      const monthsOld = (Date.now() - updatedDate) / (1000 * 60 * 60 * 24 * 30);
+
+      // ── SIMPLIFIED FORK DETECTION ──
+      // Without per-commit API calls (saves rate limit). Use repo metadata only.
+      let ownCommitRatio = 1.0;
+      let forkCreditEligible = true;
+
+      if (repo.fork) {
+        // pushed_at > created_at means commits happened after forking.
+        const hasOwnActivity = new Date(repo.pushed_at) > new Date(repo.created_at);
+        const daysSinceFork =
+          (new Date(repo.pushed_at) - new Date(repo.created_at)) / (1000 * 60 * 60 * 24);
+
+        if (!hasOwnActivity) {
+          // Never pushed after forking = pure fork, no original work.
+          ownCommitRatio = 0.1;
+          forkCreditEligible = false;
+        } else if (daysSinceFork < 1) {
+          // Forked and pushed same day = likely just the initial fork commit.
+          ownCommitRatio = 0.3;
+          forkCreditEligible = false;
+        } else {
+          // Sustained activity after forking = genuine contribution.
+          ownCommitRatio = 0.7;
+          forkCreditEligible = true;
+        }
+      }
+
+      // ── LANGUAGES ──
+      let languages = {};
+      try {
+        languages = await githubFetch(`/repos/${repo.full_name}/languages`);
+        apiCallsUsed++;
+      } catch {}
+
+      // ── README ANALYSIS (skippable when budget is low) ──
+      let readmeContent = '';
+      let readmeScore = 0;
+      if (apiCallsUsed < RATE_LIMIT_BUDGET) {
+        try {
+          const readme = await githubFetch(`/repos/${repo.full_name}/readme`);
+          apiCallsUsed++;
+          readmeContent = Buffer.from(readme.content, 'base64').toString('utf-8');
+          readmeScore = calculateReadmeScore(readmeContent);
+        } catch {
+          readmeScore = 0;
+        }
+      } else {
+        // Budget exhausted — skip README for the remaining repos this session.
+        readmeScore = 0;
+      }
+
+      // ── FRAMEWORK DETECTION (detectFrameworks increments apiCallsUsed) ──
+      const frameworks = await detectFrameworks(repo.full_name);
+
+      // ── PROJECT CATEGORY ──
+      const category = classifyProject(languages, frameworks, readmeContent, repo.topics || []);
+
+      // ── HEALTH SCORE ──
+      const healthScore = calculateRepoHealth({
+        hasDescription: !!repo.description,
+        hasTopics: (repo.topics || []).length > 0,
+        hasLicense: !!repo.license,
+        hasReadme: readmeContent.length > 0,
+        readmeScore,
+        stars: repo.stargazers_count,
+        monthsOld,
+        forkCreditEligible
+      });
+
+      totalDocScore += readmeScore;
+      analyzedRepoCount++;
+
+      await query(`
+        INSERT INTO github_repositories (
+          employee_id, repo_name, repo_full_name, description,
+          is_fork, is_private, stars, forks, watchers, open_issues,
+          topics, size_kb, default_branch, license, homepage_url,
+          created_at_github, updated_at_github,
+          own_commit_count, total_commit_count, contribution_percentage,
+          fork_credit_eligible, health_score, documentation_score,
+          project_category, languages, frameworks_detected
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+          $18,$19,$20,$21,$22,$23,$24,$25,$26
+        )
+      `, [
+        employeeId, repo.name, repo.full_name, repo.description,
+        repo.fork, repo.private, repo.stargazers_count, repo.forks_count,
+        repo.watchers_count, repo.open_issues_count,
+        JSON.stringify(repo.topics || []), repo.size, repo.default_branch,
+        repo.license?.name, repo.homepage, repo.created_at, repo.updated_at,
+        0, 0, Math.round(ownCommitRatio * 100), forkCreditEligible,
+        healthScore, readmeScore, category,
+        JSON.stringify(languages), JSON.stringify(frameworks)
+      ]);
+
+      // ── BUILD SKILL EVIDENCE ──
+      const evidenceWeight = forkCreditEligible ? 1.0 : 0.3;
+
+      Object.keys(languages).forEach(lang => {
+        const canonicalSkill = mapToCanonicalSkill(lang);
+        if (!canonicalSkill) return;
+        if (!skillEvidence[canonicalSkill]) {
+          skillEvidence[canonicalSkill] = { count: 0, repos: [], lastDate: updatedDate };
+        }
+        skillEvidence[canonicalSkill].count += evidenceWeight;
+        skillEvidence[canonicalSkill].repos.push(repo.name);
+        if (updatedDate > skillEvidence[canonicalSkill].lastDate) {
+          skillEvidence[canonicalSkill].lastDate = updatedDate;
+        }
+      });
+
+      frameworks.forEach(fwName => {
+        const canonicalSkill = mapToCanonicalSkill(fwName);
+        if (!canonicalSkill) return;
+        if (!skillEvidence[canonicalSkill]) {
+          skillEvidence[canonicalSkill] = { count: 0, repos: [], lastDate: updatedDate };
+        }
+        skillEvidence[canonicalSkill].count += evidenceWeight;
+        skillEvidence[canonicalSkill].repos.push(repo.name);
+      });
+
+      // Rate limit safety: small delay
+      await new Promise(r => setTimeout(r, 100));
+      } catch (repoErr) {
+        if (repoErr.message.startsWith('RATE_LIMIT')) {
+          console.warn(`Rate limit hit after processing ${analyzedRepoCount} repos. Saving partial results.`);
+          // Break out — keep whatever was already saved.
+          break;
+        }
+        // Other errors: skip this repo, continue with the next.
+        console.warn(`Skipping repo ${repo.name}:`, repoErr.message);
+        continue;
+      }
+    }
+
+    // Save skill evidence
+    for (const [skill, data] of Object.entries(skillEvidence)) {
+      const evidenceCount = Math.round(data.count);
+      const level =
+        evidenceCount >= 10 ? 'Expert' :
+        evidenceCount >= 6 ? 'Advanced' :
+        evidenceCount >= 3 ? 'Intermediate' : 'Beginner';
+
+      const monthsSinceUse = (Date.now() - data.lastDate) / (1000 * 60 * 60 * 24 * 30);
+      const freshness = Math.max(0, Math.round(100 - monthsSinceUse * 5));
+      const confidence = Math.min(100, Math.round(evidenceCount * 10 + freshness * 0.3));
+
+      const uniqueRepos = [...new Set(data.repos)];
+
+      await query(`
+        INSERT INTO github_skill_evidence (
+          employee_id, skill_name, evidence_count, confidence_score,
+          freshness_score, last_evidence_date, source_repos, evidence_level
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (employee_id, skill_name)
+        DO UPDATE SET
+          evidence_count = $3, confidence_score = $4, freshness_score = $5,
+          last_evidence_date = $6, source_repos = $7, evidence_level = $8
+      `, [
+        employeeId, skill, evidenceCount, confidence, freshness,
+        data.lastDate, JSON.stringify(uniqueRepos), level
+      ]);
+
+      // ── INTEGRATE WITH EXISTING skills table (ZenMatrix) — suggest only ──
+      // Never auto-overwrites a verified badge; just records a suggestion.
+      if (confidence >= 60) {
+        await query(`
+          UPDATE skills
+          SET github_evidence_score = $1, github_suggested_level = $2
+          WHERE employee_id = $3 AND skill_name = $4
+        `, [confidence, level, employeeId, skill]);
+      }
+    }
+
+    const devScore = calculateDeveloperScore({
+      publicRepos: repos.length,
+      analyzedRepoCount,
+      avgDocScore: analyzedRepoCount > 0 ? totalDocScore / analyzedRepoCount : 0
+    });
+
+    // Partial coverage is a normal, non-error outcome without a token. Record an
+    // informational note so the UI can surface it as a notice (not an error).
+    let coverageNote = null;
+    if (analyzedRepoCount < reposToAnalyze.length) {
+      coverageNote = `Rate limit reached. Analyzed ${analyzedRepoCount} of ${reposToAnalyze.length} repos. Reconnect later for full analysis.`;
+    } else if (repos.length > reposToAnalyze.length) {
+      coverageNote = `Analyzed top ${reposToAnalyze.length} most recent repositories of ${repos.length} total (unauthenticated API limit).`;
+    }
+
+    await query(`
+      UPDATE github_profiles
+      SET analysis_status = 'complete', developer_score = $1, last_analyzed_at = NOW(), error_message = $2
+      WHERE employee_id = $3
+    `, [devScore, coverageNote, employeeId]);
+
+  } catch (err) {
+    console.error('Analysis failed:', err);
+
+    const isRateLimit = err.message.startsWith('RATE_LIMIT');
+    const isAuthIssue = err.message === 'AUTH_REQUIRED';
+
+    await query(`
+      UPDATE github_profiles SET analysis_status = 'error', error_message = $1 WHERE employee_id = $2
+    `, [
+      isRateLimit
+        ? 'GitHub API rate limit reached. Please try again in an hour.'
+        : isAuthIssue
+          ? 'GitHub authentication issue. Please contact admin.'
+          : err.message,
+      employeeId
+    ]);
+  }
+}
+
+// ─── POST /api/github/connect — consent + trigger analysis ──────────────────
+app.post('/api/github/connect', async (req, res) => {
+  try {
+    const { employeeId, githubUsername } = req.body;
+    if (!githubUsername) return res.status(400).json({ error: 'GitHub username required' });
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+
+    let profile;
+    try {
+      profile = await githubFetch(`/users/${githubUsername}`);
+    } catch (err) {
+      console.error('[GitHub Connect] Fetch failed:', err.message);
+
+      if (err.message === 'NOT_FOUND') {
+        return res.status(404).json({
+          error: 'GitHub username not found. Please check the spelling.'
+        });
+      }
+
+      if (err.message.startsWith('RATE_LIMIT')) {
+        return res.status(429).json({
+          error: 'GitHub rate limit reached. Please try again in about an hour, ' +
+            'or contact admin to add a GITHUB_TOKEN for higher limits.'
+        });
+      }
+
+      if (err.message === 'AUTH_REQUIRED') {
+        return res.status(401).json({
+          error: 'GitHub authentication issue. Public profile data should not ' +
+            'require this — please report this to support.'
+        });
+      }
+
+      // Catch-all — never let an unhandled error become a bare 500.
+      return res.status(502).json({
+        error: 'Could not reach GitHub right now. Please try again in a moment.'
+      });
+    }
+
+    await query(`
+      INSERT INTO github_profiles (
+        employee_id, github_username, consent_given, connected_at,
+        name, bio, company, location, blog, twitter,
+        public_repos, followers, following, account_created_at, analysis_status
+      ) VALUES ($1,$2,true,NOW(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')
+      ON CONFLICT (employee_id) DO UPDATE SET
+        github_username = $2, consent_given = true, connected_at = NOW(),
+        name = $3, bio = $4, company = $5, location = $6, blog = $7, twitter = $8,
+        public_repos = $9, followers = $10, following = $11,
+        account_created_at = $12, analysis_status = 'pending', error_message = NULL
+    `, [
+      employeeId, githubUsername, profile.name, profile.bio, profile.company,
+      profile.location, profile.blog, profile.twitter_username, profile.public_repos,
+      profile.followers, profile.following, profile.created_at
+    ]);
+
+    // Keep employees.github_username in sync so ZenAssess GitHub eval continues to work
+    try {
+      await query(`UPDATE employees SET github_username = $1 WHERE id = $2`, [githubUsername, employeeId]);
+    } catch { /* non-blocking */ }
+
+    // Trigger async analysis (don't block response)
+    analyzeGitHubProfile(employeeId, githubUsername)
+      .catch(err => console.error('GitHub analysis error:', err));
+
+    return res.json({
+      success: true,
+      message: 'Analysis started',
+      profile: { name: profile.name, publicRepos: profile.public_repos, followers: profile.followers }
+    });
+  } catch (err) {
+    console.error('GitHub connect error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/github/:employeeId/readiness — workforce role match ────────────
+app.get('/api/github/:employeeId/readiness', async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const skills = await query(
+      `SELECT skill_name, confidence_score FROM github_skill_evidence WHERE employee_id = $1`,
+      [employeeId]
+    );
+
+    const roles = [
+      { name: 'AI Engineer', required: ['Python', 'TensorFlow', 'PyTorch'] },
+      { name: 'Full Stack Developer', required: ['JavaScript', 'TypeScript', 'SQL'] },
+      { name: 'DevOps Engineer', required: ['Docker', 'Jenkins', 'Git'] },
+      { name: 'Agentic AI Developer', required: ['Python', 'LangChain', 'LangGraph'] }
+    ];
+
+    const readiness = roles.map(role => {
+      const matched = role.required.filter(reqSkill =>
+        skills.rows.some(s => s.skill_name === reqSkill && s.confidence_score >= 50)
+      );
+      return { role: role.name, matchPercentage: Math.round((matched.length / role.required.length) * 100) };
+    });
+
+    return res.json(readiness);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/github/:employeeId — status + results ─────────────────────────
+app.get('/api/github/:employeeId', async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const profile = await query(`SELECT * FROM github_profiles WHERE employee_id = $1`, [employeeId]);
+    if (profile.rows.length === 0) return res.json({ connected: false });
+
+    const repos = await query(
+      `SELECT * FROM github_repositories WHERE employee_id = $1 ORDER BY health_score DESC LIMIT 50`,
+      [employeeId]
+    );
+    const skills = await query(
+      `SELECT * FROM github_skill_evidence WHERE employee_id = $1 ORDER BY confidence_score DESC`,
+      [employeeId]
+    );
+
+    return res.json({
+      connected: true,
+      profile: profile.rows[0],
+      repositories: repos.rows,
+      skills: skills.rows
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 

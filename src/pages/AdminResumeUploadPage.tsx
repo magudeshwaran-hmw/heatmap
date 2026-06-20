@@ -956,7 +956,7 @@ export default function AdminResumeUploadPage({
       }}>
         <div style={{
           width: '100%', maxWidth: 1200, maxHeight: '90vh',
-          background: T.card,
+          background: T.cardSolid,
           borderRadius: 24,
           border: `1px solid ${T.bdr}`,
           boxShadow: '0 32px 80px rgba(0,0,0,0.5)',

@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/lib/AppContext';
 import { apiGetSkills, API_BASE } from '@/lib/api';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck } from 'lucide-react';
+import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck, Github } from 'lucide-react';
 
 import { Radar } from 'react-chartjs-2';
 import {
@@ -349,6 +349,7 @@ export default function EmployeeDashboard({
                { label: 'ZenAssess',             path: '/employee/zenassess',      icon: <ClipboardCheck size={20}/>, color: '#10B981', desc: 'Validate your skills. Earn verified badges.' },
                { label: 'ZenAlign',              path: '/employee/resume-builder', icon: <FileText size={20}/>,      color: '#ec4899', desc: 'Convert your resume to Zensar standard instantly.', hideInPopup: true },
                { label: 'ZenAICoach',            path: '/employee/ai',             icon: <Bot size={20}/>,           color: '#c084fc', desc: 'Career intelligence', hideInPopup: true },
+               { label: 'ZenCode — GitHub Analysis', path: '/employee/github-intelligence', icon: <Github size={20}/>, color: '#3B82F6', desc: 'Discover & verify skills from your public GitHub repositories.' },
                { label: 'My Education',          path: '/employee/education',      icon: <GraduationCap size={20}/>, color: '#06B6D4', desc: 'Know your skills. Plan your growth.' },
                { label: 'My Projects',           path: '/employee/projects',       icon: <Briefcase size={20}/>,     color: '#F59E0B', desc: 'Match the right skill to the right project. · ' + safeProjects.length + ' entries' },
                { label: 'My Certification',      path: '/employee/certifications', icon: <Award size={20}/>,         color: '#10B981', desc: 'Track all your certifications, dates and renewals in one place. · ' + safeCerts.length + ' entries' },

@@ -28,6 +28,7 @@ import AchievementsPage from './AchievementsPage';
 import AIIntelligencePage from './AIIntelligencePage';
 import AdminResumeUploadPage from './AdminResumeUploadPage';
 import ResumeBuilderPage from './ResumeBuilderPage';
+import GitHubIntelligencePage from './GitHubIntelligencePage';
 import { callResumeLLM } from '@/lib/llm';
 import { extractTextFromPDF, accurateExtractFromResume } from '@/lib/resumeExtraction';
 
@@ -807,7 +808,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [previewUser, setPreviewUser] = useState<any | null>(null);
   const [previewData, setPreviewData] = useState<AppData | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
+  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
   // ── Multi-select delete (Manage Employees) ──
@@ -2456,8 +2457,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
               {/* Action Modals */}
               {showReviewActionModal && selectedReview && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, backdropFilter: 'blur(5px)' }}>
-                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 1000, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)' }}>
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, backdropFilter: 'blur(5px)' }}>
+                  <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 20, width: '100%', maxWidth: 1000, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.5)' }}>
                     
                     {/* Modal Header */}
                     <div style={{ padding: '20px 24px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.02)' }}>
@@ -3596,7 +3597,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
                
                <div style={{ display: 'flex', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, overflowX: 'auto', flex: 1, minWidth: 200, WebkitOverflowScrolling: 'touch' }}>
-                {(['ZenRadar', 'ZenScan', 'ZenMatrix', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
+                {(['ZenRadar', 'ZenScan', 'ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
                    <button 
                      key={tab} 
                      onClick={() => setPopupActiveTab(tab)}
@@ -3677,8 +3678,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   isLoading: false, 
                   isPopup: true,
                     onTabChange: (path: any) => {
-                      const tabMap: Record<string, 'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'> = {
+                      const tabMap: Record<string, 'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'> = {
                         '/employee/skills': 'ZenMatrix',
+                        '/employee/github-intelligence': 'ZenCode',
                         '/employee/certifications': 'My Certification',
                         '/employee/projects': 'My Projects',
                         '/employee/education': 'My Education',
@@ -3808,8 +3810,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           </div>
                         </div>
                         <EmployeeDashboard key="dashboard" isPopup={true} overrideData={previewData!} onTabChange={(path: any) => {
-                           const tabMap: Record<string, 'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'> = {
+                           const tabMap: Record<string, 'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'> = {
                             '/employee/skills': 'ZenMatrix',
+                            '/employee/github-intelligence': 'ZenCode',
                             '/employee/certifications': 'My Certification',
                             '/employee/projects': 'My Projects',
                             '/employee/education': 'My Education',
@@ -3824,6 +3827,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     )}
 
                     {popupActiveTab === 'ZenMatrix' && <SkillMatrixPage key="skills" isPopup={true} />}
+                    {popupActiveTab === 'ZenCode' && <GitHubIntelligencePage key="zencode" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'My Certification' && <CertificationsPage key="certs" isPopup={true} />}
                     {popupActiveTab === 'My Projects' && <ProjectsPage key="projects" isPopup={true} />}
                     {popupActiveTab === 'My Education' && <EducationPage key="education" isPopup={true} />}

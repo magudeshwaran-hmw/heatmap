@@ -70,7 +70,7 @@ export default function ProctorCameraView({
   const feedStyle = { width: '100%', height: feedHeight, objectFit: 'cover' as const, display: 'block' };
 
   return (
-    <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' }}>
+    <div className="sk-proctor-pip" style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' }}>
 
       {/* VIOLATION TOAST — appears briefly */}
       {lastViolation && (
