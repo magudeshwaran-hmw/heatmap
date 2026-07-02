@@ -6,7 +6,16 @@ export interface ToolIdQ { id: string; description: string; correctAnswer: strin
 export interface PracticalQ { id: string; task: string; expectedKeywords: string[]; alternativeKeywords?: string[]; minLength: number; sampleSolution?: string }
 export interface TestCase { input: string; expectedOutput: string; hidden: boolean }
 export interface CodingQ { id: string; title: string; difficulty?: string; description: string; examples?: { input: string; output: string; explanation?: string }[]; testCases: TestCase[]; starterCode?: Record<string, string>; timeLimit?: number; memoryLimit?: number }
-export interface ScenarioQ { id: string; question: string; minWords?: number; scoringKeywords?: string[] }
+export interface ScenarioQ {
+  id: string;
+  question: string;
+  minWords?: number;
+  scoringKeywords?: string[];
+  // Expert MCQ format (CHANGE: expert sections are answered as hard MCQs).
+  // Author 4 close options + the correct letter ('A'-'D'); leave undefined until authored.
+  options?: string[];
+  correct?: string;
+}
 export interface CapstoneField { name: string; label: string; placeholder: string; required: boolean; minWords?: number }
 export interface Capstone { instruction: string; fields: CapstoneField[]; githubEvalCriteria?: { languageMatch: string[]; testFilePatterns?: string[]; ciPatterns?: string[] } }
 
@@ -1486,6 +1495,35 @@ export function getMCQs(skill: string, level: 'beginner' | 'intermediate' | 'exp
   const bank = getQuestionBank(skill, level);
   if (!bank) return [];
   return 'mcq' in bank ? (bank.mcq ?? []) : [];
+}
+
+// ─── CHANGE 3: level-format counts (question-selection pattern) ─────────────
+//   BEGINNER:     MCQ 20 · ToolID 5 · Practical 2
+//   INTERMEDIATE: MCQ 15 · Coding 2 · Scenarios 2 · Framework 1
+//   EXPERT:       Scenarios 5 · Mentoring 3 · Questionnaire 6 (capstone shown LAST)
+export const LEVEL_FORMAT = {
+  beginner:     { mcq: 20, toolId: 5, practical: 2 },
+  intermediate: { mcq: 15, coding: 2, scenarios: 2, framework: 1 },
+  expert:       { scenarios: 5, mentoring: 3, questionnaire: 6 },
+} as const;
+
+// ─── CHANGE 5: reroute shortlist — fixed-N core MCQs, auto top-N by difficulty ─
+const DIFFICULTY_RANK: Record<string, number> = { hard: 3, medium: 2, easy: 1 };
+function mcqDifficultyWeight(q: MCQ & { difficulty?: string }): number {
+  const d = q.difficulty;
+  if (typeof d === 'string') return DIFFICULTY_RANK[d.toLowerCase()] ?? 2;
+  return 2; // unrated → treat as medium
+}
+
+// Returns a fixed-N core subset of a level's MCQs (top-N by difficulty).
+// Used when a candidate is rerouted mid-flow (up or down) — they sit only this
+// shortlisted core subset rather than the full new-level test.
+export function getRerouteShortlist(skill: string, level: 'beginner' | 'intermediate' | 'expert', n: number = 10): MCQ[] {
+  const bank = getQuestionBank(skill, level) as any;
+  if (!bank || !('mcq' in bank) || !Array.isArray(bank.mcq)) return [];
+  return [...(bank.mcq as MCQ[])]
+    .sort((a, b) => mcqDifficultyWeight(b as any) - mcqDifficultyWeight(a as any))
+    .slice(0, n);
 }
 
 export function shuffleMCQs(mcqs: MCQ[]): MCQ[] {

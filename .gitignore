@@ -31,5 +31,15 @@ Thumbs.db
 *.xlsx
 *.xls
 
+# Resume / personal PDFs — contain personal data, never commit
+*.pdf
+
 # Duplicate subfolder (development artifact)
 zenlap/
+
+# Dev artifacts & AI-tooling caches
+scratch_screenshots/
+.antigravitycli/
+.claude/
+.env.local
+ngrok.yml

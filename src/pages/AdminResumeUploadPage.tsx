@@ -9,7 +9,7 @@ import { SKILLS } from '@/lib/mockData';
 import { toast } from '@/lib/ToastContext';
 import ZensarLoader from '@/components/ZensarLoader';
 import type { ProficiencyLevel, SkillRating } from '@/lib/types';
-import { extractTextFromPDF, extractEverythingFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, extractEverythingFromResume } from '@/lib/resumeExtraction';
 
 interface AdminResumeUploadPageProps {
   employeeId: string;
@@ -266,10 +266,10 @@ export default function AdminResumeUploadPage({
     setStatus('reading');
     setErrorMsg('');
     try {
-      const text = await extractTextFromPDF(f);
+      const text = await extractTextFromFile(f);
       if (!text.trim()) {
         setStatus('error');
-        setErrorMsg('Could not read text from file. Try a text-based PDF.');
+        setErrorMsg('Could not read text from file. Try a text-based PDF or .docx.');
         return;
       }
       setStatus('extracting');
@@ -1804,7 +1804,7 @@ export default function AdminResumeUploadPage({
               <Upload size={32} color={T.muted} style={{ margin: '0 auto 12px' }} />
               <div style={{ fontWeight: 700, fontSize: 15 }}>📄 Drop Resume (PDF Only)</div>
               <div style={{ fontSize: 12, color: T.sub, marginTop: 8 }}>Click to upload or drag & drop</div>
-              <input ref={inputRef} type="file" accept=".pdf" onChange={onInputChange} style={{ display: 'none' }} />
+              <input ref={inputRef} type="file" accept=".pdf,.docx" onChange={onInputChange} style={{ display: 'none' }} />
             </div>
             
             <div style={{ background: 'rgba(59, 130, 246, 0.08)', border: `1px solid rgba(59, 130, 246, 0.3)`, borderRadius: 12, padding: '16px', marginBottom: 16 }}>

@@ -5669,6 +5669,22 @@ async function ensureZenAssessTable() {
   `);
   await query(`CREATE INDEX IF NOT EXISTS idx_ze_session ON zenassess_evidence(session_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_ze_employee ON zenassess_evidence(employee_id)`);
+
+  // Admin re-assessment grants — a one-time pass that lets an employee bypass the
+  // 7-day retake cooldown for a specific skill. Consumed when that skill's test
+  // next completes. An unused (used = FALSE) row = an active grant.
+  await query(`
+    CREATE TABLE IF NOT EXISTS zenassess_retake_grants (
+      id          SERIAL       PRIMARY KEY,
+      employee_id VARCHAR(50)  NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      skill_name  VARCHAR(255) NOT NULL,
+      granted_by  VARCHAR(120) DEFAULT NULL,
+      granted_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      used        BOOLEAN      NOT NULL DEFAULT FALSE,
+      used_at     TIMESTAMP    DEFAULT NULL
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_zrg_active ON zenassess_retake_grants(employee_id, skill_name) WHERE used = FALSE`);
 }
 
 // GET /api/zenassess/skills — get all unique skills in the question bank
@@ -6430,6 +6446,27 @@ app.get('/api/zenassess/can-retake/:employeeId', async (req, res) => {
       if (empCheck.rows.length > 0) resolvedEmpId = empCheck.rows[0].id;
     } catch (_) {}
 
+    // Admin one-time re-assessment grant: an active (unused) grant for THIS skill
+    // bypasses the cooldown entirely. The grant is consumed when the skill test
+    // next completes (see /zenassess/skill-test-complete).
+    if (req.query.skill) {
+      try {
+        const grant = await query(
+          `SELECT id FROM zenassess_retake_grants
+           WHERE employee_id = $1 AND LOWER(skill_name) = LOWER($2) AND used = FALSE
+           ORDER BY granted_at DESC LIMIT 1`,
+          [resolvedEmpId, req.query.skill]
+        );
+        if (grant.rows.length > 0) {
+          return res.json({
+            canRetake: true,
+            reason: 'admin_granted',
+            message: 'An administrator has granted you a one-time re-assessment for this skill.'
+          });
+        }
+      } catch (_) { /* grants table absent — fall through to normal cooldown */ }
+    }
+
     // Cooldown rule: STRICT 7 days for all paths and skills
     const cooldownDays = 7;
 
@@ -6511,6 +6548,97 @@ app.get('/api/zenassess/can-retake/:employeeId', async (req, res) => {
     }
   } catch (err) {
     console.error('[can-retake] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Admin re-assessment grants (one-time cooldown bypass) ────────────────────
+async function resolveEmpId(idOrZensar) {
+  try {
+    const r = await query(
+      'SELECT id FROM employees WHERE LOWER(id) = LOWER($1) OR LOWER(zensar_id) = LOWER($1)',
+      [idOrZensar]
+    );
+    if (r.rows.length) return r.rows[0].id;
+  } catch (_) {}
+  return idOrZensar;
+}
+
+// GET /api/zenassess/retake-grants/:employeeId — list active (unused) grants.
+app.get('/api/zenassess/retake-grants/:employeeId', async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const empId = await resolveEmpId(req.params.employeeId);
+    const r = await query(
+      `SELECT skill_name, granted_by, granted_at
+       FROM zenassess_retake_grants
+       WHERE employee_id = $1 AND used = FALSE
+       ORDER BY granted_at DESC`,
+      [empId]
+    );
+    res.json({ success: true, grants: r.rows });
+  } catch (err) {
+    console.error('[retake-grants] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/zenassess/grant-retake — grant a one-time re-assessment for
+// one or more skills (admin). Idempotent: an already-active grant is left as-is.
+app.post('/api/admin/zenassess/grant-retake', requireAdmin, async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { employeeId, skills } = req.body;
+    if (!employeeId || !Array.isArray(skills) || skills.length === 0) {
+      return res.status(400).json({ error: 'employeeId and a non-empty skills[] are required' });
+    }
+    const empId = await resolveEmpId(employeeId);
+    const grantedBy = (req.user && (req.user.name || req.user.employeeId)) || 'admin';
+    const granted = [];
+    for (const raw of skills) {
+      const skill = (raw == null ? '' : String(raw)).trim();
+      if (!skill) continue;
+      const exists = await query(
+        `SELECT id FROM zenassess_retake_grants
+         WHERE employee_id = $1 AND LOWER(skill_name) = LOWER($2) AND used = FALSE LIMIT 1`,
+        [empId, skill]
+      );
+      if (exists.rows.length === 0) {
+        await query(
+          `INSERT INTO zenassess_retake_grants (employee_id, skill_name, granted_by) VALUES ($1, $2, $3)`,
+          [empId, skill, grantedBy]
+        );
+      }
+      granted.push(skill);
+    }
+    res.json({ success: true, granted });
+  } catch (err) {
+    console.error('[grant-retake] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/zenassess/revoke-retake — remove active (unused) grants (admin).
+app.post('/api/admin/zenassess/revoke-retake', requireAdmin, async (req, res) => {
+  try {
+    await ensureZenAssessTable();
+    const { employeeId, skills } = req.body;
+    if (!employeeId || !Array.isArray(skills) || skills.length === 0) {
+      return res.status(400).json({ error: 'employeeId and a non-empty skills[] are required' });
+    }
+    const empId = await resolveEmpId(employeeId);
+    for (const raw of skills) {
+      const skill = (raw == null ? '' : String(raw)).trim();
+      if (!skill) continue;
+      await query(
+        `DELETE FROM zenassess_retake_grants
+         WHERE employee_id = $1 AND LOWER(skill_name) = LOWER($2) AND used = FALSE`,
+        [empId, skill]
+      );
+    }
+    res.json({ success: true, revoked: skills });
+  } catch (err) {
+    console.error('[revoke-retake] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -7706,6 +7834,17 @@ app.post('/api/zenassess/skill-test-complete', async (req, res) => {
       [sessionId, resolvedEmpId, validatedLevel, status, skillName,
        validatedLevel, Number(attemptNumber) || 1, silentDropPath || null, isAwarded, selfClaimedLevelAtTest || null]
     );
+
+    // Consume any active admin re-assessment grant for this skill (one-time pass) —
+    // the candidate has now used it, so the normal cooldown resumes from this attempt.
+    try {
+      await query(
+        `UPDATE zenassess_retake_grants
+         SET used = TRUE, used_at = CURRENT_TIMESTAMP
+         WHERE employee_id = $1 AND LOWER(skill_name) = LOWER($2) AND used = FALSE`,
+        [resolvedEmpId, skillName]
+      );
+    } catch (_) { /* grants table absent — nothing to consume */ }
 
     const rank = { 'Not Validated': 0, Beginner: 1, Intermediate: 2, Expert: 3 };
     const selfLevelFromRating = (r) => (r >= 3 ? 'Expert' : r === 2 ? 'Intermediate' : r === 1 ? 'Beginner' : null);

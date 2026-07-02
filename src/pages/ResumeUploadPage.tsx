@@ -16,7 +16,7 @@ import { getEmployee, saveSkillRatings, upsertEmployee } from '@/lib/localDB';
 import { apiSaveSkills, isServerAvailable } from '@/lib/api';
 import ZensarLoader from '@/components/ZensarLoader';
 import type { ProficiencyLevel, SkillRating } from '@/lib/types';
-import { extractTextFromPDF, accurateExtractFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, accurateExtractFromResume } from '@/lib/resumeExtraction';
 
 // Enhanced fallback extraction when AI is completely unavailable
 const createEnhancedFallback = (text: string, filename: string) => {
@@ -169,10 +169,10 @@ export default function ResumeUploadPage({
     setStatus('reading');
     setErrorMsg('');
     try {
-      const text = await extractTextFromPDF(f);
+      const text = await extractTextFromFile(f);
       if (!text.trim()) {
         setStatus('error');
-        setErrorMsg('Could not read text from file. Try a text-based PDF or use pattern extraction.');
+        setErrorMsg('Could not read text from file. Try a text-based PDF or .docx, or use pattern extraction.');
         return;
       }
       
@@ -973,9 +973,9 @@ export default function ResumeUploadPage({
             <div onClick={() => inputRef.current?.click()} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}
               style={{ border: `2px dashed ${dragging ? '#3B82F6' : T.bdr}`, borderRadius: 16, padding: '48px 24px', textAlign: 'center', background: T.card, cursor: 'pointer', marginBottom: 16 }}>
               <Upload size={32} color={T.muted} style={{ margin: '0 auto 12px' }} />
-              <div style={{ fontWeight: 700, fontSize: 15 }}>📄 Upload Resume as PDF</div>
-              <div style={{ fontSize: 13, color: T.sub, marginTop: 8 }}>Drag & drop or click to upload</div>
-              <input ref={inputRef} type="file" accept=".pdf" onChange={onInputChange} style={{ display: 'none' }} />
+              <div style={{ fontWeight: 700, fontSize: 15 }}>📄 Upload Resume (PDF or Word)</div>
+              <div style={{ fontSize: 13, color: T.sub, marginTop: 8 }}>Drag & drop or click to upload — PDF or .docx</div>
+              <input ref={inputRef} type="file" accept=".pdf,.docx" onChange={onInputChange} style={{ display: 'none' }} />
             </div>
             
             <div style={{ background: 'rgba(59, 130, 246, 0.08)', border: `1px solid rgba(59, 130, 246, 0.3)`, borderRadius: 12, padding: '16px', marginBottom: 16 }}>

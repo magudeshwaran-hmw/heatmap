@@ -48,6 +48,56 @@ export async function extractTextFromPDF(file: File): Promise<string> {
   }
 }
 
+// ─── Word (.docx) Text Extraction ─────────────────────────────────────────────
+// .docx is a zipped XML package — reading it as plain text yields garbage, so we
+// parse it properly with mammoth (browser build). .doc (legacy binary) is NOT
+// supported by mammoth; we surface a clear message asking for .docx/PDF instead.
+export async function extractTextFromDocx(file: File): Promise<string> {
+  try {
+    const mammoth: any = (await import('mammoth/mammoth.browser')).default || (await import('mammoth/mammoth.browser'));
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const text = (result?.value || '').trim();
+    if (text.length < 20) throw new Error('Too little text extracted from Word document');
+    console.log(`✅ DOCX extracted: ${text.length} chars`);
+    return text;
+  } catch (err) {
+    console.error('❌ DOCX extraction error:', err);
+    throw err;
+  }
+}
+
+// ─── Unified extractor — picks the right engine by file type ──────────────────
+// PDF → pdf.js · DOCX → mammoth · TXT/other → raw text.
+export async function extractTextFromFile(file: File): Promise<string> {
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+
+  if (type === 'application/pdf' || name.endsWith('.pdf')) {
+    return extractTextFromPDF(file);
+  }
+
+  if (
+    type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    name.endsWith('.docx')
+  ) {
+    return extractTextFromDocx(file);
+  }
+
+  // Legacy .doc (binary) — mammoth can't read it. Fail clearly rather than feeding
+  // the model binary noise that produces wrong/blank extractions.
+  if (type === 'application/msword' || name.endsWith('.doc')) {
+    throw new Error('Legacy .doc files are not supported. Please save as .docx or PDF and re-upload.');
+  }
+
+  // .txt / .csv / unknown — best-effort plain text.
+  try {
+    return await file.text();
+  } catch {
+    return '';
+  }
+}
+
 // ─── Fast Resume Extraction (8s timeout) ─────────────────────────────────────
 export async function fastExtractFromResume(resumeText: string): Promise<any> {
   const fullText = resumeText.slice(0, 20000); // Smaller text for faster processing

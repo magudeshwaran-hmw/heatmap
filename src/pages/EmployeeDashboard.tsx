@@ -7,7 +7,8 @@ import { useNavigate } from 'react-router-dom';
 import { useApp } from '@/lib/AppContext';
 import { apiGetSkills, API_BASE } from '@/lib/api';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck, Github } from 'lucide-react';
+import { Bot, Map, PenTool, LayoutDashboard, Award, Briefcase, FileText, GraduationCap, AlertTriangle, RefreshCw, Upload, ClipboardCheck, Github, Layers } from 'lucide-react';
+import { resolveQEAssignment } from '@/lib/qeSkillTaxonomy';
 
 import { Radar } from 'react-chartjs-2';
 import {
@@ -211,6 +212,20 @@ export default function EmployeeDashboard({
   const cardStyle = {
     background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 24, boxShadow: '0 4px 20px rgba(0,0,0,0.1)'
   };
+
+  // ── New Skill Group (QE taxonomy) — auto-derived, read-only for the employee ──
+  const qeAssignment = resolveQEAssignment({
+    id: zid,
+    zensar_id: user.zensar_id || user.ZensarID,
+    name: user.Name || user.name,
+    skills: Object.entries(data.ratings || {}).map(([skillName, r]) => ({ skillName, selfRating: r })),
+    projects: safeProjects,
+    certifications: safeCerts,
+    primary_skill: user.primary_skill || user.PrimarySkill,
+    primary_domain: user.primary_domain || user.PrimaryDomain,
+    designation: user.designation || user.Designation,
+    department: user.department || user.Department,
+  });
 
   const actionCard = {
     ...cardStyle, display: 'flex', flexDirection: 'column' as const, alignItems: 'center', justifyContent: 'center',
@@ -520,6 +535,49 @@ export default function EmployeeDashboard({
               </div>
             );
           })()}
+
+          {/* ── New Skill Group card (QE taxonomy classification) ── */}
+          <div style={{ ...cardStyle }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+              <div style={{ width: 38, height: 38, borderRadius: 12, background: 'linear-gradient(135deg,#06B6D4,#3B82F6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>
+                <Layers size={20} />
+              </div>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 16 }}>New Skill Group</h3>
+                <div style={{ fontSize: 12, color: T.muted }}>Your Quality-Engineering skill classification</div>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              {[
+                { label: 'Skill Family', value: qeAssignment.family },
+                { label: 'Skill Group', value: qeAssignment.group },
+              ].map(f => (
+                <div key={f.label} style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, borderRadius: 12, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted }}>{f.label}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginTop: 4 }}>{f.value}</div>
+                </div>
+              ))}
+              {[
+                { label: 'AI for QE', on: qeAssignment.aiForQe },
+                { label: 'QE for AI', on: qeAssignment.qeForAi },
+              ].map(f => (
+                <div key={f.label} style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, borderRadius: 12, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted }}>{f.label}</div>
+                  <span style={{ fontSize: 11, fontWeight: 900, padding: '3px 10px', borderRadius: 999, background: f.on ? '#10B981' : (dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'), color: f.on ? '#fff' : T.sub }}>{f.on ? 'YES' : 'NO'}</span>
+                </div>
+              ))}
+            </div>
+            {qeAssignment.matchedSkills.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 12, color: T.muted, textTransform: 'uppercase', marginBottom: 8, letterSpacing: 1 }}>Group Skills</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {qeAssignment.matchedSkills.map(sk => (
+                    <span key={sk} style={{ background: 'rgba(6,182,212,0.12)', color: '#06B6D4', border: '1px solid rgba(6,182,212,0.35)', padding: '4px 10px', borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{sk}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* BOTTOM SECTION */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24 }}>

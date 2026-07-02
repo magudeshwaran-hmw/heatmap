@@ -123,6 +123,31 @@ async function ollamaGenerate(model: string, prompt: string, maxTokens = 2000): 
 
 /** Extract readable text from a file (PDF/DOCX/TXT) */
 export async function extractTextFromFile(file: File): Promise<string> {
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+
+  // PDF and Word (.docx) need real parsers — reading them as raw text yields
+  // binary/zip garbage. Delegate to the shared resume extractor.
+  if (
+    type === 'application/pdf' || name.endsWith('.pdf') ||
+    type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || name.endsWith('.docx')
+  ) {
+    try {
+      const { extractTextFromFile: extractUnified } = await import('./resumeExtraction');
+      const text = (await extractUnified(file)).trim();
+      if (text) {
+        return text
+          .replace(/[^\x20-\x7E\n\r\t]/g, ' ')
+          .replace(/\s{3,}/g, ' ')
+          .trim()
+          .slice(0, 6000);
+      }
+    } catch (e) {
+      console.error('extractTextFromFile (pdf/docx) failed:', e);
+    }
+  }
+
+  // .txt / plain text fallback.
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {

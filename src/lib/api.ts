@@ -67,7 +67,19 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
     throw new Error(errData.error || `HTTP ${res.status}`);
   }
 
-  const data = await res.json();
+  const raw = await res.text();
+  let data: any = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    // The server returned non-JSON (usually the SPA index.html when a route is
+    // missing) — give a clear, actionable message instead of "Unexpected token '<'".
+    throw new Error(
+      res.ok
+        ? 'Server returned a non-JSON response. The backend may be out of date — restart it (npm run server).'
+        : `Endpoint not found (HTTP ${res.status}). The backend may be out of date — restart it (npm run server).`
+    );
+  }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data as T;
 }

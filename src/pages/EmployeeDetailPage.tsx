@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getEmployee, computeCompletion, saveSkillRatings } from '@/lib/localDB';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { apiGetSkills, apiGetEmployee, isServerAvailable, API_BASE } from '@/lib/api';
+import { apiGetSkills, apiGetEmployee, isServerAvailable, API_BASE, req } from '@/lib/api';
 import type { Employee } from '@/lib/types';
 import type { ProficiencyLevel } from '@/lib/types';
 import { ArrowLeft, Download, CheckCircle2, Clock, User, Mail, Phone,
@@ -34,6 +34,48 @@ export default function EmployeeDetailPage() {
   const [achievements, setAchievements] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [skillMatrixModal, setSkillMatrixModal] = useState<{ employee: any; skills: any[] } | null>(null);
+
+  // ── Re-assessment access (admin one-time cooldown bypass) ──────────────────
+  const [grantedSkills, setGrantedSkills] = useState<string[]>([]);   // active (unused) grants
+  const [selectedGrant, setSelectedGrant] = useState<Set<string>>(new Set());
+  const [grantBusy, setGrantBusy] = useState(false);
+
+  const loadGrants = async (empId: string) => {
+    try {
+      const r = await req<{ grants: { skill_name: string }[] }>('GET', `/zenassess/retake-grants/${empId}`);
+      setGrantedSkills((r.grants || []).map(g => g.skill_name));
+    } catch { setGrantedSkills([]); }
+  };
+  useEffect(() => { if (id) loadGrants(id); }, [id]);
+
+  const toggleGrantSel = (skill: string) =>
+    setSelectedGrant(prev => { const n = new Set(prev); n.has(skill) ? n.delete(skill) : n.add(skill); return n; });
+
+  const handleGrantRetake = async () => {
+    const skills = Array.from(selectedGrant);
+    if (skills.length === 0 || !id) return;
+    setGrantBusy(true);
+    try {
+      await req('POST', '/admin/zenassess/grant-retake', { employeeId: id, skills });
+      toast.success(`Re-assessment granted for ${skills.length} skill${skills.length > 1 ? 's' : ''}.`);
+      setSelectedGrant(new Set());
+      await loadGrants(id);
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to grant re-assessment.');
+    } finally { setGrantBusy(false); }
+  };
+
+  const handleRevokeRetake = async (skill: string) => {
+    if (!id) return;
+    setGrantBusy(true);
+    try {
+      await req('POST', '/admin/zenassess/revoke-retake', { employeeId: id, skills: [skill] });
+      toast.success(`Re-assessment access revoked for ${skill}.`);
+      await loadGrants(id);
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to revoke.');
+    } finally { setGrantBusy(false); }
+  };
 
   useEffect(() => {
     if (!id) { setEmp(null); setLoading(false); return; }
@@ -396,6 +438,53 @@ export default function EmployeeDetailPage() {
             </div>
             <div style={{ fontSize: 10, color: T.muted }}>Readiness</div>
           </div>
+        </div>
+
+        {/* ── Re-assessment Access (admin one-time cooldown bypass) ── */}
+        <div style={{ ...card, marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <Clock size={18} color="#F59E0B" />
+            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Re-assessment Access</h3>
+            <span style={{ fontSize: 12, color: T.muted, marginLeft: 'auto' }}>One-time cooldown bypass</span>
+          </div>
+          <p style={{ margin: '0 0 14px', fontSize: 12.5, color: T.sub, lineHeight: 1.55 }}>
+            Employees must wait 7 days between attempts (🔴 “Re-assessment available on …”). Grant a one-time pass so this employee can re-assess a skill immediately — the pass is consumed on their next attempt, then the normal cooldown resumes.
+          </p>
+          {(() => {
+            const names: string[] = Array.from(new Set(
+              skillMatrixSkills.map((s: any) => ((s.skillName || '') as string).trim()).filter(Boolean)
+            ));
+            if (names.length === 0) {
+              return <div style={{ fontSize: 12, color: T.muted }}>No skills available for this employee yet.</div>;
+            }
+            return (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8, marginBottom: 14 }}>
+                  {names.map(name => {
+                    const active = grantedSkills.some(g => g.toLowerCase() === name.toLowerCase());
+                    const sel = selectedGrant.has(name);
+                    return (
+                      <div key={name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 12px', borderRadius: 10, border: `1px solid ${active ? 'rgba(16,185,129,0.4)' : sel ? '#3B82F6' : T.bdr}`, background: active ? 'rgba(16,185,129,0.06)' : sel ? 'rgba(59,130,246,0.06)' : T.card }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: active ? 'default' : 'pointer', flex: 1, minWidth: 0 }}>
+                          {!active && <input type="checkbox" checked={sel} onChange={() => toggleGrantSel(name)} style={{ accentColor: '#3B82F6' }} />}
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                        </label>
+                        {active && (
+                          <button onClick={() => handleRevokeRetake(name)} disabled={grantBusy} title="Revoke this grant" style={{ fontSize: 10, fontWeight: 800, color: '#10B981', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.35)', borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}>GRANTED ✕</button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <button onClick={handleGrantRetake} disabled={grantBusy || selectedGrant.size === 0} style={{ padding: '10px 20px', borderRadius: 10, border: 'none', background: selectedGrant.size === 0 ? T.bdr : 'linear-gradient(135deg,#F59E0B,#D97706)', color: '#fff', fontSize: 13, fontWeight: 800, cursor: selectedGrant.size === 0 ? 'not-allowed' : 'pointer', opacity: grantBusy ? 0.7 : 1 }}>
+                    {grantBusy ? 'Working…' : `Grant re-assessment${selectedGrant.size ? ` (${selectedGrant.size})` : ''}`}
+                  </button>
+                  {grantedSkills.length > 0 && <span style={{ fontSize: 12, color: T.sub }}>{grantedSkills.length} active grant{grantedSkills.length > 1 ? 's' : ''}</span>}
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         {/* ── Technical Proficiency Matrix ── MOVED TO TOP */}

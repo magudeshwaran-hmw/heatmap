@@ -9,7 +9,7 @@ import { SKILLS, MOCK_EMPLOYEES } from '@/lib/mockData';
 import { useNavigate } from 'react-router-dom';
 import {
   Users, TrendingUp, AlertTriangle, Award, Download, Edit2, Plus,
-  BarChart3, CheckCircle2, Search, Eye, FileSpreadsheet, RefreshCw, Grid, X, Settings, Shield, Lock, Mail, Phone, Calendar, Briefcase, Filter, Upload, Sparkles, FileUp, Trash2, GraduationCap, Info, Brain
+  BarChart3, CheckCircle2, Search, Eye, FileSpreadsheet, RefreshCw, Grid, X, Settings, Shield, Lock, Mail, Phone, Calendar, Briefcase, Filter, Upload, Sparkles, FileUp, Trash2, GraduationCap, Info, Brain, Layers, RotateCcw
 } from 'lucide-react';
 
 import { toast } from '@/lib/ToastContext';
@@ -30,7 +30,13 @@ import AdminResumeUploadPage from './AdminResumeUploadPage';
 import ResumeBuilderPage from './ResumeBuilderPage';
 import GitHubIntelligencePage from './GitHubIntelligencePage';
 import { callResumeLLM } from '@/lib/llm';
-import { extractTextFromPDF, accurateExtractFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, accurateExtractFromResume } from '@/lib/resumeExtraction';
+import {
+  resolveQEAssignment, setQEOverride, clearQEOverride,
+  QE_FAMILIES, groupsForFamily, essentialSkillsFor,
+  QE_DOMAINS, QE_DOMAIN_LABEL, normalizeDomain, deriveDomain,
+} from '@/lib/qeSkillTaxonomy';
+import * as XLSX from 'xlsx';
 
 import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement, PointElement, LineElement, ArcElement,
@@ -52,7 +58,65 @@ export default function AdminDashboard() {
   const { dark } = useDark();
   const T = mkTheme(dark);
 
-  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Workforce Intelligence'>('Overview');
+  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Skill Groups' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Re-assessment' | 'Workforce Intelligence'>('Overview');
+  // bumped whenever a QE Skill-Group override is saved, to force a re-derive/re-render
+  const [qeTick, setQeTick] = useState(0);
+  // filters for the "Skill Groups" tab
+  const [sgFilter, setSgFilter] = useState<{ domain: string[]; group: string[]; skill: string[]; experience: string[]; aiForQe: string[]; qeForAi: string[]; testAutomation: string[] }>({ domain: [], group: [], skill: [], experience: [], aiForQe: [], qeForAi: [], testAutomation: [] });
+  const [sgOpenFilter, setSgOpenFilter] = useState<string>('');
+  // Excel-uploaded ID → { name, domain, skillGroup, ... } mapping (frontend-only, persisted)
+  const SG_EXCEL_KEY = 'qe_skillgroup_excel';
+  const [sgExcel, setSgExcel] = useState<Record<string, any>>(() => {
+    try { return JSON.parse(localStorage.getItem(SG_EXCEL_KEY) || '{}'); } catch { return {}; }
+  });
+  const sgFileRef = useRef<HTMLInputElement>(null);
+  // which rows have their certification / trainings list expanded
+  const [sgCertOpen, setSgCertOpen] = useState<Record<string, boolean>>({});
+  const [sgTrainOpen, setSgTrainOpen] = useState<Record<string, boolean>>({});
+  // Skill Heatmap drill-down: selected family → group
+  const [heatFamily, setHeatFamily] = useState<string>('');
+  const [heatGroup, setHeatGroup] = useState<string>('');
+
+  const handleSkillGroupExcel = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const raw: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const norm = (k: string) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const map: Record<string, any> = {};
+      let mapped = 0;
+      raw.forEach(r => {
+        const get = (...names: string[]) => {
+          for (const key of Object.keys(r)) {
+            if (names.includes(norm(key))) { const v = String(r[key]).trim(); if (v) return v; }
+          }
+          return '';
+        };
+        const id = get('id', 'empid', 'employeeid', 'zensarid');
+        if (!id) return;
+        map[id.toLowerCase()] = {
+          name: get('name', 'employeename'),
+          domain: get('domain'),
+          skillGroup: get('skillgroup', 'newskillgroup', 'group'),
+          relatedTrainings: get('relatedtrainings', 'trainings', 'training'),
+          experience: get('experience', 'exp', 'years', 'yearsofexperience'),
+        };
+        mapped++;
+      });
+      setSgExcel(map);
+      localStorage.setItem(SG_EXCEL_KEY, JSON.stringify(map));
+      toast.success(`Mapped ${mapped} row${mapped !== 1 ? 's' : ''} from ${file.name}`);
+    } catch (e: any) {
+      toast.error('Could not read Excel: ' + (e?.message || 'invalid file'));
+    }
+    if (sgFileRef.current) sgFileRef.current.value = '';
+  };
+
+  const sgLookup = (emp: any) =>
+    sgExcel[String(emp.zensar_id || '').toLowerCase()] || sgExcel[String(emp.id || '').toLowerCase()] || null;
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [newEmployee, setNewEmployee] = useState({
@@ -84,6 +148,15 @@ export default function AdminDashboard() {
   const [showReviewActionModal, setShowReviewActionModal] = useState<'approve' | 'reject' | 'escalate' | null>(null);
   const [isLoadingReviews, setIsLoadingReviews] = useState(false);
 
+  // One-time re-assessment grant from within the review modal (cooldown bypass).
+  const [reviewGrantBusy, setReviewGrantBusy] = useState(false);
+  const [reviewGranted, setReviewGranted] = useState(false);
+
+  // Re-assessment tab: per-employee grant-all state.
+  const [raBusyId, setRaBusyId] = useState<string | null>(null);
+  const [raGranted, setRaGranted] = useState<Set<string>>(new Set());
+  const [raSearch, setRaSearch] = useState('');
+
   // ZenAssess V6 Expert Review score adjustment states
   const [adjustedScenarioScore, setAdjustedScenarioScore] = useState<number>(80);
   const [adjustedEvidenceScore, setAdjustedEvidenceScore] = useState<number>(80);
@@ -91,6 +164,7 @@ export default function AdminDashboard() {
   const [adjustedExperienceScore, setAdjustedExperienceScore] = useState<number>(75);
 
   useEffect(() => {
+    setReviewGranted(false); // reset the per-review grant button when a new review opens
     if (selectedReview) {
       const breakdown = typeof selectedReview.explain_score_breakdown === 'string'
         ? JSON.parse(selectedReview.explain_score_breakdown)
@@ -227,6 +301,76 @@ export default function AdminDashboard() {
     }
   };
 
+  // Grant a one-time re-assessment for THIS review's employee + skill, bypassing
+  // the 7-day cooldown. Consumed on their next attempt for that skill.
+  const handleGrantReviewRetake = async () => {
+    if (!selectedReview) return;
+    const employeeId = selectedReview.employee_id || selectedReview.zensar_id;
+    const skill = selectedReview.skill_name;
+    if (!employeeId || !skill) { toast.error('This review is missing an employee or skill.'); return; }
+    setReviewGrantBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/admin/zenassess/grant-retake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` },
+        body: JSON.stringify({ employeeId, skills: [skill] }),
+      });
+      const txt = await res.text();
+      let data: any = {};
+      try { data = txt ? JSON.parse(txt) : {}; } catch { throw new Error('Endpoint not found — the backend may be out of date. Restart it (npm run server).'); }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setReviewGranted(true);
+      toast.success(`Re-assessment granted for ${skill}.`);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to grant re-assessment.');
+    } finally {
+      setReviewGrantBusy(false);
+    }
+  };
+
+  // Derive an employee's primary / secondary / tertiary skill names — prefer the
+  // declared primary skill, then fill from the highest-rated (or verified) skills.
+  const getTop3Skills = (emp: any): string[] => {
+    const out: string[] = [];
+    const push = (n?: string) => {
+      const v = (n || '').trim();
+      if (v && !out.some(x => x.toLowerCase() === v.toLowerCase())) out.push(v);
+    };
+    push(emp.primary_skill || emp.primarySkill);
+    push(emp.secondary_skill || emp.secondarySkill);
+    push(emp.tertiary_skill || emp.tertiarySkill);
+    const rated = (emp.skills || [])
+      .filter((s: any) => (s.selfRating || 0) > 0 || s.verifiedBadgeLevel)
+      .sort((a: any, b: any) => (b.selfRating || 0) - (a.selfRating || 0));
+    rated.forEach((s: any) => push(s.skillName));
+    return out.slice(0, 3);
+  };
+
+  // Grant a one-time re-assessment for a SINGLE skill of an employee. State is
+  // keyed per employee+skill so each skill has its own independent Approve button.
+  const raKey = (empId: string, skill: string) => `${empId}::${skill.toLowerCase()}`;
+  const handleGrantSkill = async (emp: any, skill: string) => {
+    const key = raKey(String(emp.id), skill);
+    setRaBusyId(key);
+    try {
+      const res = await fetch(`${API_BASE}/admin/zenassess/grant-retake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` },
+        body: JSON.stringify({ employeeId: emp.id, skills: [skill] }),
+      });
+      const txt = await res.text();
+      let data: any = {};
+      try { data = txt ? JSON.parse(txt) : {}; } catch { throw new Error('Endpoint not found — the backend may be out of date. Restart it (npm run server).'); }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setRaGranted(prev => new Set(prev).add(key));
+      toast.success(`Re-assessment granted to ${emp.name} for ${skill}.`);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to grant re-assessment.');
+    } finally {
+      setRaBusyId(null);
+    }
+  };
+
   const handleReviewAction = async (action: 'approve' | 'reject' | 'escalate') => {
     if (!selectedReview) return;
     try {
@@ -287,6 +431,10 @@ export default function AdminDashboard() {
   // ── Extract text from PDF (with proper visual line detection) ──
   const extractPDFText = async (file: File): Promise<string> => {
     try {
+      const nm = (file.name || '').toLowerCase();
+      if (nm.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        return await extractTextFromFile(file); // Word → mammoth
+      }
       const pdfjsLib = (window as any).pdfjsLib;
       if (pdfjsLib) {
         pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -676,8 +824,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
   const handleBulkResumeImport = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const list = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(0, 100);
-    if (list.length === 0) { toast.error('Please select PDF resume files'); return; }
+    const list = Array.from(files).filter(f => /\.(pdf|docx)$/i.test(f.name)).slice(0, 100);
+    if (list.length === 0) { toast.error('Please select PDF or Word (.docx) resume files'); return; }
     setBulkImporting(true);
     setBulkResult(null);
     setBulkProgress({ current: 0, total: list.length });
@@ -685,7 +833,8 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     for (let i = 0; i < list.length; i++) {
       setBulkProgress({ current: i + 1, total: list.length });
       try {
-        const text = await extractTextFromPDF(list[i]);
+        let text = '';
+        try { text = await extractTextFromFile(list[i]); } catch { failed++; continue; }
         if (!text || !text.trim()) { failed++; continue; }
         let data: any;
         try { data = await accurateExtractFromResume(text); } catch { failed++; continue; }
@@ -710,7 +859,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({
-            name: p.name || list[i].name.replace(/\.pdf$/i, ''),
+            name: p.name || list[i].name.replace(/\.(pdf|docx)$/i, ''),
             email, employeeId: id, phone: p.phone || '',
             designation: p.designation || '', location: p.location || '',
             yearsIT: p.yearsIT || 0, yearsZensar: 0, password: 'Imported@2026',
@@ -808,7 +957,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [previewUser, setPreviewUser] = useState<any | null>(null);
   const [previewData, setPreviewData] = useState<AppData | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
+  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'Skill Group' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
   // ── Multi-select delete (Manage Employees) ──
@@ -1265,11 +1414,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
               { id: 'Overview',          icon: BarChart3,      color: '#3B82F6' },
               { id: 'Manage Employees',  icon: Users,          color: '#3B82F6' },
               { id: 'Skill Heatmap',     icon: Grid,           color: '#3B82F6' },
+              { id: 'Skill Groups',      icon: Layers,         color: '#06B6D4' },
               { id: 'Certifications',    icon: Award,          color: '#10B981' },
               { id: 'Achievements',      icon: Sparkles,       color: '#F59E0B' },
               { id: 'Education',         icon: GraduationCap,  color: '#8B5CF6' },
               { id: 'Projects',          icon: Briefcase,      color: '#F97316' },
               { id: 'Expert Reviews',    icon: Shield,         color: '#8B5CF6' },
+              { id: 'Re-assessment',     icon: Lock,           color: '#F59E0B' },
               { id: 'Workforce Intelligence', icon: Brain,     color: '#EC4899' },
             ].map((t: any) => (
               <button
@@ -1450,9 +1601,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                   <div>
                     <h3 style={{ margin: '0 0 4px', fontSize: 15, fontWeight: 800 }}>Bulk Employee Import</h3>
-                    <div style={{ fontSize: 12, color: T.sub }}>Import employees from resumes (PDF, up to 100). Skills, projects, certifications & experience are extracted automatically.</div>
+                    <div style={{ fontSize: 12, color: T.sub }}>Import employees from resumes (PDF or Word .docx, up to 100). Skills, projects, certifications & experience are extracted automatically.</div>
                   </div>
-                  <input ref={bulkInputRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={e => handleBulkResumeImport(e.target.files)} />
+                  <input ref={bulkInputRef} type="file" accept=".pdf,.docx" multiple style={{ display: 'none' }} onChange={e => handleBulkResumeImport(e.target.files)} />
                   <button disabled={bulkImporting} onClick={() => bulkInputRef.current?.click()} style={{ padding: '10px 18px', borderRadius: 10, background: bulkImporting ? T.card : '#3B82F6', color: bulkImporting ? T.sub : '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: bulkImporting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                     <Upload size={16} /> {bulkImporting ? `Processing ${bulkProgress.current} of ${bulkProgress.total}...` : 'Upload Multiple Resumes'}
                   </button>
@@ -1934,19 +2085,260 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
           {activeTab === 'Skill Heatmap' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
-               <h3 style={{ margin: '0 0 24px', fontSize: 16, fontWeight: 800 }}>Organizational Heatmap</h3>
-               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 12 }}>
-                  {SKILLS.map(sk => {
-                    const avg = employees.length ? employees.reduce((sum, e) => (sum + (e.skills.find((s:any)=>s.skillId===sk.id)?.selfRating || 0)), 0) / employees.length : 0;
-                    return (
-                      <div key={sk.id} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 16, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
-                         <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>{sk.name}</div>
-                         <div style={{ fontSize: 20, fontWeight: 900, color: T.text, marginBottom: 6 }}>{avg.toFixed(1)}</div>
-                         <div style={{ position:'absolute', bottom:0, left:0, width:'100%', height:4, background: avg >= 2.5 ? '#10B981' : avg >= 1.5 ? '#3B82F6' : avg > 0 ? '#F59E0B' : T.bdr }} />
-                      </div>
-                    );
-                  })}
-               </div>
+               <h3 style={{ margin: '0 0 20px', fontSize: 16, fontWeight: 800 }}>Organizational Heatmap</h3>
+               {(() => {
+                 const PIE = ['#3B82F6', '#8B5CF6', '#06B6D4', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
+                 const assignments = employees.map((e: any) => ({ e, qe: resolveQEAssignment(e) }));
+                 const totalEmp = employees.length;
+
+                 // Families by headcount
+                 const familyData = QE_FAMILIES.map((fam, i) => ({
+                   family: fam,
+                   count: assignments.filter(a => a.qe.family === fam).length,
+                   color: PIE[i % PIE.length],
+                 }));
+                 const activeFamilies = familyData.filter(f => f.count > 0);
+
+                 // Weighted average index per skill group (coverage of essential skills → 0-5)
+                 const groupData: { family: string; group: string; count: number; index: number; total: number }[] = [];
+                 QE_FAMILIES.forEach(fam => groupsForFamily(fam).forEach(grp => {
+                   const members = assignments.filter(a => a.qe.family === fam && a.qe.group === grp);
+                   const total = essentialSkillsFor(fam, grp).length || 1;
+                   const index = members.length
+                     ? +(members.reduce((s, a) => s + Math.min(a.qe.matchedSkills.length, total) / total, 0) / members.length * 5).toFixed(1)
+                     : 0;
+                   groupData.push({ family: fam, group: grp, count: members.length, index, total });
+                 }));
+                 const activeGroups = groupData.filter(g => g.count > 0).sort((a, b) => b.count - a.count);
+                 const avgIndex = activeGroups.length ? +(activeGroups.reduce((s, g) => s + g.index, 0) / activeGroups.length).toFixed(1) : 0;
+                 const idxColor = (v: number) => v >= 3.5 ? '#10B981' : v >= 2 ? '#3B82F6' : v > 0 ? '#F59E0B' : T.bdr;
+
+                 // Drill-down selections (fall back to the top family / group)
+                 const selFam = (heatFamily && activeFamilies.some(f => f.family === heatFamily)) ? heatFamily : (activeFamilies[0]?.family || '');
+                 const famGroups = activeGroups.filter(g => g.family === selFam);
+                 const selGrp = (heatGroup && famGroups.some(g => g.group === heatGroup)) ? heatGroup : (famGroups[0]?.group || '');
+                 const skillCounts = (selFam && selGrp)
+                   ? essentialSkillsFor(selFam, selGrp).map(sk => ({
+                       skill: sk,
+                       count: assignments.filter(a => a.qe.family === selFam && a.qe.group === selGrp && a.qe.matchedSkills.includes(sk)).length,
+                     })).sort((a, b) => b.count - a.count)
+                   : [];
+
+                 // Donut geometry
+                 const pieTotal = activeFamilies.reduce((s, f) => s + f.count, 0) || 1;
+                 const CX = 130, CY = 130, R = 112, RI = 60;
+                 const polar = (r: number, ang: number, ox = 0, oy = 0) => [CX + ox + r * Math.cos(ang), CY + oy + r * Math.sin(ang)];
+                 const buildArc = (start: number, end: number, ox = 0, oy = 0) => {
+                   const large = end - start > Math.PI ? 1 : 0;
+                   const [x1, y1] = polar(R, start, ox, oy), [x2, y2] = polar(R, end, ox, oy);
+                   const [x3, y3] = polar(RI, end, ox, oy), [x4, y4] = polar(RI, start, ox, oy);
+                   return `M${x1},${y1} A${R},${R} 0 ${large} 1 ${x2},${y2} L${x3},${y3} A${RI},${RI} 0 ${large} 0 ${x4},${y4} Z`;
+                 };
+                 let cursor = -Math.PI / 2;
+                 const slices = activeFamilies.map((f, i) => {
+                   // Give a single 100% family a hair less than a full turn so the arc renders.
+                   const frac = f.count / pieTotal;
+                   const sweep = Math.min(frac, 0.9999) * Math.PI * 2;
+                   const start = cursor;
+                   const end = cursor + sweep;
+                   const mid = (start + end) / 2;
+                   cursor = end;
+                   return { ...f, i, start, end, mid, frac };
+                 });
+                 const selSlice = slices.find(s => s.family === selFam);
+
+                 const card = { background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 18 } as const;
+                 const colTitle = { fontSize: 11, fontWeight: 800, textTransform: 'uppercase' as const, letterSpacing: 0.5, color: T.muted, marginBottom: 12 };
+
+                 return (
+                   <>
+                     {/* ── Summary dashboard cards ── */}
+                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 14, marginBottom: 22 }}>
+                       {[
+                         { l: 'Total Employees', v: totalEmp, c: '#3B82F6' },
+                         { l: 'Skill Families', v: activeFamilies.length, c: '#8B5CF6' },
+                         { l: 'Skill Groups', v: activeGroups.length, c: '#06B6D4' },
+                         { l: 'Avg Weighted Index', v: avgIndex.toFixed(1), c: idxColor(avgIndex) },
+                       ].map(s => (
+                         <div key={s.l} style={{ ...card, textAlign: 'center' }}>
+                           <div style={{ fontSize: 30, fontWeight: 900, color: s.c }}>{s.v}</div>
+                           <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 4 }}>{s.l}</div>
+                         </div>
+                       ))}
+                     </div>
+
+                     {/* ── Weighted average index by skill group ── */}
+                     <div style={{ marginBottom: 24 }}>
+                       <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>Weighted Average Index by Skill Group</div>
+                       <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Essential-skill coverage (0–5) across each group, with headcount.</div>
+                       {activeGroups.length === 0 ? (
+                         <div style={{ ...card, textAlign: 'center', color: T.sub }}>No employees mapped to any skill group yet.</div>
+                       ) : (
+                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>
+                           {activeGroups.map(g => (
+                             <div key={g.family + g.group} style={card}>
+                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+                                 <div style={{ minWidth: 0 }}>
+                                   <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{g.group}</div>
+                                   <div style={{ fontSize: 10.5, color: T.sub, marginTop: 2 }}>{g.family}</div>
+                                 </div>
+                                 <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{g.count} 👤</span>
+                               </div>
+                               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                 <div style={{ flex: 1, height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+                                   <div style={{ width: `${(g.index / 5) * 100}%`, height: '100%', background: idxColor(g.index), borderRadius: 999 }} />
+                                 </div>
+                                 <span style={{ fontSize: 15, fontWeight: 900, color: idxColor(g.index), minWidth: 34, textAlign: 'right' }}>{g.index.toFixed(1)}</span>
+                               </div>
+                             </div>
+                           ))}
+                         </div>
+                       )}
+                     </div>
+
+                     {/* ── Drill-down: Family → Group → Skill (side by side) ── */}
+                     <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>Skill Explorer</div>
+                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Click a family in the chart → pick a group → view its essential skills.</div>
+                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, alignItems: 'stretch' }}>
+                       {/* Column 1 — Family pie */}
+                       <div style={card}>
+                         <div style={colTitle}>Families · by headcount</div>
+                         {activeFamilies.length === 0 ? (
+                           <div style={{ color: T.sub, fontSize: 13 }}>No data.</div>
+                         ) : (
+                           <>
+                             <svg viewBox="0 0 260 260" style={{ width: '100%', maxWidth: 240, margin: '0 auto', display: 'block', overflow: 'visible' }}>
+                               <defs>
+                                 {slices.map(s => (
+                                   <linearGradient key={s.family} id={`pieGrad-${s.i}`} x1="0" y1="0" x2="1" y2="1">
+                                     <stop offset="0%" stopColor={s.color} stopOpacity={1} />
+                                     <stop offset="100%" stopColor={s.color} stopOpacity={0.62} />
+                                   </linearGradient>
+                                 ))}
+                                 <filter id="pieShadow" x="-30%" y="-30%" width="160%" height="160%">
+                                   <feDropShadow dx="0" dy="3" stdDeviation="4" floodColor="#000" floodOpacity="0.28" />
+                                 </filter>
+                               </defs>
+                               {/* track ring */}
+                               <circle cx={CX} cy={CY} r={(R + RI) / 2} fill="none" stroke={dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'} strokeWidth={R - RI} />
+                               {slices.map(s => {
+                                 const on = selFam === s.family;
+                                 const off = on ? 8 : 0;
+                                 const ox = Math.cos(s.mid) * off, oy = Math.sin(s.mid) * off;
+                                 return (
+                                   <path
+                                     key={s.family} d={buildArc(s.start, s.end, ox, oy)} fill={`url(#pieGrad-${s.i})`}
+                                     stroke={T.bg} strokeWidth={3} strokeLinejoin="round"
+                                     opacity={selFam && !on ? 0.4 : 1}
+                                     filter={on ? 'url(#pieShadow)' : undefined}
+                                     style={{ cursor: 'pointer', transition: 'opacity 0.25s, d 0.25s' }}
+                                     onClick={() => { setHeatFamily(s.family); setHeatGroup(''); }}
+                                   >
+                                     <title>{`${s.family}: ${s.count} (${Math.round(s.frac * 100)}%)`}</title>
+                                   </path>
+                                 );
+                               })}
+                               {/* on-slice % labels (only where the slice is wide enough) */}
+                               {slices.filter(s => s.frac >= 0.07).map(s => {
+                                 const off = selFam === s.family ? 8 : 0;
+                                 const [lx, ly] = polar((R + RI) / 2, s.mid, Math.cos(s.mid) * off, Math.sin(s.mid) * off);
+                                 return (
+                                   <text key={s.family} x={lx} y={ly + 4} textAnchor="middle" style={{ fontSize: 13, fontWeight: 900, fill: '#fff', pointerEvents: 'none', textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}>{Math.round(s.frac * 100)}%</text>
+                                 );
+                               })}
+                               {/* center label */}
+                               <text x={CX} y={CY - 4} textAnchor="middle" style={{ fontSize: 30, fontWeight: 900, fill: selSlice ? selSlice.color : T.text }}>{selSlice ? selSlice.count : totalEmp}</text>
+                               <text x={CX} y={CY + 16} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: T.sub }}>{selSlice ? `of ${totalEmp} · ${Math.round(selSlice.frac * 100)}%` : 'employees'}</text>
+                             </svg>
+                             {selFam && <div style={{ textAlign: 'center', fontSize: 12, fontWeight: 800, color: T.text, marginTop: 8 }}>{selFam}</div>}
+                             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 14 }}>
+                               {slices.map(s => {
+                                 const on = selFam === s.family;
+                                 return (
+                                   <button key={s.family} onClick={() => { setHeatFamily(s.family); setHeatGroup(''); }}
+                                     style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 10, cursor: 'pointer', textAlign: 'left', transition: '0.15s',
+                                       background: on ? (dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)') : 'transparent',
+                                       border: `1px solid ${on ? s.color : 'transparent'}` }}>
+                                     <span style={{ width: 10, height: 24, borderRadius: 4, background: s.color, flexShrink: 0 }} />
+                                     <span style={{ flex: 1, fontSize: 12, fontWeight: on ? 800 : 600, color: T.text }}>{s.family}</span>
+                                     <span style={{ fontSize: 12, fontWeight: 800, color: on ? s.color : T.sub }}>{s.count} · {Math.round(s.frac * 100)}%</span>
+                                   </button>
+                                 );
+                               })}
+                             </div>
+                           </>
+                         )}
+                       </div>
+
+                       {/* Column 2 — Groups within family */}
+                       <div style={card}>
+                         <div style={colTitle}>Groups{selFam ? ` · ${selFam}` : ''}</div>
+                         {famGroups.length === 0 ? (
+                           <div style={{ color: T.sub, fontSize: 13 }}>Select a family to see its groups.</div>
+                         ) : (
+                           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                             {famGroups.map(g => (
+                               <button key={g.group} onClick={() => setHeatGroup(g.group)}
+                                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', textAlign: 'left',
+                                   background: selGrp === g.group ? 'rgba(59,130,246,0.12)' : (dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)'),
+                                   border: `1px solid ${selGrp === g.group ? 'rgba(59,130,246,0.45)' : T.bdr}` }}>
+                                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{g.group}</span>
+                                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                   <span style={{ fontSize: 11, fontWeight: 800, color: idxColor(g.index) }}>{g.index.toFixed(1)}</span>
+                                   <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{g.count}</span>
+                                 </span>
+                               </button>
+                             ))}
+                           </div>
+                         )}
+                       </div>
+
+                       {/* Column 3 — Skills within group */}
+                       <div style={card}>
+                         <div style={colTitle}>Essential Skills{selGrp ? ` · ${selGrp}` : ''}</div>
+                         {skillCounts.length === 0 ? (
+                           <div style={{ color: T.sub, fontSize: 13 }}>Select a group to see its skills.</div>
+                         ) : (
+                           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                             {skillCounts.map(s => {
+                               const pct = totalEmp ? (s.count / totalEmp) * 100 : 0;
+                               return (
+                                 <div key={s.skill}>
+                                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                                     <span style={{ fontSize: 12, fontWeight: 700, color: s.count ? T.text : T.muted }}>{s.skill}</span>
+                                     <span style={{ fontSize: 12, fontWeight: 800, color: s.count ? '#06B6D4' : T.muted }}>{s.count}</span>
+                                   </div>
+                                   <div style={{ height: 6, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+                                     <div style={{ width: `${pct}%`, height: '100%', background: '#06B6D4', borderRadius: 999 }} />
+                                   </div>
+                                 </div>
+                               );
+                             })}
+                           </div>
+                         )}
+                       </div>
+                     </div>
+
+                     {/* ── Individual skill averages (original heatmap, kept) ── */}
+                     <div style={{ fontSize: 13, fontWeight: 800, color: T.text, margin: '28px 0 4px' }}>Individual Skill Averages <span style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>(out of 5)</span></div>
+                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Mean self-rating (0–5) for each skill, averaged over all {employees.length} employee{employees.length === 1 ? '' : 's'} — including those who haven't rated it (counted as 0).</div>
+                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 12 }}>
+                       {SKILLS.map(sk => {
+                         const rated = employees.filter((e: any) => (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0) > 0).length;
+                         const avg = employees.length ? employees.reduce((sum, e) => (sum + (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0)), 0) / employees.length : 0;
+                         return (
+                           <div key={sk.id} title={`${rated} of ${employees.length} employees rated this skill`} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 16, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+                             <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>{sk.name}</div>
+                             <div style={{ fontSize: 20, fontWeight: 900, color: T.text, marginBottom: 2 }}>{avg.toFixed(1)}<span style={{ fontSize: 12, fontWeight: 700, color: T.muted }}> / 5</span></div>
+                             <div style={{ fontSize: 10, fontWeight: 700, color: T.sub, marginBottom: 6 }}>{rated}/{employees.length} rated</div>
+                             <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: 4, background: avg >= 2.5 ? '#10B981' : avg >= 1.5 ? '#3B82F6' : avg > 0 ? '#F59E0B' : T.bdr }} />
+                           </div>
+                         );
+                       })}
+                     </div>
+                   </>
+                 );
+               })()}
             </div>
           )}
 
@@ -2540,6 +2932,16 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             Confirm
                           </button>
                         </div>
+
+                        {/* Grant a one-time re-assessment (bypass the 7-day cooldown) */}
+                        <button
+                          onClick={handleGrantReviewRetake}
+                          disabled={reviewGrantBusy || reviewGranted}
+                          title={`Let ${selectedReview.employee_name || 'this employee'} re-assess ${selectedReview.skill_name || 'this skill'} immediately`}
+                          style={{ width: '100%', padding: '10px 16px', borderRadius: 8, background: reviewGranted ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)', border: `1px solid ${reviewGranted ? 'rgba(16,185,129,0.4)' : 'rgba(245,158,11,0.45)'}`, color: reviewGranted ? '#10B981' : '#F59E0B', fontSize: 12, fontWeight: 800, cursor: reviewGrantBusy || reviewGranted ? 'default' : 'pointer', opacity: reviewGrantBusy ? 0.7 : 1 }}
+                        >
+                          {reviewGranted ? '✓ Re-assessment granted' : reviewGrantBusy ? 'Granting…' : '🔓 Grant re-assessment (skip cooldown)'}
+                        </button>
                       </div>
 
                       {/* Right Column: Score Verification Details */}
@@ -3345,6 +3747,76 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
+          {/* ── RE-ASSESSMENT TAB ── one card per employee: name + Zensar ID +
+               primary/secondary/tertiary skills + a single Approve (grant-all) ── */}
+          {activeTab === 'Re-assessment' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+                <Lock size={20} color="#F59E0B" />
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>Re-assessment Access</h3>
+                <span style={{ marginLeft: 'auto', fontSize: 12, color: T.muted }}>{employees.length} employees</span>
+              </div>
+              <p style={{ margin: '0 0 16px', fontSize: 13, color: T.sub, lineHeight: 1.55 }}>
+                Approve a one-time re-assessment so an employee can retake immediately — bypassing the 7-day cooldown (🔴 “Re-assessment available on …”). Approve each skill individually; each pass is consumed on the employee’s next attempt for that skill.
+              </p>
+
+              <div style={{ position: 'relative', marginBottom: 18, maxWidth: 360 }}>
+                <Search size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: T.muted }} />
+                <input value={raSearch} onChange={e => setRaSearch(e.target.value)} placeholder="Search name or Zensar ID…" style={{ width: '100%', padding: '10px 12px 10px 34px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.input, color: T.text, fontSize: 13, boxSizing: 'border-box' }} />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 14 }}>
+                {employees
+                  .filter(e => {
+                    const q = raSearch.trim().toLowerCase();
+                    if (!q) return true;
+                    return String(e.name || '').toLowerCase().includes(q) || String(e.zensar_id || e.id || '').toLowerCase().includes(q);
+                  })
+                  .map(e => {
+                    const skills = getTop3Skills(e);
+                    const labels = ['Primary', 'Secondary', 'Tertiary'];
+                    return (
+                      <div key={e.id} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div style={{ width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+                            {String(e.name || '?').split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 800, fontSize: 14, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</div>
+                            <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                          </div>
+                        </div>
+
+                        {/* One row per skill — each with its own Approve button */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {skills.length ? skills.map((s, i) => {
+                            const key = raKey(String(e.id), s);
+                            const granted = raGranted.has(key);
+                            const busy = raBusyId === key;
+                            return (
+                              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 10, border: `1px solid ${granted ? 'rgba(16,185,129,0.4)' : T.bdr}`, background: granted ? 'rgba(16,185,129,0.06)' : 'transparent' }}>
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                  <div style={{ fontSize: 9.5, fontWeight: 800, textTransform: 'uppercase', color: T.muted }}>{labels[i]}</div>
+                                  <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s}</div>
+                                </div>
+                                <button
+                                  onClick={() => handleGrantSkill(e, s)}
+                                  disabled={busy || granted}
+                                  style={{ flexShrink: 0, padding: '7px 12px', borderRadius: 8, border: 'none', background: granted ? 'rgba(16,185,129,0.14)' : 'linear-gradient(135deg,#10B981,#059669)', color: granted ? '#10B981' : '#fff', fontSize: 11.5, fontWeight: 800, cursor: busy || granted ? 'default' : 'pointer', opacity: busy ? 0.7 : 1 }}
+                                >
+                                  {granted ? '✓ Approved' : busy ? '…' : '✓ Approve'}
+                                </button>
+                              </div>
+                            );
+                          }) : <span style={{ fontSize: 12, color: T.muted }}>No skills on record</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+
           {/* ── WORKFORCE INTELLIGENCE TAB ── */}
           {activeTab === 'Workforce Intelligence' && (
             <div style={{ animation: 'fadeIn 0.4s ease', display: 'flex', flexDirection: 'column', gap: 24 }}>
@@ -3581,6 +4053,294 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             </div>
           )}
 
+          {activeTab === 'Skill Groups' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+                <div>
+                  <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>Skill Group Dashboard</h3>
+                  <div style={{ fontSize: 12, color: T.sub }}>Upload an Excel of <b>ID, Name, Domain, Skill Group</b> — it's matched to people by ID. Skill, experience &amp; certifications come from their profile; AI/QE flags are auto-derived.</div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                  <input ref={sgFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleSkillGroupExcel(e.target.files)} />
+                  <button onClick={() => sgFileRef.current?.click()} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10, background: '#06B6D4', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                    <Upload size={16} /> Upload Excel
+                  </button>
+                  {Object.keys(sgExcel).length > 0 && (
+                    <button onClick={() => { setSgExcel({}); localStorage.removeItem(SG_EXCEL_KEY); toast.success('Cleared uploaded mapping'); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                      <Trash2 size={14} /> Clear ({Object.keys(sgExcel).length})
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {(() => {
+                const q = search.trim().toLowerCase();
+
+                // Merge every employee with their uploaded Excel row (matched by ID).
+                const merged = employees.map((emp: any) => {
+                  const qe = resolveQEAssignment(emp);
+                  const ex = sgLookup(emp);
+                  const domain = normalizeDomain(ex?.domain) || deriveDomain(emp);
+                  const skillGroup = (ex?.skillGroup || '').trim() || qe.group;
+                  const experience = String(ex?.experience || emp.years_it || emp.yearsIT || emp.yearsExperience || emp.years_zensar || '').trim();
+                  const primarySkill = qe.primarySkill;
+                  const secondarySkill = qe.secondarySkill;
+                  // Options offered when an admin edits the primary/secondary skill.
+                  const ratedSkillNames = (emp.skills || [])
+                    .map((sk: any) => sk?.skillName || sk?.skill_name || sk?.name)
+                    .filter(Boolean);
+                  const skillOptions = Array.from(new Set([
+                    primarySkill, secondarySkill,
+                    ...essentialSkillsFor(qe.family, qe.group),
+                    ...qe.matchedSkills,
+                    ...ratedSkillNames,
+                  ].filter(Boolean))).sort();
+                  // Related trainings: explicit Excel column if present, else derive from
+                  // the resume-extracted skills/tools (matched essential skills).
+                  const exTrainings = (ex?.relatedTrainings || '').trim();
+                  const trainingList: string[] = exTrainings
+                    ? exTrainings.split(/[,;|]/).map((t: string) => t.trim()).filter(Boolean)
+                    : qe.matchedSkills;
+                  const certNames = (emp.certifications || [])
+                    .map((c: any) => c.cert_name || c.CertName || c.certName || c.name || c.Name || c.title || c.Title || c.certification_name || c.certificationName || (typeof c === 'string' ? c : ''))
+                    .filter(Boolean);
+                  return { emp, qe, domain, skillGroup, experience, primarySkill, secondarySkill, skillOptions, trainingList, certNames };
+                });
+
+                const groupOptions = Array.from(new Set(merged.map(m => m.skillGroup).filter(Boolean))).sort();
+                const skillOptionsAll = Array.from(new Set(merged.flatMap(m => [m.primarySkill, m.secondarySkill]).filter(Boolean))).sort();
+                const expOptions = Array.from(new Set(merged.map(m => m.experience).filter(Boolean))).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0));
+
+                const yn = (b: boolean) => (b ? 'yes' : 'no');
+                const rows = merged.filter(m => {
+                  if (q && !((m.emp.name || '').toLowerCase().includes(q) || String(m.emp.zensar_id || m.emp.id).toLowerCase().includes(q))) return false;
+                  if (sgFilter.domain.length && !sgFilter.domain.includes(m.domain)) return false;
+                  if (sgFilter.group.length && !sgFilter.group.includes(m.skillGroup)) return false;
+                  if (sgFilter.skill.length && !sgFilter.skill.includes(m.primarySkill) && !sgFilter.skill.includes(m.secondarySkill)) return false;
+                  if (sgFilter.experience.length && !sgFilter.experience.includes(m.experience)) return false;
+                  if (sgFilter.aiForQe.length && !sgFilter.aiForQe.includes(yn(m.qe.aiForQe))) return false;
+                  if (sgFilter.qeForAi.length && !sgFilter.qeForAi.includes(yn(m.qe.qeForAi))) return false;
+                  if (sgFilter.testAutomation.length && !sgFilter.testAutomation.includes(yn(m.qe.testAutomation))) return false;
+                  return true;
+                });
+
+                const anyFilter = Object.values(sgFilter).some(v => v.length > 0);
+
+                const exportSkillGroups = () => {
+                  if (rows.length === 0) { toast.warning('No rows to export.'); return; }
+                  const data = rows.map(m => ({
+                    ID: m.emp.zensar_id || m.emp.id,
+                    Name: m.emp.name || '',
+                    Domain: m.domain || '',
+                    'Skill Group': m.skillGroup || '',
+                    Experience: m.experience || '',
+                    'Primary Skill': m.primarySkill || '',
+                    'Secondary Skill': m.secondarySkill || '',
+                    'Related Trainings': m.trainingList.join(', '),
+                    Certifications: m.certNames.join(', '),
+                    'Test AI for QE (Zense.AI QI)': m.qe.aiForQe ? 'Yes' : 'No',
+                    'Test QE for AI (AssureAI)': m.qe.qeForAi ? 'Yes' : 'No',
+                    'Test Automation': m.qe.testAutomation ? 'Yes' : 'No',
+                  }));
+                  const ws = XLSX.utils.json_to_sheet(data);
+                  const wb = XLSX.utils.book_new();
+                  XLSX.utils.book_append_sheet(wb, ws, 'Skill Groups');
+                  XLSX.writeFile(wb, `skill-groups-${new Date().toISOString().slice(0, 10)}.xlsx`);
+                  toast.success(`Exported ${rows.length} row${rows.length === 1 ? '' : 's'}`);
+                };
+
+                const cell = { padding: '12px 14px', fontSize: 12.5, color: T.text, verticalAlign: 'top' as const };
+                const thStyle = (center = false) => ({ textAlign: (center ? 'center' : 'left') as 'center' | 'left', padding: '12px 14px', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' as const, letterSpacing: 0.4, color: T.muted, whiteSpace: 'nowrap' as const });
+
+                // Multi-select checklist filter dropdown.
+                const checklistFilter = (key: keyof typeof sgFilter, label: string, options: { value: string; label: string }[]) => {
+                  const selected = sgFilter[key];
+                  const open = sgOpenFilter === key;
+                  const toggle = (val: string) => setSgFilter(f => {
+                    const cur = f[key];
+                    return { ...f, [key]: cur.includes(val) ? cur.filter(v => v !== val) : [...cur, val] };
+                  });
+                  return (
+                    <div style={{ position: 'relative' }}>
+                      <button onClick={() => setSgOpenFilter(open ? '' : key)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderRadius: 10, background: selected.length ? 'rgba(59,130,246,0.12)' : T.input, border: `1px solid ${selected.length ? 'rgba(59,130,246,0.5)' : T.inputBdr}`, color: selected.length ? '#3B82F6' : T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                        <span>{label}{selected.length ? ` · ${selected.length}` : ''}</span>
+                        <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
+                      </button>
+                      {open && (
+                        <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 20, minWidth: 200, maxWidth: 300, maxHeight: 300, overflowY: 'auto', background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 12, boxShadow: '0 12px 32px rgba(0,0,0,0.25)', padding: 6 }}>
+                          {options.length === 0 ? (
+                            <div style={{ padding: 10, fontSize: 12, color: T.sub }}>No options</div>
+                          ) : options.map(opt => {
+                            const on = selected.includes(opt.value);
+                            return (
+                              <label key={opt.value} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: T.text, background: on ? (dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)') : 'transparent' }}
+                                onMouseEnter={e => (e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.04)')}
+                                onMouseLeave={e => (e.currentTarget.style.background = on ? (dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)') : 'transparent')}>
+                                <input type="checkbox" checked={on} onChange={() => toggle(opt.value)} style={{ width: 16, height: 16, accentColor: '#3B82F6', cursor: 'pointer' }} />
+                                <span style={{ flex: 1 }}>{opt.label}</span>
+                              </label>
+                            );
+                          })}
+                          {selected.length > 0 && (
+                            <button onClick={() => setSgFilter(f => ({ ...f, [key]: [] }))} style={{ width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 8, border: 'none', background: 'transparent', color: '#EF4444', fontSize: 12, fontWeight: 700, cursor: 'pointer', textAlign: 'left' }}>Clear {label}</button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                };
+                const ynOpts = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
+
+                return (
+                  <>
+                    {/* Backdrop closes any open checklist dropdown */}
+                    {sgOpenFilter && <div onClick={() => setSgOpenFilter('')} style={{ position: 'fixed', inset: 0, zIndex: 15 }} />}
+
+                    {/* Search + Filters */}
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center', position: 'relative', zIndex: 16 }}>
+                      <div style={{ position: 'relative', flex: 1, minWidth: 220 }}>
+                        <Search size={16} color={T.muted} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)' }} />
+                        <input placeholder="Search by name or ID..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '12px 14px 12px 42px', borderRadius: 10, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 500, outline: 'none' }} />
+                      </div>
+                      {checklistFilter('domain', 'Domains', QE_DOMAINS.map(d => ({ value: d, label: d })))}
+                      {checklistFilter('group', 'Skill Groups', groupOptions.map(g => ({ value: g, label: g })))}
+                      {checklistFilter('skill', 'Skills', skillOptionsAll.map(sk => ({ value: sk, label: sk })))}
+                      {checklistFilter('experience', 'Experience', expOptions.map(x => ({ value: x, label: `${x} yrs` })))}
+                      {checklistFilter('aiForQe', 'Test AI for QE', ynOpts)}
+                      {checklistFilter('qeForAi', 'Test QE for AI', ynOpts)}
+                      {checklistFilter('testAutomation', 'Test Automation', ynOpts)}
+                      {anyFilter && (
+                        <button onClick={() => setSgFilter({ domain: [], group: [], skill: [], experience: [], aiForQe: [], qeForAi: [], testAutomation: [] })} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '12px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                          <X size={14} /> Clear all
+                        </button>
+                      )}
+                      <button onClick={exportSkillGroups} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '12px 16px', borderRadius: 10, border: 'none', background: '#10B981', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer', marginLeft: 'auto' }}>
+                        <Download size={15} /> Export ({rows.length})
+                      </button>
+                    </div>
+
+                    {rows.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: 'center', color: T.sub, fontSize: 14 }}>No employees found.</div>
+                    ) : (
+                      <div style={{ overflowX: 'auto', border: `1px solid ${T.bdr}`, borderRadius: 16 }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1320, tableLayout: 'auto' }}>
+                          <thead>
+                            <tr style={{ background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' }}>
+                              <th style={thStyle()}>ID</th>
+                              <th style={thStyle()}>Name</th>
+                              <th style={thStyle()}>Domain</th>
+                              <th style={thStyle()}>Skill Group</th>
+                              <th style={thStyle(true)}>Exp</th>
+                              <th style={{ ...thStyle(), paddingLeft: 64 }}>Skills</th>
+                              <th style={thStyle()}>Related Trainings</th>
+                              <th style={thStyle()}>Certification</th>
+                              <th style={thStyle(true)}>Test AI for QE<div style={{ fontSize: 9, fontWeight: 700, opacity: 0.7 }}>(Zense.AI QI)</div></th>
+                              <th style={thStyle(true)}>Test QE for AI<div style={{ fontSize: 9, fontWeight: 700, opacity: 0.7 }}>(AssureAI)</div></th>
+                              <th style={thStyle(true)}>Test Automation</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map(m => {
+                              const emp = m.emp;
+                              const rowKey = String(emp.id);
+                              const skillKey = emp.id ?? emp.zensar_id;
+                              const certOpen = !!sgCertOpen[rowKey];
+                              const shownCerts = certOpen ? m.certNames : m.certNames.slice(0, 2);
+                              const trainOpen = !!sgTrainOpen[rowKey];
+                              const shownTrain = trainOpen ? m.trainingList : m.trainingList.slice(0, 2);
+                              return (
+                                <tr
+                                  key={rowKey}
+                                  onClick={() => handleOpenPreview(emp, 'Skill Group')}
+                                  style={{ borderTop: `1px solid ${T.bdr}`, cursor: 'pointer' }}
+                                  onMouseEnter={e => (e.currentTarget.style.background = dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)')}
+                                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                >
+                                  <td style={{ ...cell, fontWeight: 700, color: T.sub, whiteSpace: 'nowrap' }}>{emp.zensar_id || emp.id}</td>
+                                  <td style={{ ...cell, fontWeight: 800, whiteSpace: 'nowrap' }}>{emp.name}</td>
+                                  <td style={cell}>
+                                    {m.domain
+                                      ? <span title={QE_DOMAIN_LABEL[m.domain]} style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{m.domain}</span>
+                                      : <span style={{ color: T.muted }}>—</span>}
+                                  </td>
+                                  <td style={{ ...cell, fontWeight: 700, minWidth: 150 }}>{m.skillGroup || '—'}</td>
+                                  <td style={{ ...cell, textAlign: 'center', fontWeight: 700 }}>{m.experience || '—'}</td>
+                                  <td style={{ ...cell, minWidth: 200 }} onClick={e => e.stopPropagation()}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                      {([
+                                        { key: 'primarySkill' as const, val: m.primarySkill, ph: '— Primary skill —', dot: '#06B6D4' },
+                                        { key: 'secondarySkill' as const, val: m.secondarySkill, ph: '— Secondary skill —', dot: '#8B5CF6' },
+                                      ]).map(f => (
+                                        <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                          <span style={{ width: 7, height: 7, borderRadius: 999, background: f.dot, flexShrink: 0 }} />
+                                          <select
+                                            value={m.skillOptions.includes(f.val) ? f.val : ''}
+                                            onChange={e => { setQEOverride(skillKey, { [f.key]: e.target.value }); setQeTick(t => t + 1); }}
+                                            style={{ flex: 1, padding: '6px 8px', borderRadius: 8, background: T.input, border: `1px solid ${T.inputBdr}`, color: f.val ? T.text : T.muted, fontSize: 12, fontWeight: 700, outline: 'none', cursor: 'pointer' }}
+                                          >
+                                            <option value="">{f.ph}</option>
+                                            {f.val && !m.skillOptions.includes(f.val) && <option value={f.val}>{f.val}</option>}
+                                            {m.skillOptions.map((s: string) => <option key={s} value={s}>{s}</option>)}
+                                          </select>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td style={{ ...cell, minWidth: 150 }}>
+                                    {m.trainingList.length === 0 ? <span style={{ color: T.muted }}>—</span> : (
+                                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                                        {shownTrain.map((tname: string, i: number) => (
+                                          <span key={i} style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'rgba(6,182,212,0.12)', color: '#06B6D4' }}>{tname}</span>
+                                        ))}
+                                        {m.trainingList.length > 2 && (
+                                          <button onClick={e => { e.stopPropagation(); setSgTrainOpen(s => ({ ...s, [rowKey]: !trainOpen })); }} style={{ fontSize: 11, fontWeight: 800, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>
+                                            {trainOpen ? 'Show less' : `+${m.trainingList.length - 2} more`}
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td style={{ ...cell, minWidth: 150 }}>
+                                    {m.certNames.length === 0 ? <span style={{ color: T.muted }}>—</span> : (
+                                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                                        {shownCerts.map((c: string, i: number) => (
+                                          <span key={i} style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'rgba(16,185,129,0.12)', color: '#10B981' }}>{c}</span>
+                                        ))}
+                                        {m.certNames.length > 2 && (
+                                          <button onClick={e => { e.stopPropagation(); setSgCertOpen(s => ({ ...s, [rowKey]: !certOpen })); }} style={{ fontSize: 11, fontWeight: 800, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>
+                                            {certOpen ? 'Show less' : `+${m.certNames.length - 2} more`}
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+                                  </td>
+                                  {([
+                                    { key: 'aiForQe' as const, on: m.qe.aiForQe },
+                                    { key: 'qeForAi' as const, on: m.qe.qeForAi },
+                                    { key: 'testAutomation' as const, on: m.qe.testAutomation },
+                                  ]).map(f => (
+                                    <td key={f.key} style={{ ...cell, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                                      <button
+                                        title="Click to toggle"
+                                        onClick={() => { setQEOverride(skillKey, { [f.key]: !f.on }); setQeTick(t => t + 1); }}
+                                        style={{ fontSize: 11, fontWeight: 900, padding: '4px 12px', borderRadius: 999, border: 'none', cursor: 'pointer', background: f.on ? 'rgba(16,185,129,0.14)' : (dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'), color: f.on ? '#10B981' : T.muted }}
+                                      >{f.on ? 'YES' : 'NO'}</button>
+                                    </td>
+                                  ))}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
         </div>
       </div>
 
@@ -3597,7 +4357,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
                
                <div style={{ display: 'flex', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, overflowX: 'auto', flex: 1, minWidth: 200, WebkitOverflowScrolling: 'touch' }}>
-                {(['ZenRadar', 'ZenScan', 'ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
+                {(['ZenRadar', 'Skill Group', 'ZenScan', 'ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
                    <button 
                      key={tab} 
                      onClick={() => setPopupActiveTab(tab)}
@@ -3708,6 +4468,228 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   }
                 }}>
                   <div style={{ animation: 'fadeIn 0.4s' }}>
+                    {popupActiveTab === 'Skill Group' && (() => {
+                      const qe = resolveQEAssignment(previewUser);
+                      const empId = previewUser.id ?? previewUser.zensar_id;
+                      const groupSkills = essentialSkillsFor(qe.family, qe.group);
+                      const matchedSet = new Set(qe.matchedSkills);
+                      // Skill options offered when editing primary / secondary skill.
+                      const ratedSkillNames = (previewUser.skills || [])
+                        .map((sk: any) => sk?.skillName || sk?.skill_name || sk?.name)
+                        .filter(Boolean);
+                      const skillOptions = Array.from(new Set([
+                        qe.primarySkill, qe.secondarySkill, ...groupSkills, ...qe.matchedSkills, ...ratedSkillNames,
+                      ].filter(Boolean))).sort();
+                      const certNames = (previewUser.certifications || [])
+                        .map((c: any) => c.CertName || c.cert_name || c.certName || c.name || c.Name || c.title || c.Title || c.certification_name || (typeof c === 'string' ? c : ''))
+                        .filter(Boolean);
+                      const projectNames = (previewUser.projects || [])
+                        .map((p: any) => p.ProjectName || p.project_name || p.name || p.Name || '')
+                        .filter(Boolean);
+                      const Flag = ({ on, label, onToggle }: { on: boolean; label: string; onToggle: () => void }) => (
+                        <button onClick={onToggle} style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                          padding: '14px 18px', borderRadius: 14, cursor: 'pointer', minWidth: 200, flex: 1,
+                          background: on ? 'rgba(16,185,129,0.12)' : (dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)'),
+                          border: `1px solid ${on ? 'rgba(16,185,129,0.4)' : T.bdr}`,
+                        }}>
+                          <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{label}</span>
+                          <span style={{
+                            fontSize: 12, fontWeight: 900, padding: '4px 12px', borderRadius: 999,
+                            background: on ? '#10B981' : (dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'),
+                            color: on ? '#fff' : T.sub,
+                          }}>{on ? 'YES' : 'NO'}</span>
+                        </button>
+                      );
+                      return (
+                        <div style={{ padding: '20px 4vw 40px' }}>
+                          <div style={{ background: T.card, borderRadius: 20, border: `1px solid ${T.bdr}`, padding: 'min(28px, 5vw)' }}>
+                            {/* Header */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 22 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <div style={{ width: 44, height: 44, borderRadius: 14, background: 'linear-gradient(135deg,#06B6D4,#3B82F6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
+                                  <Layers size={22} />
+                                </div>
+                                <div>
+                                  <div style={{ fontSize: 18, fontWeight: 900, color: T.text }}>Skill Group Classification</div>
+                                  <div style={{ fontSize: 12, color: T.sub }}>QE skill-family classification {qe.isOverridden ? '· admin override active' : '· auto-derived'}</div>
+                                </div>
+                              </div>
+                              {qe.isOverridden && (
+                                <button onClick={() => { clearQEOverride(empId); setQeTick(t => t + 1); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                                  <RotateCcw size={14} /> Reset to auto
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Identity */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 22 }}>
+                              {[
+                                { label: 'Name', value: previewUser.name || '—' },
+                                { label: 'ID', value: empId || '—' },
+                              ].map(f => (
+                                <div key={f.label} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 14, padding: '12px 16px' }}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted }}>{f.label}</div>
+                                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginTop: 4 }}>{f.value}</div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Family + Skill Group (editable) */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 22 }}>
+                              <div>
+                                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 6 }}>Skill Family</div>
+                                <select
+                                  value={qe.family}
+                                  onChange={e => { const fam = e.target.value; setQEOverride(empId, { family: fam, group: groupsForFamily(fam)[0] }); setQeTick(t => t + 1); }}
+                                  style={{ width: '100%', padding: '12px 14px', borderRadius: 12, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 700, outline: 'none' }}
+                                >
+                                  {!QE_FAMILIES.includes(qe.family) && <option value={qe.family}>{qe.family}</option>}
+                                  {QE_FAMILIES.map(f => <option key={f} value={f}>{f}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 6 }}>Skill Group</div>
+                                <select
+                                  value={qe.group}
+                                  onChange={e => { setQEOverride(empId, { group: e.target.value }); setQeTick(t => t + 1); }}
+                                  disabled={!QE_FAMILIES.includes(qe.family)}
+                                  style={{ width: '100%', padding: '12px 14px', borderRadius: 12, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 700, outline: 'none' }}
+                                >
+                                  {!groupsForFamily(qe.family).includes(qe.group) && <option value={qe.group}>{qe.group}</option>}
+                                  {groupsForFamily(qe.family).map(g => <option key={g} value={g}>{g}</option>)}
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Primary + Secondary skill (editable) */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 22 }}>
+                              {([
+                                { key: 'primarySkill' as const, label: 'Primary Skill', val: qe.primarySkill },
+                                { key: 'secondarySkill' as const, label: 'Secondary Skill', val: qe.secondarySkill },
+                              ]).map(f => (
+                                <div key={f.key}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 6 }}>{f.label}</div>
+                                  <select
+                                    value={skillOptions.includes(f.val) ? f.val : ''}
+                                    onChange={e => { setQEOverride(empId, { [f.key]: e.target.value }); setQeTick(t => t + 1); }}
+                                    style={{ width: '100%', padding: '12px 14px', borderRadius: 12, background: T.input, border: `1px solid ${T.inputBdr}`, color: f.val ? T.text : T.muted, fontSize: 13, fontWeight: 700, outline: 'none' }}
+                                  >
+                                    <option value="">— Select {f.label.toLowerCase()} —</option>
+                                    {f.val && !skillOptions.includes(f.val) && <option value={f.val}>{f.val}</option>}
+                                    {skillOptions.map((s: string) => <option key={s} value={s}>{s}</option>)}
+                                  </select>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Flags */}
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginBottom: 22 }}>
+                              <Flag on={qe.aiForQe} label="Test AI for QE · Zense.AI QI" onToggle={() => { setQEOverride(empId, { aiForQe: !qe.aiForQe }); setQeTick(t => t + 1); }} />
+                              <Flag on={qe.qeForAi} label="Test QE for AI · AssureAI" onToggle={() => { setQEOverride(empId, { qeForAi: !qe.qeForAi }); setQeTick(t => t + 1); }} />
+                              <Flag on={qe.testAutomation} label="Test Automation" onToggle={() => { setQEOverride(empId, { testAutomation: !qe.testAutomation }); setQeTick(t => t + 1); }} />
+                            </div>
+
+                            {/* Group skills */}
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 10 }}>
+                                Essential Skills · {qe.group}{groupSkills.length ? ` (${matchedSet.size}/${groupSkills.length} matched)` : ''}
+                              </div>
+                              {groupSkills.length === 0 ? (
+                                <div style={{ fontSize: 13, color: T.sub }}>No essential skills mapped for this group.</div>
+                              ) : (
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                  {groupSkills.map(sk => {
+                                    const hit = matchedSet.has(sk);
+                                    return (
+                                      <span key={sk} style={{
+                                        fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 999,
+                                        background: hit ? 'rgba(6,182,212,0.12)' : T.bg,
+                                        border: `1px solid ${hit ? 'rgba(6,182,212,0.4)' : T.bdr}`,
+                                        color: hit ? '#06B6D4' : T.sub,
+                                      }}>{hit ? '✓ ' : ''}{sk}</span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* ── Person details (full profile) ── */}
+                            <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${T.bdr}` }}>
+                              <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 12 }}>Person Details</div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
+                                {[
+                                  { label: '📧 Email', value: previewUser.email },
+                                  { label: '📱 Phone', value: previewUser.phone },
+                                  { label: '📍 Location', value: previewUser.location },
+                                  { label: '💼 Designation', value: previewUser.designation || previewUser.Designation },
+                                  { label: '🏢 Department', value: previewUser.department },
+                                  { label: '🎯 Domain', value: previewUser.primary_domain || previewData?.user?.primaryDomain },
+                                  { label: '💼 Years in IT', value: previewUser.years_it ? `${previewUser.years_it} yrs` : '' },
+                                  { label: '🏷️ Years@Zensar', value: previewUser.years_zensar ? `${previewUser.years_zensar} yrs` : '' },
+                                ].map(({ label, value }) => (
+                                  <div key={label} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 12, padding: '10px 14px' }}>
+                                    <div style={{ fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+                                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginTop: 4, wordBreak: 'break-word' }}>{value || '—'}</div>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {/* Rated skills */}
+                              {ratedSkillNames.length > 0 && (
+                                <div style={{ marginTop: 18 }}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 8 }}>🧩 Skills ({ratedSkillNames.length})</div>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                    {ratedSkillNames.map((s: string, i: number) => (
+                                      <span key={i} style={{ fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{s}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Certifications */}
+                              {certNames.length > 0 && (
+                                <div style={{ marginTop: 18 }}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 8 }}>🏅 Certifications ({certNames.length})</div>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                    {certNames.map((c: string, i: number) => (
+                                      <span key={i} style={{ fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 999, background: 'rgba(16,185,129,0.12)', color: '#10B981' }}>{c}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Projects */}
+                              {projectNames.length > 0 && (
+                                <div style={{ marginTop: 18 }}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 8 }}>🚀 Projects ({projectNames.length})</div>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                    {projectNames.map((p: string, i: number) => (
+                                      <span key={i} style={{ fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 999, background: 'rgba(245,158,11,0.12)', color: '#F59E0B' }}>{p}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Education */}
+                              {previewData?.education && previewData.education.length > 0 && (
+                                <div style={{ marginTop: 18 }}>
+                                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: T.muted, marginBottom: 8 }}>🎓 Education</div>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                                    {previewData.education.map((ed: any, i: number) => (
+                                      <div key={i} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 10, padding: '8px 14px', fontSize: 12 }}>
+                                        <div style={{ fontWeight: 800, color: T.text }}>{ed.degree || ed.Degree || ed.course || '—'}</div>
+                                        <div style={{ color: T.sub, marginTop: 2 }}>{ed.institution || ed.college || ed.College || '—'}{ed.year || ed.Year ? ` · ${ed.year || ed.Year}` : ''}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {popupActiveTab === 'ZenRadar' && (
                       <div>
                         {/* ── Full Profile Summary Card ── */}

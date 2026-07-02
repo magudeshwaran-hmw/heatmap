@@ -33,6 +33,7 @@ import ResumeUploadPage from "@/pages/ResumeUploadPage";
 import AchievementsPage from "@/pages/AchievementsPage";
 import BFSIDashboard from "@/pages/BFSIDashboard";
 import ZenAssessPage from "@/pages/ZenAssessPage";
+import CapstonePage from "@/pages/CapstonePage";
 import AssessmentOverviewPage from "@/pages/AssessmentOverviewPage";
 import GitHubIntelligencePage from "@/pages/GitHubIntelligencePage";
 import { useEffect } from "react";
@@ -75,6 +76,7 @@ function AppRoutes() {
         <Route path="/employee/resume-upload"  element={isLoggedIn ? <ResumeUploadPage />   : <Navigate to="/login" />} />
         <Route path="/employee/assessment-overview" element={isLoggedIn ? <AssessmentOverviewPage /> : <Navigate to="/login" />} />
         <Route path="/employee/zenassess"      element={isLoggedIn ? <ZenAssessPage />      : <Navigate to="/login" />} />
+        <Route path="/employee/zenassess/capstone" element={isLoggedIn ? <CapstonePage />   : <Navigate to="/login" />} />
         <Route path="/employee/github-intelligence" element={isLoggedIn ? <GitHubIntelligencePage /> : <Navigate to="/login" />} />
 
         {/* Legacy URL redirects and fallbacks */}

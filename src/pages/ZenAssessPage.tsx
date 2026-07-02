@@ -17,11 +17,12 @@ import { useAuth } from '../lib/authContext';
 import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee } from '../lib/api';
 import { toast } from '../lib/ToastContext';
 import {
-  computeSkillTaxonomy,
+  computeAssessmentFlow,
   getGradePath,
   deriveGradeFromYears,
   CANONICAL_SKILLS,
   type TaxonomyResult,
+  type AssessmentFlow,
 } from '../lib/zenTaxonomy';
 import {
   generateExpertProfileAI,
@@ -42,9 +43,18 @@ import {
   evaluateIntermediatePracticalAI,
   evaluateIntermediateScenariosAI,
 } from '../lib/expertPathAI';
-import { getQuestionBank, shuffleMCQs, correctLetterToIndex } from '../data/questionBank/index';
-import { determineTierResult } from '../lib/scoringEngine';
+import { getQuestionBank, shuffleMCQs, correctLetterToIndex, getRerouteShortlist, LEVEL_FORMAT } from '../data/questionBank/index';
+import { determineTierResult, REROUTE_SHORTLIST_SIZE } from '../lib/scoringEngine';
 import CodeEditor from '../components/CodeEditor';
+import AssessmentSidebar, { type SidebarSection, type QuestionStatus } from '../components/AssessmentSidebar';
+import {
+  getExpertAssessment, scoreExpertAssessment, flattenAssessment,
+  type ExpertAssessment,
+} from '../lib/expertScenarioEngine';
+import {
+  issueCapstone, getCapstoneState, capstoneTimeLeft,
+  type CapstoneState,
+} from '../lib/capstoneEngine';
 import ProctoringPermissionScreen from '../components/ProctoringPermissionScreen';
 import ProctorCameraView from '../components/ProctorCameraView';
 import { ProctoringEngine, type ProctoringFlag, type IntegrityReport } from '../lib/proctoringEngine';
@@ -326,7 +336,16 @@ const extractTextFromFileUniversal = async (file: File): Promise<string> => {
     });
   }
 
-  // DOCX / PPTX / XLSX — ZIP-based, extract readable ASCII segments
+  // DOCX — parse properly with mammoth (accurate full text)
+  if (ext === 'docx') {
+    try {
+      const { extractTextFromFile: extractUnified } = await import('@/lib/resumeExtraction');
+      const text = (await extractUnified(file)).trim();
+      if (text) return `[DOCX DOCUMENT]\nFilename: ${file.name}\nFile Size: ${kb} KB\n\n${text}`;
+    } catch { /* fall through to ASCII scrape below */ }
+  }
+
+  // PPTX / XLSX (and DOCX fallback) — ZIP-based, extract readable ASCII segments
   if (['docx','pptx','xlsx'].includes(ext)) {
     try {
       const arrayBuffer = await file.arrayBuffer();
@@ -519,24 +538,46 @@ export default function ZenAssessPage() {
   const [codingAnswer, setCodingAnswer] = useState<string>('');
   const [frameworkAnswer, setFrameworkAnswer] = useState<string>('');
   const [expertScenarioAnswers, setExpertScenarioAnswers] = useState<Record<string, string>>({});
-  const [capstoneUrl, setCapstoneUrl] = useState<string>('');
-  const [capstoneNotes, setCapstoneNotes] = useState<string>('');
   const [mentoringAnswers, setMentoringAnswers] = useState<Record<string, string>>({});
   const [experienceAnswers, setExperienceAnswers] = useState<Record<string, string>>({});
   const [v7CurrentToolIdIdx, setV7CurrentToolIdIdx] = useState<number>(0);
   const [v7CurrentTestCaseIdx, setV7CurrentTestCaseIdx] = useState<number>(0);
   const [v7CurrentExpertScenarioIdx, setV7CurrentExpertScenarioIdx] = useState<number>(0);
+  // Continuous Beginner assessment: single flat navigation index across all
+  // sections (MCQ → Tool ID → Practical) + per-position "visited" tracking.
+  const [v7FlatIdx, setV7FlatIdx] = useState<number>(0);
+  const [v7Visited, setV7Visited] = useState<Record<number, boolean>>({});
+  // Per-scenario "current sub-question" memory (scenario group id → local question
+  // index). Lets the right-sidebar Scenario palette navigate BETWEEN scenarios
+  // while each scenario reopens on the sub-question the candidate last viewed.
+  const [v7ScenarioPos, setV7ScenarioPos] = useState<Record<string, number>>({});
+  // Expert (enterprise scenario engine): weighted 4-section assessment + answers.
+  const [v7ExpertAssessment, setV7ExpertAssessment] = useState<ExpertAssessment | null>(null);
+  const [v7ExpertAnswers, setV7ExpertAnswers] = useState<Record<string, any>>({});
+
+  // ── Adaptive Test Progression (post-assessment only) ────────────────────────
+  // Tracks the in-session adaptive state for the skill currently being tested.
+  // v7IsShortlist  → the running test is an adaptive 10-question shortlist (a
+  //   one-level drop-up or drop-down). A shortlist NEVER triggers another move,
+  //   which enforces the "max one adaptive movement per session" rule.
+  // v7SessionStartLevel → the level the candidate was originally routed into for
+  //   this skill (the existing level-assignment decision, never recomputed here).
+  const [v7IsShortlist, setV7IsShortlist] = useState<boolean>(false);
+  const [v7SessionStartLevel, setV7SessionStartLevel] = useState<'Beginner' | 'Intermediate' | 'Expert'>('Beginner');
 
   // ── 3-Skill Sequential Engine state (Primary → Secondary → Tertiary) ────────
   const [v7Grade, setV7Grade] = useState<string>('');
   const [v7BaseLevel, setV7BaseLevel] = useState<'Beginner' | 'Intermediate' | 'Expert'>('Beginner');
   const [activeSkillIdx, setActiveSkillIdx] = useState<number>(0);
   const [silentDropLog, setSilentDropLog] = useState<Record<string, string[]>>({});
-  const [skillResults, setSkillResults] = useState<{ skill: string; label: string; validatedLevel: string; badgeAwarded: boolean; silentDropPath: string; apiVerifiedBadgeLevel?: string | null; v7Action?: 'dropup' | 'pass' | 'dropdown'; finalScore?: number }[]>([]);
+  const [skillResults, setSkillResults] = useState<{ skill: string; label: string; validatedLevel: string; badgeAwarded: boolean; silentDropPath: string; apiVerifiedBadgeLevel?: string | null; v7Action?: 'dropup' | 'pass' | 'dropdown' | 'fail'; finalScore?: number }[]>([]);
   const [showSkillTransition, setShowSkillTransition] = useState<boolean>(false);
   const [v7History, setV7History] = useState<any[]>([]);
   const [v7SkillBadges, setV7SkillBadges] = useState<Record<string, string>>({});
   const [v7SelfClaimedLevels, setV7SelfClaimedLevels] = useState<Record<string, string>>({});
+  // CHANGE 2: assigned path comes from grade × family × depth, NOT self_claimed_level.
+  const [v7Flow, setV7Flow] = useState<AssessmentFlow | null>(null);
+  const [v7FlowPath, setV7FlowPath] = useState<'Beginner' | 'Intermediate' | 'Expert'>('Beginner');
   const [v7InProgressSkills, setV7InProgressSkills] = useState<Record<string, boolean>>({});
   const [v7AttemptNumber, setV7AttemptNumber] = useState<number>(1);
   const [v7CompletionSaved, setV7CompletionSaved] = useState<boolean>(false);
@@ -578,6 +619,40 @@ export default function ZenAssessPage() {
       if (timerInterval) clearInterval(timerInterval);
     };
   }, [v7TimerActive, v7Timer]);
+
+  // Continuous Beginner assessment: mark the current flat position as "visited".
+  useEffect(() => {
+    if (v7Step === 4) {
+      setV7Visited(prev => (prev[v7FlatIdx] ? prev : { ...prev, [v7FlatIdx]: true }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [v7FlatIdx, v7Step, assessmentPath]);
+
+  // Remember which sub-question is active within each scenario so the right-sidebar
+  // Scenario palette can return the candidate to exactly where they left off.
+  useEffect(() => {
+    if (v7Step !== 4 || assessmentPath !== 'Expert' || !v7ExpertAssessment) return;
+    const { groups } = flattenAssessment(v7ExpertAssessment);
+    const g = groups.find(bg => bg.sectionKey === 'scenario' && v7FlatIdx >= bg.startIdx && v7FlatIdx < bg.startIdx + bg.group.questions.length);
+    if (!g) return;
+    const local = v7FlatIdx - g.startIdx;
+    setV7ScenarioPos(prev => (prev[g.group.id] === local ? prev : { ...prev, [g.group.id]: local }));
+  }, [v7FlatIdx, v7Step, assessmentPath, v7ExpertAssessment]);
+
+  // Keyboard navigation (Arrow ←/→) for the continuous expert flow. Ignored while
+  // typing in a field so it never fights form inputs.
+  useEffect(() => {
+    if (v7Step !== 4 || assessmentPath !== 'Expert' || !v7ExpertAssessment) return;
+    const maxIdx = flattenAssessment(v7ExpertAssessment).flat.length - 1;
+    const handler = (e: KeyboardEvent) => {
+      const tag = (document.activeElement?.tagName || '').toLowerCase();
+      if (tag === 'select' || tag === 'textarea' || tag === 'input') return;
+      if (e.key === 'ArrowRight') setV7FlatIdx(i => Math.min(maxIdx, i + 1));
+      else if (e.key === 'ArrowLeft') setV7FlatIdx(i => Math.max(0, i - 1));
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [v7Step, assessmentPath, v7ExpertAssessment]);
 
   // Load and validate CandidateProfile on mount
   const [v7ValidationError, setV7ValidationError] = useState<string | null>(null);
@@ -692,9 +767,15 @@ export default function ZenAssessPage() {
         } else {
           setShowZenScanBanner(false);
           setV7TaxonomyMismatch(false);
-          const taxonomy = computeSkillTaxonomy(taxonomyInput);
-          setV7Taxonomy(taxonomy);
-          setV7SelectedSkill(taxonomy.primary.skill);
+          // CHANGE 2: family + grade + depth flow (replaces self_claimed routing).
+          // Returns the winning-family top-3 and the grade×score path.
+          const flow = computeAssessmentFlow(taxonomyInput, resolvedGrade);
+          setV7Taxonomy(flow.taxonomy);
+          setV7Flow(flow);
+          setV7FlowPath(flow.path);
+          setAssessmentPath(flow.path);
+          setV7BaseLevel(flow.path);
+          setV7SelectedSkill(flow.taxonomy.primary.skill);
         }
 
         setV7ValidationError(null);
@@ -847,7 +928,160 @@ export default function ZenAssessPage() {
     } else if (level === 'Intermediate') {
       return Math.round((scores.mcq ?? 0) * 0.20 + (scores.coding ?? 0) * 0.35 + (scores.scenarios ?? 0) * 0.30 + (scores.frameworkDesign ?? 0) * 0.15);
     }
+    // Expert (hybrid): authenticated on the MCQ score; capstone is optional
+    // evidence and is not scored. Legacy free-text weighting kept as fallback.
+    if (scores.mcq !== undefined) return Math.round(scores.mcq);
     return Math.round((scores.expertScenarios ?? 0) * 0.25 + (scores.capstone ?? 0) * 0.40 + (scores.mentoring ?? 0) * 0.20 + (scores.questionnaire ?? 0) * 0.15);
+  };
+
+  // ── Continuous Beginner assessment: shared section builders + scoring ────────
+  // Single source of truth for the three logical sections so the renderer and
+  // the score-finalizer never diverge (no duplicate question lists).
+  const TOOLID_MCQ_FALLBACK = [
+    { id: 0, question: 'Which Selenium locator is most reliable when an element has no stable ID or name?', options: ['id locator', 'name locator', 'xpath using text()', 'className locator'], correct: 3 },
+    { id: 1, question: 'In Postman, which tab shows the response body of an API call?', options: ['Headers', 'Authorization', 'Body', 'Tests'], correct: 3 },
+    { id: 2, question: 'JIRA is primarily used for:', options: ['Test automation', 'Load testing', 'Bug/issue tracking', 'Code deployment'], correct: 3 },
+    { id: 3, question: 'Which JMeter element defines the number of virtual users?', options: ['HTTP Sampler', 'Thread Group', 'View Results Tree', 'Listeners'], correct: 2 },
+    { id: 4, question: 'In a defect lifecycle, "Deferred" means:', options: ['Defect was fixed', 'Defect fix postponed to a later release', 'Defect cannot be reproduced', 'Defect was rejected'], correct: 2 },
+  ];
+  const PRACTICAL_FALLBACK = [
+    { id: 'tc1', title: 'Login Page Test Cases', scenario: 'A login page has: Username field, Password field, Submit button, Remember Me checkbox, Forgot Password link.', req: 'Write 3 test cases covering: positive (valid login), negative (wrong password), and boundary (empty fields) scenarios.', minLength: 60, expectedKeywords: [] as string[] },
+    { id: 'tc2', title: 'Payment Form Test Cases', scenario: 'A payment form accepts: Card number (16 digits), Expiry (MM/YY), CVV (3 digits), Amount (>0), and Submit button.', req: 'Write 3 test cases covering: valid payment, invalid card number, and expired card scenarios.', minLength: 60, expectedKeywords: [] as string[] },
+  ];
+
+  const getBeginnerLists = () => {
+    const mcqAll = v7BankMCQs.length > 0
+      ? v7BankMCQs
+      : (v7DynamicQuestions.length > 0 ? v7DynamicQuestions : FUNCTIONAL_TESTING_INTERMEDIATE_QUESTIONS);
+    const mcqList = mcqAll.slice(0, 20);
+    const bankToolQs = v7BankToolIdQs.length > 0 ? v7BankToolIdQs.slice(0, 5) : null;
+    const toolMode: 'bank' | 'mcq' = bankToolQs ? 'bank' : 'mcq';
+    const toolList: any[] = bankToolQs || TOOLID_MCQ_FALLBACK;
+    const bankPractical = v7BankPracticalQs.length > 0 ? v7BankPracticalQs.slice(0, 2) : null;
+    const tcTasks: any[] = bankPractical
+      ? bankPractical.map((p: any) => ({ id: p.id, title: 'Practical Task', scenario: '', req: p.task, minLength: p.minLength || 50, expectedKeywords: p.expectedKeywords || [] }))
+      : PRACTICAL_FALLBACK;
+    return { mcqList, toolMode, toolList, tcTasks };
+  };
+
+  // Compute all three Beginner section scores from current answers. Idempotent —
+  // safe to call from the Submit button and from the timer auto-submit path.
+  // Scoring formulae are unchanged — only relocated from the old per-round buttons.
+  const finalizeBeginnerScores = () => {
+    const { mcqList, toolMode, toolList, tcTasks } = getBeginnerLists();
+
+    // MCQ (negative marking, identical to the old "Submit MCQ Round")
+    let correct = 0, wrong = 0;
+    mcqList.forEach((q: any) => { const ans = (v7McqAnswers as any)[q.id]; if (ans !== undefined) { if (ans === q.correct) correct++; else wrong++; } });
+    const mcqPct = mcqList.length ? Math.round((Math.max(0, correct - wrong * 0.5) / mcqList.length) * 100) : 0;
+
+    // Tool ID (bank = keyword diagnostic; fallback = MCQ)
+    let toolPct = 0;
+    if (toolMode === 'bank') {
+      toolPct = Math.round(toolList.reduce((sum: number, q: any) => {
+        const ans = toolIdTextAnswers[q.id] || '';
+        const kws = (q.keywords || []) as string[];
+        const found = kws.filter((k: string) => ans.toLowerCase().includes(k.toLowerCase())).length;
+        return sum + Math.min(100, (found / Math.max(kws.length * 0.5, 1)) * 100);
+      }, 0) / Math.max(toolList.length, 1));
+    } else {
+      let c = 0; toolList.forEach((q: any) => { if (toolIdAnswers[q.id] === q.correct) c++; });
+      toolPct = Math.round((c / Math.max(toolList.length, 1)) * 100);
+    }
+
+    // Practical (test-case writing)
+    const tcPct = Math.round(tcTasks.reduce((sum: number, t: any) => {
+      const a = testCaseAnswers[t.id] || '';
+      return sum + scoreTextAnswer(a, t.expectedKeywords || [], t.minLength ? Math.ceil(t.minLength / 5) : 30);
+    }, 0) / Math.max(tcTasks.length, 1));
+
+    setSectionScores(prev => ({ ...prev, mcq: mcqPct, toolId: Math.min(100, toolPct), testCaseWriting: Math.min(100, tcPct) }));
+  };
+
+  const submitBeginnerAssessment = () => {
+    if (!window.confirm('Are you sure you want to submit?')) return;
+    finalizeBeginnerScores();
+    setV7TimerActive(false);
+    setV7Step(8);
+  };
+
+  // ── Continuous INTERMEDIATE assessment: shared section builders + scoring ────
+  // One source of truth for the four logical sections (MCQ → Coding → Scenarios
+  // → Framework). Question content, scoring formulae and weights are unchanged —
+  // only relocated from the old per-step submit buttons.
+  const INTERMEDIATE_SCENARIO_FALLBACK = [
+    { id: 'is1', title: 'Slow Regression Suite', desc: 'Your regression suite takes 4 hours to run and the team wants it done in 45 minutes.', question: 'What would you do? Describe your approach to parallelization, test selection, and CI optimization.', minWords: 60 },
+    { id: 'is2', title: 'New Feature Automation Strategy', desc: 'A new payment flow feature has been added. You have limited time before the sprint closes.', question: 'How do you decide which tests to automate first? Describe your risk-based prioritization approach.', minWords: 60 },
+  ];
+
+  const getIntermediateLists = () => {
+    const mcqAll = v7BankMCQs.length > 0
+      ? v7BankMCQs
+      : (v7DynamicQuestions.length > 0 ? v7DynamicQuestions : FUNCTIONAL_TESTING_INTERMEDIATE_QUESTIONS);
+    const mcqList = mcqAll.slice(0, LEVEL_FORMAT.intermediate.mcq);
+    const codingProblem = v7BankCodingQs.length > 0 ? v7BankCodingQs[0] : null; // 1 coding node (matches current flow)
+    const scenarioList: any[] = v7BankScenarioQs.length > 0
+      ? v7BankScenarioQs.slice(0, LEVEL_FORMAT.intermediate.scenarios).map((s: any) => ({ id: s.id, title: 'Scenario', desc: '', question: s.question, minWords: s.minWords || 60, scoringKeywords: s.scoringKeywords || [] }))
+      : (v7DynamicScenarios.length > 0 ? v7DynamicScenarios.slice(0, 2) : INTERMEDIATE_SCENARIO_FALLBACK);
+    const frameworkQ = v7BankFrameworkQ; // single framework-design textarea
+    return { mcqList, codingProblem, scenarioList, frameworkQ };
+  };
+
+  const finalizeIntermediateScores = () => {
+    const { mcqList, codingProblem, scenarioList, frameworkQ } = getIntermediateLists();
+
+    // MCQ (15, negative marking — identical to old "Submit MCQ Round")
+    let correct = 0, wrong = 0;
+    mcqList.forEach((q: any) => { const ans = (v7McqAnswers as any)[q.id]; if (ans !== undefined) { if (ans === q.correct) correct++; else wrong++; } });
+    const mcqPct = mcqList.length ? Math.round((Math.max(0, correct - wrong * 0.5) / mcqList.length) * 100) : 0;
+
+    // Coding (bank → CodeEditor pass rate; fallback → textarea heuristic)
+    let codingPct = 0;
+    if (codingProblem) {
+      const { visiblePassed, totalVisible, hiddenPassed, totalHidden } = v7CodingResults;
+      codingPct = Math.round(((visiblePassed / Math.max(totalVisible, 1)) * 0.5 + (hiddenPassed / Math.max(totalHidden, 1)) * 0.5) * 100);
+    } else {
+      codingPct = Math.min(100, Math.round((codingAnswer.trim().length / 6) + (codingAnswer.includes('assert') || codingAnswer.includes('expect') ? 20 : 0) + (codingAnswer.includes('function') || codingAnswer.includes('def ') || codingAnswer.includes('void ') ? 15 : 0)));
+    }
+
+    // Scenarios (2)
+    const scenariosPct = Math.round(scenarioList.reduce((s: number, scn: any) => {
+      const a = v7ScenarioAnswers[scn.id] || '';
+      return s + scoreTextAnswer(a, scn.scoringKeywords || [], scn.minWords || 60);
+    }, 0) / Math.max(scenarioList.length, 1));
+
+    // Framework (1)
+    const fwMinWords = frameworkQ?.minWords || 80;
+    const frameworkPct = scoreTextAnswer(frameworkAnswer, frameworkQ?.scoringKeywords || [], fwMinWords);
+
+    setSectionScores(prev => ({
+      ...prev,
+      mcq: mcqPct,
+      coding: Math.min(100, codingPct),
+      scenarios: Math.min(100, scenariosPct),
+      frameworkDesign: Math.min(100, frameworkPct),
+    }));
+  };
+
+  const submitIntermediateAssessment = () => {
+    if (!window.confirm('Are you sure you want to submit?')) return;
+    finalizeIntermediateScores();
+    setV7TimerActive(false);
+    setV7Step(8);
+  };
+
+  // ── EXPERT (Enterprise Scenario Engine): aggregate auto-grade across every
+  // linked question of every scenario group. Capstone is optional evidence only.
+  const finalizeExpertScores = () => {
+    const mcqPct = v7ExpertAssessment ? scoreExpertAssessment(v7ExpertAssessment, v7ExpertAnswers).final : 0;
+    setSectionScores(prev => ({ ...prev, mcq: mcqPct }));
+  };
+
+  const submitExpertAssessment = () => {
+    if (!window.confirm('Are you sure you want to submit?')) return;
+    finalizeExpertScores();
+    setV7TimerActive(false);
+    setV7Step(8);
   };
 
   const resetRoundState = () => {
@@ -857,7 +1091,6 @@ export default function ZenAssessPage() {
     setTestCaseAnswers({}); setV7CurrentTestCaseIdx(0);
     setCodingAnswer(''); setFrameworkAnswer('');
     setExpertScenarioAnswers({}); setV7CurrentExpertScenarioIdx(0);
-    setCapstoneUrl(''); setCapstoneNotes('');
     setMentoringAnswers({}); setExperienceAnswers({});
     setV7BankMCQs([]); setV7BankToolIdQs([]); setV7BankPracticalQs([]);
     setV7BankCodingQs([]); setV7BankScenarioQs([]); setV7BankFrameworkQ(null);
@@ -865,40 +1098,85 @@ export default function ZenAssessPage() {
     setToolIdTextAnswers({}); setV7CodingResults({ visiblePassed: 0, totalVisible: 0, hiddenPassed: 0, totalHidden: 0 });
     setV7ScenarioAnswers({ s1: '', s2: '', s3: '' }); setV7CurrentScenarioIdx(0);
     setV7CurrentPracticalIdx(0); setV7PracticalAnswers({ t1: '', t2: '' });
+    setV7FlatIdx(0); setV7Visited({}); setV7ScenarioPos({});
+    setV7ExpertAssessment(null); setV7ExpertAnswers({});
     setV7ResultsProcessing(false);
   };
 
   // ── Load questions for a single skill at a given level ───────────────────────
-  const loadQuestionsForSkillLevel = async (skillName: string, level: 'Beginner' | 'Intermediate' | 'Expert') => {
+  // opts.shortlistN > 0 → reroute mode (CHANGE 5): serve only a fixed-N core MCQ
+  //                       subset (top-N by difficulty), skipping the other sections.
+  const loadQuestionsForSkillLevel = async (
+    skillName: string,
+    level: 'Beginner' | 'Intermediate' | 'Expert',
+    opts?: { shortlistN?: number },
+  ) => {
     setV7QuestionsLoading(true);
     setV7QuestionsError('');
 
+    const shortlistN = opts?.shortlistN ?? 0;
+
     // Priority 1: pre-defined question bank
     const lowerLevel = level.toLowerCase() as 'beginner' | 'intermediate' | 'expert';
+
+    // ── EXPERT: Enterprise Scenario Engine. Generates (and caches/reuses) skill
+    // scenario groups — a scenario read once + 3–7 linked, objectively-gradable
+    // questions of mixed primitive types. Capstone is rendered last. ──────────────
+    if (lowerLevel === 'expert') {
+      const assessment = getExpertAssessment(skillName);
+      setV7ExpertAssessment(assessment);
+      setV7ExpertAnswers({});
+      setV7BankMCQs([]); setV7DynamicQuestions([]);
+      setV7McqAnswers({}); setV7FlaggedQuestions({}); setV7CurrentMcqIdx(0);
+      setV7FlatIdx(0); setV7Visited({}); setV7ScenarioPos({});
+      setV7QuestionsLoading(false);
+      return;
+    }
+
     const bankData = getQuestionBank(skillName, lowerLevel) as any;
     if (bankData) {
+      // ── CHANGE 5: rerouted candidates sit only the shortlisted core subset ──
+      if (shortlistN > 0) {
+        const core = getRerouteShortlist(skillName, lowerLevel, shortlistN);
+        const shuffled = shuffleMCQs(core).map((q: any) => ({ ...q, correct: correctLetterToIndex(q.correct) + 1 }));
+        setV7BankMCQs(shuffled);
+        // No secondary sections in a reroute shortlist
+        setV7BankToolIdQs([]); setV7BankPracticalQs([]);
+        setV7BankCodingQs([]); setV7BankFrameworkQ(null);
+        // Expert is handled by the early-return above (getExpertAssessment), so a
+        // reroute shortlist here is only ever beginner/intermediate — no scenarios.
+        setV7BankScenarioQs([]);
+        setV7BankMentoringQs([]); setV7BankQuestionnaireQs([]);
+        setV7McqAnswers({}); setV7FlaggedQuestions({}); setV7CurrentMcqIdx(0);
+        setV7CurrentScenarioIdx(0); setV7CurrentPracticalIdx(0);
+        setV7QuestionsLoading(false);
+        return;
+      }
       if (lowerLevel === 'beginner') {
-        const shuffled = shuffleMCQs(bankData.mcq || []).map((q: any) => ({
+        // CHANGE 3: enforce level-format counts (MCQ 20 · ToolID 5 · Practical 2)
+        const shuffled = shuffleMCQs(bankData.mcq || []).slice(0, LEVEL_FORMAT.beginner.mcq).map((q: any) => ({
           ...q,
           correct: correctLetterToIndex(q.correct) + 1,
         }));
         setV7BankMCQs(shuffled);
-        setV7BankToolIdQs(bankData.toolId || []);
-        setV7BankPracticalQs(bankData.practical || []);
+        setV7BankToolIdQs((bankData.toolId || []).slice(0, LEVEL_FORMAT.beginner.toolId));
+        setV7BankPracticalQs((bankData.practical || []).slice(0, LEVEL_FORMAT.beginner.practical));
       } else if (lowerLevel === 'intermediate') {
-        const shuffled = shuffleMCQs(bankData.mcq || []).map((q: any) => ({
+        // CHANGE 3: MCQ 15 · Coding 2 · Scenarios 2 · Framework 1
+        const shuffled = shuffleMCQs(bankData.mcq || []).slice(0, LEVEL_FORMAT.intermediate.mcq).map((q: any) => ({
           ...q,
           correct: correctLetterToIndex(q.correct) + 1,
         }));
         setV7BankMCQs(shuffled);
-        setV7BankCodingQs(bankData.coding || []);
-        setV7BankScenarioQs(bankData.scenarios || []);
+        setV7BankCodingQs((bankData.coding || []).slice(0, LEVEL_FORMAT.intermediate.coding));
+        setV7BankScenarioQs((bankData.scenarios || []).slice(0, LEVEL_FORMAT.intermediate.scenarios));
         setV7BankFrameworkQ((bankData.framework || [])[0] || null);
       } else {
+        // Expert is fully handled by the dedicated branch above; this is unreached.
         setV7BankMCQs([]);
-        setV7BankScenarioQs(bankData.scenarios || []);
-        setV7BankMentoringQs(bankData.mentoring || []);
-        setV7BankQuestionnaireQs(bankData.questionnaire || []);
+        setV7BankScenarioQs((bankData.scenarios || []).slice(0, LEVEL_FORMAT.expert.scenarios));
+        setV7BankMentoringQs((bankData.mentoring || []).slice(0, LEVEL_FORMAT.expert.mentoring));
+        setV7BankQuestionnaireQs((bankData.questionnaire || []).slice(0, LEVEL_FORMAT.expert.questionnaire));
       }
       setV7McqAnswers({}); setV7FlaggedQuestions({}); setV7CurrentMcqIdx(0);
       setV7CurrentScenarioIdx(0); setV7CurrentPracticalIdx(0);
@@ -933,14 +1211,25 @@ export default function ZenAssessPage() {
     }
   };
 
-  // Begin (or resume after a silent drop) the test for one skill at a given level
-  const startSkillTest = (level: 'Beginner' | 'Intermediate' | 'Expert', skillName: string) => {
+  // Begin (or resume after a silent drop / promotion) the test for one skill.
+  // opts.shortlistN > 0 → reroute mode: serve only the shortlisted core subset.
+  const startSkillTest = (
+    level: 'Beginner' | 'Intermediate' | 'Expert',
+    skillName: string,
+    opts?: { shortlistN?: number },
+  ) => {
     resetRoundState();
     setAssessmentPath(level);
+    // Adaptive progression bookkeeping: a positive shortlistN means this is an
+    // adaptive shortlist (one-level drop-up/down); otherwise it is the candidate's
+    // original assigned assessment, which fixes the session's starting level.
+    const isShortlist = (opts?.shortlistN ?? 0) > 0;
+    setV7IsShortlist(isShortlist);
+    if (!isShortlist) setV7SessionStartLevel(level);
     const mins = level === 'Beginner' ? 30 : 60;
     setV7Timer(mins * 60);
     setV7TimerActive(true);
-    loadQuestionsForSkillLevel(skillName, level);
+    loadQuestionsForSkillLevel(skillName, level, opts);
     setV7Step(4);
   };
 
@@ -951,45 +1240,88 @@ export default function ZenAssessPage() {
     markSkillInProgress(getActiveSkillName(), false); // Clear in-progress status
   };
 
-  // Decide pass / silent-drop / not-validated for the skill that just finished
+  // ── ADAPTIVE TEST PROGRESSION (post-assessment only) ────────────────────────
+  // Runs AFTER the candidate has finished the assessment they were already routed
+  // into. It never decides which assessment they START with — that remains the
+  // existing level-assignment logic. It only decides what happens next:
+  //
+  //   Validation Matrix
+  //   ┌──────────────┬───────┬───────────────────────────┬──────────┬─────────────────────────┐
+  //   │ Level        │ <50%  │ 50–69%                    │ 70–89%   │ ≥90%                    │
+  //   ├──────────────┼───────┼───────────────────────────┼──────────┼─────────────────────────┤
+  //   │ Beginner     │ Fail  │ Beginner                  │ Beginner │ Drop Up → Intermediate  │
+  //   │ Intermediate │ Fail  │ Intermediate              │ Interm.  │ Drop Up → Expert        │
+  //   │ Expert       │ Fail  │ Drop Down → Intermediate  │ Expert   │ Expert                  │
+  //   └──────────────┴───────┴───────────────────────────┴──────────┴─────────────────────────┘
+  //
+  // A drop-up / drop-down re-enters the SAME session on a 10-question shortlist.
+  // A shortlist can only authenticate (≥50%) or fail (<50%) — it never moves
+  // again, so adaptive movement is capped at exactly one level per session.
   const evaluateSkillTestOutcome = () => {
-    const score = computeOverallScoreForLevel(assessmentPath, sectionScores);
+    const level = assessmentPath;          // the assessment that just finished
+    const isShortlist = v7IsShortlist;     // is this an adaptive shortlist?
     const skillName = getActiveSkillName();
     const label = getActiveSkillLabel();
+    const startLevel = v7SessionStartLevel;
+    const rank: Record<string, number> = { Beginner: 1, Intermediate: 2, Expert: 3 };
+
+    // Score for the adaptive decision. The full assessment uses its weighted
+    // section formula; an MCQ-only shortlist (Beginner/Intermediate) is judged on
+    // its raw question score so the 10-question subset is scored on its own merit.
+    // (Expert is already a single raw scenario-engine percentage.)
+    const score = (isShortlist && level !== 'Expert')
+      ? Math.round(sectionScores.mcq ?? 0)
+      : computeOverallScoreForLevel(level, sectionScores);
+
     const priorDrops = silentDropLog[skillName] || [];
 
-    const tierResult = determineTierResult(assessmentPath, score);
+    // Record a FINAL outcome and advance to the per-skill result page.
+    const finalize = (action: 'pass' | 'dropup' | 'fail', validatedLevel: string, badgeAwarded: boolean) => {
+      const tail = action === 'fail'
+        ? `Failed:${level}`
+        : `${action === 'dropup' ? 'Authenticated' : 'Passed'}:${validatedLevel}`;
+      const silentPath = [...priorDrops, tail].join('→');
+      setSkillResults(prev => [...prev, {
+        skill: skillName, label, validatedLevel, badgeAwarded,
+        silentDropPath: silentPath, v7Action: action, finalScore: score,
+      }]);
+      advanceToNextSkillOrFinish();
+    };
 
-    // Silent dropdown — continue same session at lower level, no screen change
-    if (tierResult.action === 'dropdown' && tierResult.nextTestLevel) {
-      setSilentDropLog(prev => ({ ...prev, [skillName]: [...(prev[skillName] || []), assessmentPath] }));
-      startSkillTest(tierResult.nextTestLevel as 'Beginner' | 'Intermediate' | 'Expert', skillName);
+    // Re-enter the session on an adaptive shortlist at the target level.
+    const moveToShortlist = (target: 'Beginner' | 'Intermediate' | 'Expert', kind: 'Promoted' | 'Dropped') => {
+      setSilentDropLog(prev => ({ ...prev, [skillName]: [...(prev[skillName] || []), `${kind}:${startLevel}→${target}`] }));
+      startSkillTest(target, skillName, { shortlistN: REROUTE_SHORTLIST_SIZE });
+    };
+
+    // ── Universal fail rule (applies to every level AND every shortlist) ──
+    if (score < 50) {
+      finalize('fail', 'Not Validated', false);
       return;
     }
 
-    // Build the silent drop path string for DB logging
-    const allDrops = [...priorDrops];
-    let silentPath: string;
-    if (tierResult.action === 'dropup') {
-      silentPath = allDrops.length
-        ? [...allDrops, `DroppedUp:${tierResult.validatedLevel}`].join('→')
-        : `DroppedUp:${assessmentPath}→${tierResult.validatedLevel}`;
-    } else if (tierResult.action === 'dropdown') {
-      silentPath = [...allDrops, assessmentPath, 'NotValidated'].join('→');
-    } else {
-      silentPath = allDrops.length ? [...allDrops, `Passed:${tierResult.validatedLevel}`].join('→') : `Passed:${tierResult.validatedLevel}`;
+    // ── Shortlist: session ends here — authenticate at the shortlist's level.
+    // No further movement (enforces "max one adaptive movement per session").
+    if (isShortlist) {
+      const promoted = rank[level] > rank[startLevel];
+      finalize(promoted ? 'dropup' : 'pass', level, true);
+      return;
     }
 
-    setSkillResults(prev => [...prev, {
-      skill: skillName,
-      label,
-      validatedLevel: tierResult.validatedLevel,
-      badgeAwarded: tierResult.badgeLevel !== null,
-      silentDropPath: silentPath,
-      v7Action: tierResult.action,
-      finalScore: score,
-    }]);
-    advanceToNextSkillOrFinish();
+    // ── Initial assessment: apply the adaptive matrix for the routed level. ──
+    if (level === 'Beginner') {
+      if (score >= 90) { moveToShortlist('Intermediate', 'Promoted'); return; }   // Drop Up
+      finalize('pass', 'Beginner', true);                                          // 50–89 → Beginner
+      return;
+    }
+    if (level === 'Intermediate') {
+      if (score >= 90) { moveToShortlist('Expert', 'Promoted'); return; }          // Drop Up
+      finalize('pass', 'Intermediate', true);                                      // 50–89 → Intermediate
+      return;
+    }
+    // Expert
+    if (score >= 70) { finalize('pass', 'Expert', true); return; }                 // 70+ → Expert
+    moveToShortlist('Intermediate', 'Dropped');                                    // 50–69 → Drop Down
   };
 
   // ── Begin the 3-skill sequential queue (Primary → Secondary → Tertiary) ──────
@@ -1034,12 +1366,15 @@ export default function ZenAssessPage() {
         designation: liveEmployee?.designation || v7ExtractedData?.designation,
         department: liveEmployee?.department || v7ExtractedData?.department,
       };
-      const freshTaxonomy = computeSkillTaxonomy(taxonomyInput);
-      setV7Taxonomy(freshTaxonomy);
-      setV7SelectedSkill(freshTaxonomy.primary.skill);
+      // CHANGE 2: re-check also routes through the family + grade + depth flow.
+      const flow = computeAssessmentFlow(taxonomyInput, v7Grade);
+      setV7Taxonomy(flow.taxonomy);
+      setV7Flow(flow);
+      setV7FlowPath(flow.path);
+      setV7SelectedSkill(flow.taxonomy.primary.skill);
       setV7AttemptNumber((v7History?.length || 0) + 1);
       setV7CompletionSaved(false);
-      beginAssessmentQueue(freshTaxonomy, v7BaseLevel);
+      beginAssessmentQueue(flow.taxonomy, flow.path);
     } catch {
       toast.error('Could not load your current skill matrix. Please try again.');
     } finally {
@@ -2654,9 +2989,12 @@ export default function ZenAssessPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [v7CurrentMcqIdx, proctoringActive]);
 
-  // Finalize proctoring when a skill test reaches its per-skill result page.
+  // Finalize proctoring the moment the test is submitted (step 8 = "Skill Test
+  // Submitted"). This stops the camera stream and exits fullscreen immediately on
+  // submission rather than waiting for the result page, so the candidate isn't
+  // left in fullscreen with the webcam running after they're done.
   useEffect(() => {
-    if (v7Step === 9 && proctoringActive && proctorEngineRef.current) {
+    if (v7Step >= 8 && proctoringActive && proctorEngineRef.current) {
       const engine = proctorEngineRef.current;
       const report = engine.generateReport();
       setIntegrityReport(report);
@@ -2689,7 +3027,7 @@ export default function ZenAssessPage() {
           onCancel={handlePermissionCancel}
         />
       )}
-      {proctoringActive && v7Step >= 4 && v7Step <= 8 && (
+      {proctoringActive && v7Step >= 4 && v7Step <= 7 && (
         <ProctorCameraView
           stream={cameraStream}
           flags={liveFlags}
@@ -2702,7 +3040,9 @@ export default function ZenAssessPage() {
         />
       )}
       {/* ─── V7 COMPLETE CANDIDATE JOURNEY FLOW ─── */}
-      <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Continuous assessment uses a wider canvas (two-column, HackerRank-style);
+          every other step keeps the original centered 860px reading width. */}
+      <div style={{ maxWidth: (v7Step === 4) ? 1180 : 860, margin: '0 auto', padding: (v7Step >= 4 && v7Step <= 8) ? '12px 20px 24px' : '24px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: 20 }}>
 
           {v7ValidationError ? (
             <div style={{ background: T.card, border: `2px solid #EF4444`, borderRadius: 24, padding: 32, display: 'flex', flexDirection: 'column', gap: 24, textAlign: 'center', alignItems: 'center' }} className="fadeIn">
@@ -2728,19 +3068,6 @@ export default function ZenAssessPage() {
             </div>
           ) : (
             <>
-              {/* Progress bar — shown only during actual test (step 4+) */}
-              {v7Step >= 4 && (
-                <div style={{ display: 'flex', gap: 4, overflowX: 'auto', paddingBottom: 8 }}>
-                  {Array.from({ length: 7 }, (_, i) => i + 4).map(s => {
-                    const isActive = v7Step === s;
-                    const isPast = v7Step > s;
-                    return (
-                      <div key={s} style={{ flex: 1, height: 5, borderRadius: 3, background: isActive ? '#3B82F6' : isPast ? '#10B981' : dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)', minWidth: 20, transition: 'background 0.3s' }} />
-                    );
-                  })}
-                </div>
-              )}
-
           {/* ─── NEW PRE-ASSESSMENT PAGE ─── */}
           {v7Step <= 3 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} className="fadeIn">
@@ -2815,16 +3142,17 @@ export default function ZenAssessPage() {
                     { skill: v7Taxonomy.tertiary.skill, label: 'TERTIARY SKILL', color: '#10B981' }
                   ].map((sk, idx) => {
                     const badge = v7SkillBadges[sk.skill];
-                    const selfLevel = v7SelfClaimedLevels[sk.skill] || 'Beginner';
+                    // CHANGE 2: assigned level = grade × family × depth path (not self_claimed).
+                    const assignedLevel = v7FlowPath;
                     const inProgress = v7InProgressSkills[sk.skill];
-                    
+
                     // Determine state
                     let state = 1; // Never tested
                     if (inProgress) state = 4; // Test started
                     else if (badge) {
                       const badgeNum = badge === 'Expert' ? 3 : badge === 'Intermediate' ? 2 : 1;
-                      const selfNum = selfLevel === 'Expert' ? 3 : selfLevel === 'Intermediate' ? 2 : 1;
-                      state = selfNum > badgeNum ? 3 : 2;
+                      const assignedNum = assignedLevel === 'Expert' ? 3 : assignedLevel === 'Intermediate' ? 2 : 1;
+                      state = assignedNum > badgeNum ? 3 : 2;
                     }
 
                     return (
@@ -2833,7 +3161,7 @@ export default function ZenAssessPage() {
                         <h4 style={{ margin: '0 0 12px 0', fontSize: 18, fontWeight: 900, color: T.text }}>{sk.skill}</h4>
                         
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                           <span style={{ fontSize: 12, fontWeight: 700, color: PATH_COLOR[selfLevel] }}>{selfLevel} Path</span>
+                           <span style={{ fontSize: 12, fontWeight: 700, color: PATH_COLOR[assignedLevel] }}>{assignedLevel} Path</span>
                         </div>
 
                         <div style={{ marginTop: 'auto' }}>
@@ -2848,8 +3176,7 @@ export default function ZenAssessPage() {
 
                           <button
                             onClick={async () => {
-                              const startLevel = (selfLevel === 'Expert' || selfLevel === 'Advanced') ? 'Expert' :
-                                                 (selfLevel === 'Intermediate') ? 'Intermediate' : 'Beginner';
+                              const startLevel = assignedLevel;
 
                               // Cooldown Check
                               if (badge || state === 4) {
@@ -2893,9 +3220,8 @@ export default function ZenAssessPage() {
                     { skill: v7Taxonomy.secondary.skill, label: 'Secondary' },
                     { skill: v7Taxonomy.tertiary.skill, label: 'Tertiary' }
                   ].map((sk, idx) => {
-                    const selfLevel = v7SelfClaimedLevels[sk.skill] || 'Beginner';
-                    const startLevel = (selfLevel === 'Expert' || selfLevel === 'Advanced') ? 'Expert' :
-                                       (selfLevel === 'Intermediate') ? 'Intermediate' : 'Beginner';
+                    // CHANGE 2: same grade × family × depth path for all top-3 skills.
+                    const startLevel = v7FlowPath;
 
                     return (
                       <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderRadius: 12, border: `1px solid ${T.bdr}` }}>
@@ -2908,7 +3234,7 @@ export default function ZenAssessPage() {
                           <div style={{ fontSize: 12, color: T.sub }}>
                             {startLevel === 'Beginner' && '20 MCQ → 5 Tool ID → 2 Practical'}
                             {startLevel === 'Intermediate' && '15 MCQ → 1 Coding → 2 Scenarios → 1 Framework'}
-                            {startLevel === 'Expert' && '5 Scenarios → 1 Capstone → 3 Mentoring → 6 Questionnaire'}
+                            {startLevel === 'Expert' && '4 Scenarios → Mentoring → Experience → Capstone (separate, 2-week deliverable)'}
                           </div>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
@@ -2938,63 +3264,578 @@ export default function ZenAssessPage() {
 
           {/* STEP 5: LIVE PROGRESS TRACKER (MCQ) */}
           {v7Step === 4 && (() => {
-            // Expert path shows complex scenarios instead of MCQ in step 4
+            // ── EXPERT: Enterprise Scenario Engine — scenario read once + linked,
+            // objectively-gradable questions (single/multi/ordering/match/matrix) + Capstone last. ──
             if (assessmentPath === 'Expert') {
-              const expertScenarioList = v7BankScenarioQs.length > 0
-                ? v7BankScenarioQs.slice(0, 5).map((s: any) => ({ id: s.id, title: 'Expert Scenario', scenario: '', question: s.question }))
-                : [
-                  { id: 'es1', title: 'Transaction Platform Performance', scenario: 'Your client handles 2 million transactions per day. They want to add a new payment gateway in 3 weeks.', question: 'How do you approach performance testing for this release? What tools, risks, and mitigation strategies would you use?' },
-                  { id: 'es2', title: 'Flaky Automation Suite Recovery', scenario: 'You joined a project with 800 automation tests but 40% are flaky. The team has lost confidence in the suite.', question: 'What do you do in the first 30 days? How do you prioritize, stabilize, and rebuild trust in the automation suite?' },
-                  { id: 'es3', title: 'Multi-Client Test Coverage', scenario: 'Your team of 5 engineers is delivering for 3 clients simultaneously with different quality standards.', question: 'How do you manage test coverage without dropping quality on any account? Describe your governance approach.' },
-                  { id: 'es4', title: 'AI Test Generation Governance', scenario: 'The business wants to introduce AI-generated test cases across the QE practice.', question: 'How do you evaluate, pilot, and govern this? What risks would you highlight and what guardrails would you put in place?' },
-                  { id: 'es5', title: 'Junior Engineer Coaching', scenario: 'A junior team member consistently writes brittle tests that slow down the pipeline.', question: 'How do you address this without demotivating them? Describe your mentoring and technical intervention approach.' },
-                ];
-              const curSc = expertScenarioList[v7CurrentExpertScenarioIdx] || expertScenarioList[0];
-              const answer = expertScenarioAnswers[curSc.id] || '';
-              const wordCount = answer.trim() ? answer.trim().split(/\s+/).filter(Boolean).length : 0;
+              const assessment = v7ExpertAssessment;
               const mins = Math.floor(v7Timer / 60);
               const secs = v7Timer % 60;
+              const timerText = `${mins}:${secs < 10 ? '0' + secs : secs}`;
               const timerColor = v7Timer > 600 ? '#10B981' : v7Timer >= 300 ? '#F59E0B' : '#EF4444';
+
+              if (!assessment) {
+                return <div style={{ padding: 40, color: T.text, textAlign: 'center' }} className="fadeIn">Preparing your enterprise scenario assessment…</div>;
+              }
+              const { flat, groups: navGroups } = flattenAssessment(assessment);
+              const total = flat.length;
+              if (total === 0) {
+                return <div style={{ padding: 40, color: T.text, textAlign: 'center' }} className="fadeIn">Preparing your enterprise scenario assessment…</div>;
+              }
+
+              const flatIdx = Math.min(v7FlatIdx, total - 1);
+              const entry = flat[flatIdx];
+              const cq: any = entry.question;
+              const setExpertAns = (val: any) => setV7ExpertAnswers(prev => ({ ...prev, [cq.id]: val }));
+              const curWeight = Math.round((assessment.sections.find(s => s.key === entry.sectionKey)?.weight ?? 0) * 100);
+              const isLight = entry.group.kind === 'mentoring' || entry.group.kind === 'experience';
+
+              const isAnsweredQ = (gi: number): boolean => {
+                const qq: any = flat[gi].question;
+                const a = v7ExpertAnswers[qq.id];
+                if (qq.type === 'multi') return Array.isArray(a) && a.length > 0;
+                if (qq.type === 'ordering') return Array.isArray(a);
+                if (qq.type === 'match') return a && Object.keys(a).length > 0;
+                return typeof a === 'number';
+              };
+              const statusFor = (gi: number): QuestionStatus => {
+                if (gi === flatIdx) return 'current';
+                if (v7FlaggedQuestions[`e${gi}`]) return 'marked';
+                if (isAnsweredQ(gi)) return 'answered';
+                if (v7Visited[gi]) return 'visited';
+                return 'unvisited';
+              };
+              const sectionShort = (key: string) => key === 'mentoring' ? 'Mentoring' : key === 'experience' ? 'Experience' : 'Capstone';
+              const scenarioNavGroups = navGroups.filter(bg => bg.sectionKey === 'scenario');
+              const otherNavGroups = navGroups.filter(bg => bg.sectionKey !== 'scenario');
+              // Right-sidebar "Scenario · N" block navigates BETWEEN scenarios — one
+              // number per scenario (Scenario 1, 2, 3, …), NOT per sub-question. The
+              // sub-questions are driven by the left-side Scenario Workflow stepper.
+              // Clicking a scenario reopens it on the sub-question last viewed there.
+              const scenarioItemStatus = (bg: typeof scenarioNavGroups[number]): QuestionStatus => {
+                const idxs = bg.group.questions.map((_: any, qi: number) => bg.startIdx + qi);
+                if (idxs.includes(flatIdx)) return 'current';
+                if (idxs.some(gi => v7FlaggedQuestions[`e${gi}`])) return 'marked';
+                if (idxs.every(gi => isAnsweredQ(gi))) return 'answered';
+                if (idxs.some(gi => v7Visited[gi])) return 'visited';
+                return 'unvisited';
+              };
+              const sidebarSections: SidebarSection[] = [];
+              if (scenarioNavGroups.length) {
+                sidebarSections.push({
+                  key: 'scenario',
+                  label: `Scenario · ${scenarioNavGroups.length}`,
+                  items: scenarioNavGroups.map(bg => {
+                    const resume = Math.min(v7ScenarioPos[bg.group.id] ?? 0, bg.group.questions.length - 1);
+                    return { num: bg.scenarioNumInSection, globalIdx: bg.startIdx + resume, status: scenarioItemStatus(bg) };
+                  }),
+                });
+              }
+              otherNavGroups.forEach(bg => {
+                sidebarSections.push({
+                  key: bg.group.id,
+                  label: `${sectionShort(bg.sectionKey)} · ${bg.group.questions.length}`,
+                  items: bg.group.questions.map((_: any, qi: number) => ({ num: qi + 1, globalIdx: bg.startIdx + qi, status: statusFor(bg.startIdx + qi) })),
+                });
+              });
+              const flagged = v7FlaggedQuestions[`e${flatIdx}`] === true;
+              const typeLabel: Record<string, string> = { single: 'Single Best', multi: 'Multi-Select', ordering: 'Priority / Sequence', match: 'Match the Following', matrix: 'Decision Matrix' };
+
+              // Scenario-Based redesign: persistent scenario card + 2×2 competency
+              // progress grid (only this section is redesigned).
+              const isScenario = entry.sectionKey === 'scenario';
+              const curGroupNav = navGroups.find(bg => bg.group.id === entry.group.id)!;
+              const cardStatus = (gi: number): 'current' | 'completed' | 'skipped' | 'notstarted' => {
+                if (gi === flatIdx) return 'current';
+                if (isAnsweredQ(gi)) return 'completed';
+                if (v7Visited[gi]) return 'skipped';
+                return 'notstarted';
+              };
+              const CARD_COLOR: Record<string, string> = { current: '#8B5CF6', completed: '#10B981', skipped: '#EF4444', notstarted: dark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)' };
+              const CARD_DOT: Record<string, string> = { current: '🟣', completed: '🟢', skipped: '🔴', notstarted: '⚪' };
+
               return (
-                <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, display: 'flex', flexDirection: 'column', gap: 20 }} className="fadeIn">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${T.bdr}`, paddingBottom: 12 }}>
-                    <div>
-                      <strong style={{ fontSize: 12, color: '#8B5CF6', textTransform: 'uppercase' }}>Complex Scenarios — Expert Path</strong>
-                      <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Scenario {v7CurrentExpertScenarioIdx + 1} of {expertScenarioList.length}</h3>
+                <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }} className="fadeIn assess-continuous">
+                  <div style={{ flex: 1, minWidth: 0, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, display: 'flex', flexDirection: 'column', gap: 18, minHeight: 480 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${T.bdr}`, paddingBottom: 12 }}>
+                      <div>
+                        <strong style={{ fontSize: 12, color: '#8B5CF6', textTransform: 'uppercase' }}>{entry.sectionTitle} · {curWeight}% — {v7SelectedSkill || getActiveSkillName()}</strong>
+                        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>{entry.group.title} · Q{entry.qIdx + 1} of {entry.group.questions.length}</h3>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: timerColor, fontWeight: 800, fontSize: 14 }}><Clock size={16} /> {timerText} remaining</div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: timerColor, fontWeight: 800, fontSize: 14 }}>
-                      <Clock size={16} /> {mins}:{secs < 10 ? '0' + secs : secs} remaining
+
+                    {isScenario ? (
+                      <>
+                        <style>{`.zen-stepper-wrap{overflow-x:auto;padding-bottom:4px}.zen-stepper{display:flex;align-items:flex-start;min-width:520px}.zen-step-node{transition:background-color .25s ease,border-color .25s ease,color .25s ease}.zen-step-conn{transition:background-color .3s ease}`}</style>
+
+                        {/* Persistent Scenario Card — NEVER changes while answering sub-questions */}
+                        <div style={{ padding: 18, borderRadius: 14, background: dark ? 'rgba(139,92,246,0.06)' : 'rgba(139,92,246,0.04)', border: '1px solid rgba(139,92,246,0.25)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 800, color: '#8B5CF6', textTransform: 'uppercase' }}>Scenario {curGroupNav.scenarioNumInSection}</div>
+                            <h4 style={{ margin: '2px 0 0', fontSize: 15, fontWeight: 900, color: T.text }}>{entry.group.title}</h4>
+                          </div>
+                          <div style={{ height: 1, background: T.bdr, margin: '4px 0' }} />
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Business Context:</strong> {entry.group.context.businessContext}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Environment:</strong> {entry.group.context.currentEnvironment}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Constraints:</strong> {entry.group.context.constraints}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Objective:</strong> {entry.group.context.objectives}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Success Criteria:</strong> {entry.group.context.successCriteria}</div>
+                          </div>
+                        </div>
+
+                        {/* Horizontal workflow stepper — the sequential stages of this scenario */}
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Scenario Workflow</div>
+                          <div className="zen-stepper-wrap">
+                            <div className="zen-stepper" role="list" aria-label="Scenario workflow stages">
+                              {curGroupNav.group.questions.map((qq: any, qi: number) => {
+                                const gi = curGroupNav.startIdx + qi;
+                                const st = cardStatus(gi);
+                                const color = CARD_COLOR[st];
+                                const filled = st !== 'notstarted';
+                                const statusLabel = st === 'current' ? 'Current' : st === 'completed' ? 'Completed' : st === 'skipped' ? 'Skipped' : 'Pending';
+                                const prevCompleted = qi > 0 && cardStatus(curGroupNav.startIdx + qi - 1) === 'completed';
+                                const isLast = qi === curGroupNav.group.questions.length - 1;
+                                const connGray = dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.12)';
+                                return (
+                                  <div key={qi} role="listitem" aria-label={`Step ${qi + 1} of ${curGroupNav.group.questions.length} — ${qq.competency} — ${statusLabel}`} style={{ flex: 1, minWidth: 110, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+                                      <div className="zen-step-conn" style={{ flex: 1, height: 3, borderRadius: 2, background: qi === 0 ? 'transparent' : (prevCompleted ? '#10B981' : connGray) }} />
+                                      <button type="button" onClick={() => setV7FlatIdx(gi)} aria-current={st === 'current' ? 'step' : undefined} title={`Step ${qi + 1}: ${qq.competency} — ${statusLabel}`} className="zen-step-node" style={{ width: 34, height: 34, flexShrink: 0, borderRadius: '50%', border: `2px solid ${st === 'notstarted' ? connGray : color}`, background: filled ? color : 'transparent', color: filled ? '#fff' : T.sub, fontWeight: 900, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                        {st === 'completed' ? '✓' : st === 'skipped' ? '!' : qi + 1}
+                                      </button>
+                                      <div className="zen-step-conn" style={{ flex: 1, height: 3, borderRadius: 2, background: isLast ? 'transparent' : (st === 'completed' ? '#10B981' : connGray) }} />
+                                    </div>
+                                    <div style={{ marginTop: 8, textAlign: 'center', padding: '0 4px' }}>
+                                      <div style={{ fontSize: 12, fontWeight: 800, color: st === 'notstarted' ? T.sub : color, lineHeight: 1.3 }}>{qq.competency}</div>
+                                      <div style={{ fontSize: 10, color: T.muted, textTransform: 'uppercase', fontWeight: 700, marginTop: 2 }}>{statusLabel}</div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: '#8B5CF6', background: 'rgba(139,92,246,0.12)', padding: '3px 8px', borderRadius: 6, textTransform: 'uppercase' }}>{cq.competency}</span>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: T.sub, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', padding: '3px 8px', borderRadius: 6, textTransform: 'uppercase' }}>{typeLabel[cq.type]}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        {/* Other sections — unchanged */}
+                        {isLight ? (
+                          <div style={{ padding: 12, borderRadius: 10, background: dark ? 'rgba(139,92,246,0.05)' : 'rgba(139,92,246,0.03)', border: '1px solid rgba(139,92,246,0.2)', fontSize: 12, color: T.sub, lineHeight: 1.55 }}>{entry.group.context.businessContext}</div>
+                        ) : (
+                          <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(139,92,246,0.05)' : 'rgba(139,92,246,0.03)', border: '1px solid rgba(139,92,246,0.2)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Business context:</strong> {entry.group.context.businessContext}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Environment:</strong> {entry.group.context.currentEnvironment}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Constraints:</strong> {entry.group.context.constraints}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Objectives:</strong> {entry.group.context.objectives}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Time / stakeholders:</strong> {entry.group.context.timeConstraints} {entry.group.context.stakeholders}</div>
+                            <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.55 }}><strong style={{ color: T.text }}>Success criteria:</strong> {entry.group.context.successCriteria}</div>
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: '#8B5CF6', background: 'rgba(139,92,246,0.12)', padding: '3px 8px', borderRadius: 6, textTransform: 'uppercase' }}>{cq.competency}</span>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: T.sub, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', padding: '3px 8px', borderRadius: 6, textTransform: 'uppercase' }}>{typeLabel[cq.type]}</span>
+                        </div>
+                      </>
+                    )}
+                    <div key={isScenario ? `q-${cq.id}` : 'qpanel'} className={isScenario ? 'fadeIn' : undefined} style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: T.text, lineHeight: 1.5 }}>{cq.prompt}</div>
+
+                    {/* SINGLE / MATRIX → single-select */}
+                    {(cq.type === 'single' || cq.type === 'matrix') && (
+                      <>
+                        {cq.type === 'matrix' && (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 2 }}>
+                            {cq.criteria.map((c: string, i: number) => <span key={i} style={{ fontSize: 11, color: T.sub, background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', padding: '3px 8px', borderRadius: 6 }}>⚖ {c}</span>)}
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {cq.options.map((opt: string, i: number) => {
+                            const selected = v7ExpertAnswers[cq.id] === i;
+                            return (
+                              <div key={i} onClick={() => setExpertAns(i)} style={{ padding: 14, borderRadius: 10, border: selected ? '2px solid #8B5CF6' : `1px solid ${T.bdr}`, background: selected ? 'rgba(139,92,246,0.06)' : T.card, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }} className="hover-card">
+                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: selected ? '5px solid #8B5CF6' : `1px solid ${T.bdr}`, background: '#fff', flexShrink: 0 }} />
+                                <span style={{ fontSize: 13, color: T.text }}>{opt}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+
+                    {/* MULTI → multi-select */}
+                    {cq.type === 'multi' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {cq.options.map((opt: string, i: number) => {
+                          const sel: number[] = Array.isArray(v7ExpertAnswers[cq.id]) ? v7ExpertAnswers[cq.id] : [];
+                          const checked = sel.includes(i);
+                          return (
+                            <div key={i} onClick={() => setExpertAns(checked ? sel.filter(x => x !== i) : [...sel, i])} style={{ padding: 14, borderRadius: 10, border: checked ? '2px solid #8B5CF6' : `1px solid ${T.bdr}`, background: checked ? 'rgba(139,92,246,0.06)' : T.card, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }} className="hover-card">
+                              <div style={{ width: 18, height: 18, borderRadius: 5, border: checked ? '2px solid #8B5CF6' : `1px solid ${T.bdr}`, background: checked ? '#8B5CF6' : '#fff', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 900 }}>{checked ? '✓' : ''}</div>
+                              <span style={{ fontSize: 13, color: T.text }}>{opt}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* ORDERING → reorder with ▲ ▼ */}
+                    {cq.type === 'ordering' && (() => {
+                      const order: number[] = Array.isArray(v7ExpertAnswers[cq.id]) ? v7ExpertAnswers[cq.id] : cq.items.map((_: any, i: number) => i);
+                      const move = (pos: number, dir: number) => {
+                        const np = pos + dir;
+                        if (np < 0 || np >= order.length) return;
+                        const next = [...order];
+                        [next[pos], next[np]] = [next[np], next[pos]];
+                        setExpertAns(next);
+                      };
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {order.map((itemIdx, pos) => (
+                            <div key={pos} style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.card, display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <span style={{ width: 22, height: 22, borderRadius: '50%', background: 'rgba(139,92,246,0.12)', color: '#8B5CF6', fontWeight: 900, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{pos + 1}</span>
+                              <span style={{ fontSize: 13, color: T.text, flex: 1 }}>{cq.items[itemIdx]}</span>
+                              <button onClick={() => move(pos, -1)} disabled={pos === 0} style={{ padding: '2px 8px', borderRadius: 6, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, cursor: 'pointer', opacity: pos === 0 ? 0.4 : 1 }}>▲</button>
+                              <button onClick={() => move(pos, 1)} disabled={pos === order.length - 1} style={{ padding: '2px 8px', borderRadius: 6, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, cursor: 'pointer', opacity: pos === order.length - 1 ? 0.4 : 1 }}>▼</button>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* MATCH → dropdown per left item */}
+                    {cq.type === 'match' && (() => {
+                      const mapping: Record<number, number> = v7ExpertAnswers[cq.id] || {};
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {cq.left.map((l: string, i: number) => (
+                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.card }}>
+                              <span style={{ fontSize: 13, color: T.text, flex: 1 }}>{l}</span>
+                              <span style={{ color: T.sub }}>→</span>
+                              <select value={mapping[i] ?? ''} onChange={e => setExpertAns({ ...mapping, [i]: Number(e.target.value) })} style={{ flex: 1, padding: '8px 10px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 12 }}>
+                                <option value="" disabled>Select…</option>
+                                {cq.right.map((r: string, j: number) => <option key={j} value={j}>{r}</option>)}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: `1px solid ${T.bdr}`, paddingTop: 16, marginTop: 'auto' }}>
+                      <button onClick={() => setV7FlatIdx(Math.max(0, flatIdx - 1))} disabled={flatIdx === 0} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: flatIdx === 0 ? 0.5 : 1 }}>Previous</button>
+                      <button onClick={() => setV7FlaggedQuestions(prev => ({ ...prev, [`e${flatIdx}`]: !prev[`e${flatIdx}`] }))} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #F59E0B55', background: flagged ? 'rgba(245,158,11,0.1)' : T.card, color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{flagged ? 'Marked ⚑' : 'Mark for Review ⚐'}</button>
+                      <button onClick={() => setV7FlatIdx(Math.min(total - 1, flatIdx + 1))} disabled={flatIdx === total - 1} style={{ padding: '8px 18px', borderRadius: 8, background: '#8B5CF6', color: '#fff', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer', opacity: flatIdx === total - 1 ? 0.5 : 1 }}>Next</button>
                     </div>
                   </div>
-                  <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(139,92,246,0.05)' : 'rgba(139,92,246,0.03)', border: '1px solid rgba(139,92,246,0.2)' }}>
-                    <strong style={{ fontSize: 13, color: T.text, display: 'block', marginBottom: 6 }}>{curSc.title}</strong>
-                    <p style={{ margin: '0 0 10px', fontSize: 12, color: T.sub, lineHeight: 1.5 }}>Situation: {curSc.scenario}</p>
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.4 }}>Question: {curSc.question}</p>
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <label style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase' }}>Your Answer (Min 100 words recommended)</label>
-                    <textarea
-                      value={answer}
-                      onChange={e => setExpertScenarioAnswers(prev => ({ ...prev, [curSc.id]: e.target.value }))}
-                      placeholder="Provide a structured, detailed response showing your strategic thinking..."
-                      style={{ width: '100%', height: 200, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }}
-                    />
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: T.muted }}>
-                      <span>Word count: <strong>{wordCount}</strong></span>
-                      <span style={{ color: wordCount >= 100 ? '#10B981' : '#F59E0B' }}>{wordCount >= 100 ? 'Good ✓' : 'Add more detail'}</span>
+
+                  <AssessmentSidebar timerText={timerText} timerColor={timerColor} sections={sidebarSections} onNavigate={(gi) => setV7FlatIdx(gi)} onSubmit={submitExpertAssessment} submitLabel="Submit Test" theme={T} dark={dark} />
+                </div>
+              );
+            }
+
+            // ── BEGINNER: ONE continuous assessment (MCQ → Tool ID → Practical) ──
+            // Three logical sections, one screen, one timer, no round transitions.
+            if (assessmentPath === 'Beginner') {
+              const { mcqList, toolMode, toolList, tcTasks } = getBeginnerLists();
+              const mcqCount = mcqList.length;
+              const toolCount = toolList.length;
+              const practicalCount = tcTasks.length;
+
+              type FlatItem = { kind: 'mcq' | 'toolBank' | 'toolMcq' | 'practical'; id: any; data: any; globalIdx: number };
+              const flatItems: FlatItem[] = [
+                ...mcqList.map((q: any, i: number) => ({ kind: 'mcq' as const, id: q.id, data: q, globalIdx: i })),
+                ...toolList.map((q: any, i: number) => ({ kind: (toolMode === 'bank' ? 'toolBank' : 'toolMcq') as 'toolBank' | 'toolMcq', id: q.id, data: q, globalIdx: mcqCount + i })),
+                ...tcTasks.map((t: any, i: number) => ({ kind: 'practical' as const, id: t.id, data: t, globalIdx: mcqCount + toolCount + i })),
+              ];
+              const total = flatItems.length;
+              if (total === 0) return <div style={{ padding: 20, color: T.text, textAlign: 'center' }}>Loading assessment questions...</div>;
+
+              const flatIdx = Math.min(v7FlatIdx, total - 1);
+              const current = flatItems[flatIdx];
+
+              const isAnswered = (it: FlatItem): boolean => {
+                if (it.kind === 'mcq') return (v7McqAnswers as any)[it.id] !== undefined;
+                if (it.kind === 'toolBank') return (toolIdTextAnswers[it.id] || '').trim() !== '';
+                if (it.kind === 'toolMcq') return (toolIdAnswers as any)[it.id] !== undefined;
+                return (testCaseAnswers[it.id] || '').trim() !== '';
+              };
+              const statusFor = (gi: number): QuestionStatus => {
+                if (gi === flatIdx) return 'current';
+                if (v7FlaggedQuestions[`b${gi}`]) return 'marked';
+                if (isAnswered(flatItems[gi])) return 'answered';
+                if (v7Visited[gi]) return 'visited';
+                return 'unvisited';
+              };
+
+              const sidebarSections: SidebarSection[] = [
+                { key: 'mcq', label: `MCQ · ${mcqCount} Questions`, items: mcqList.map((_: any, i: number) => ({ num: i + 1, globalIdx: i, status: statusFor(i) })) },
+                { key: 'tool', label: `Tool Identification · ${toolCount}`, items: toolList.map((_: any, i: number) => ({ num: i + 1, globalIdx: mcqCount + i, status: statusFor(mcqCount + i) })) },
+                { key: 'practical', label: `Practical · ${practicalCount}`, items: tcTasks.map((_: any, i: number) => ({ num: i + 1, globalIdx: mcqCount + toolCount + i, status: statusFor(mcqCount + toolCount + i) })) },
+              ];
+
+              const mins = Math.floor(v7Timer / 60);
+              const secs = v7Timer % 60;
+              const timerText = `${mins}:${secs < 10 ? '0' + secs : secs}`;
+              const timerColor = v7Timer > 600 ? '#10B981' : v7Timer >= 300 ? '#F59E0B' : '#EF4444';
+
+              const sectionLabel = current.kind === 'mcq' ? 'MCQ' : (current.kind === 'practical' ? 'Practical' : 'Tool Identification');
+              const sectionBase = current.kind === 'mcq' ? 0 : current.kind === 'practical' ? mcqCount + toolCount : mcqCount;
+              const localNum = current.globalIdx - sectionBase + 1;
+              const localTotal = current.kind === 'mcq' ? mcqCount : current.kind === 'practical' ? practicalCount : toolCount;
+              const sectionColor = current.kind === 'mcq' ? '#3B82F6' : current.kind === 'practical' ? '#8B5CF6' : '#10B981';
+              const flagged = v7FlaggedQuestions[`b${flatIdx}`] === true;
+
+              return (
+                <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }} className="fadeIn assess-continuous">
+                  {/* Question Area — expands automatically */}
+                  <div style={{ flex: 1, minWidth: 0, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, display: 'flex', flexDirection: 'column', gap: 20, minHeight: 480 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${T.bdr}`, paddingBottom: 12 }}>
+                      <div>
+                        <strong style={{ fontSize: 12, color: sectionColor, textTransform: 'uppercase' }}>{sectionLabel} — {v7SelectedSkill || getActiveSkillName()}</strong>
+                        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Question {localNum} of {localTotal}</h3>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: timerColor, fontWeight: 800, fontSize: 14 }}>
+                        <Clock size={16} /> {timerText} remaining
+                      </div>
+                    </div>
+
+                    {current.kind === 'mcq' && (
+                      <>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: T.text, lineHeight: 1.4, padding: '10px 0' }}>{current.data.question}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {current.data.options.map((opt: string, i: number) => {
+                            const optNum = i + 1;
+                            const selected = (v7McqAnswers as any)[current.id] === optNum;
+                            return (
+                              <div key={i} onClick={() => setV7McqAnswers(prev => ({ ...prev, [current.id]: optNum }))}
+                                style={{ padding: 14, borderRadius: 10, border: selected ? '2px solid #3B82F6' : `1px solid ${T.bdr}`, background: selected ? 'rgba(59,130,246,0.04)' : T.card, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }} className="hover-card">
+                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: selected ? '5px solid #3B82F6' : `1px solid ${T.bdr}`, background: '#fff', flexShrink: 0 }} />
+                                <span style={{ fontSize: 13, color: T.text }}>{opt}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+
+                    {current.kind === 'toolMcq' && (
+                      <>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: T.text, lineHeight: 1.4, padding: '10px 0' }}>{current.data.question}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {current.data.options.map((opt: string, i: number) => {
+                            const optNum = i + 1;
+                            const sel = (toolIdAnswers as any)[current.id] === optNum;
+                            return (
+                              <div key={i} onClick={() => setToolIdAnswers(prev => ({ ...prev, [current.id]: optNum }))}
+                                style={{ padding: 14, borderRadius: 10, border: sel ? '2px solid #10B981' : `1px solid ${T.bdr}`, background: sel ? 'rgba(16,185,129,0.04)' : T.card, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: sel ? '5px solid #10B981' : `1px solid ${T.bdr}`, background: '#fff', flexShrink: 0 }} />
+                                <span style={{ fontSize: 13, color: T.text }}>{opt}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+
+                    {current.kind === 'toolBank' && (
+                      <>
+                        <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                          <p style={{ margin: 0, fontSize: 13, color: T.text, lineHeight: 1.6, whiteSpace: 'pre-wrap', fontFamily: "'JetBrains Mono','Courier New',monospace" }}>{current.data.description}</p>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <label style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase' }}>Your Diagnosis / Answer (min 10 words)</label>
+                          <textarea value={toolIdTextAnswers[current.id] || ''} onChange={e => setToolIdTextAnswers(prev => ({ ...prev, [current.id]: e.target.value }))}
+                            placeholder="Describe the issue, the root cause, and how you would fix it..."
+                            style={{ width: '100%', height: 140, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                        </div>
+                      </>
+                    )}
+
+                    {current.kind === 'practical' && (
+                      <>
+                        <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                          {current.data.scenario ? <p style={{ margin: '0 0 8px', fontSize: 12, color: T.sub, lineHeight: 1.5 }}><strong>Scenario:</strong> {current.data.scenario}</p> : null}
+                          <p style={{ margin: 0, fontSize: 13, color: T.text, fontWeight: 600, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{current.data.req}</p>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <label style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase' }}>Your Answer / Solution</label>
+                          <textarea value={testCaseAnswers[current.id] || ''} onChange={e => setTestCaseAnswers(prev => ({ ...prev, [current.id]: e.target.value }))}
+                            placeholder="Write your solution here..."
+                            style={{ width: '100%', height: 200, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                        </div>
+                      </>
+                    )}
+
+                    {/* Bottom navigation — Previous / Mark for Review / Next (auto-crosses sections) */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: `1px solid ${T.bdr}`, paddingTop: 16, marginTop: 'auto' }}>
+                      <button onClick={() => setV7FlatIdx(Math.max(0, flatIdx - 1))} disabled={flatIdx === 0}
+                        style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: flatIdx === 0 ? 0.5 : 1 }}>Previous</button>
+                      <button onClick={() => setV7FlaggedQuestions(prev => ({ ...prev, [`b${flatIdx}`]: !prev[`b${flatIdx}`] }))}
+                        style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #F59E0B55', background: flagged ? 'rgba(245,158,11,0.1)' : T.card, color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{flagged ? 'Marked ⚑' : 'Mark for Review ⚐'}</button>
+                      <button onClick={() => setV7FlatIdx(Math.min(total - 1, flatIdx + 1))} disabled={flatIdx === total - 1}
+                        style={{ padding: '8px 18px', borderRadius: 8, background: '#3B82F6', color: '#fff', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer', opacity: flatIdx === total - 1 ? 0.5 : 1 }}>Next</button>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: `1px solid ${T.bdr}`, paddingTop: 16 }}>
-                    <button onClick={() => setV7CurrentExpertScenarioIdx(p => Math.max(0, p - 1))} disabled={v7CurrentExpertScenarioIdx === 0} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: v7CurrentExpertScenarioIdx === 0 ? 0.5 : 1 }}>Previous</button>
-                    {v7CurrentExpertScenarioIdx < expertScenarioList.length - 1
-                      ? <button onClick={() => setV7CurrentExpertScenarioIdx(p => p + 1)} style={{ padding: '8px 18px', borderRadius: 8, background: '#8B5CF6', color: '#fff', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer' }}>Next Scenario</button>
-                      : <button onClick={() => {
-                          const avgScore = Math.round(expertScenarioList.reduce((sum, sc) => { const a = expertScenarioAnswers[sc.id] || ''; return sum + scoreTextAnswer(a, (sc as any).scoringKeywords || [], (sc as any).minWords || 80); }, 0) / Math.max(expertScenarioList.length, 1));
-                          setSectionScores(prev => ({ ...prev, expertScenarios: avgScore }));
-                          setV7Step(5);
-                        }} style={{ padding: '10px 24px', borderRadius: 8, background: 'linear-gradient(135deg,#8B5CF6,#7c3aed)', color: '#fff', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer' }}>Submit Scenarios →</button>
-                    }
+
+                  {/* Fixed right sidebar navigator */}
+                  <AssessmentSidebar
+                    timerText={timerText}
+                    timerColor={timerColor}
+                    sections={sidebarSections}
+                    onNavigate={(gi) => setV7FlatIdx(gi)}
+                    onSubmit={submitBeginnerAssessment}
+                    submitLabel="Submit Test"
+                    theme={T}
+                    dark={dark}
+                  />
+                </div>
+              );
+            }
+
+            // ── INTERMEDIATE: ONE continuous assessment (MCQ → Coding → Scenarios → Framework) ──
+            if (assessmentPath === 'Intermediate') {
+              const { mcqList, codingProblem, scenarioList, frameworkQ } = getIntermediateLists();
+              const mcqCount = mcqList.length;
+              const codingCount = 1;
+              const scenarioCount = scenarioList.length;
+
+              type IItem = { kind: 'mcq' | 'coding' | 'scenario' | 'framework'; id: any; data: any; globalIdx: number };
+              const items: IItem[] = [
+                ...mcqList.map((q: any, i: number) => ({ kind: 'mcq' as const, id: q.id, data: q, globalIdx: i })),
+                { kind: 'coding' as const, id: codingProblem?.id || 'coding', data: codingProblem, globalIdx: mcqCount },
+                ...scenarioList.map((s: any, i: number) => ({ kind: 'scenario' as const, id: s.id, data: s, globalIdx: mcqCount + codingCount + i })),
+                { kind: 'framework' as const, id: 'framework', data: frameworkQ, globalIdx: mcqCount + codingCount + scenarioCount },
+              ];
+              const total = items.length;
+              const flatIdx = Math.min(v7FlatIdx, total - 1);
+              const current = items[flatIdx];
+              if (!current) return <div style={{ padding: 20, color: T.text, textAlign: 'center' }}>Loading assessment questions...</div>;
+
+              const iAnswered = (it: IItem): boolean => {
+                if (it.kind === 'mcq') return (v7McqAnswers as any)[it.id] !== undefined;
+                if (it.kind === 'coding') return codingProblem ? (v7CodingResults.totalVisible > 0) : (codingAnswer.trim() !== '');
+                if (it.kind === 'scenario') return (v7ScenarioAnswers[it.id] || '').trim() !== '';
+                return frameworkAnswer.trim() !== '';
+              };
+              const statusFor = (gi: number): QuestionStatus => {
+                if (gi === flatIdx) return 'current';
+                if (v7FlaggedQuestions[`i${gi}`]) return 'marked';
+                if (iAnswered(items[gi])) return 'answered';
+                if (v7Visited[gi]) return 'visited';
+                return 'unvisited';
+              };
+              const sidebarSections: SidebarSection[] = [
+                { key: 'mcq', label: `MCQ · ${mcqCount} Questions`, items: mcqList.map((_: any, i: number) => ({ num: i + 1, globalIdx: i, status: statusFor(i) })) },
+                { key: 'coding', label: 'Coding · 1', items: [{ num: 1, globalIdx: mcqCount, status: statusFor(mcqCount) }] },
+                { key: 'scenario', label: `Scenarios · ${scenarioCount}`, items: scenarioList.map((_: any, i: number) => ({ num: i + 1, globalIdx: mcqCount + codingCount + i, status: statusFor(mcqCount + codingCount + i) })) },
+                { key: 'framework', label: 'Framework · 1', items: [{ num: 1, globalIdx: mcqCount + codingCount + scenarioCount, status: statusFor(mcqCount + codingCount + scenarioCount) }] },
+              ];
+
+              const mins = Math.floor(v7Timer / 60);
+              const secs = v7Timer % 60;
+              const timerText = `${mins}:${secs < 10 ? '0' + secs : secs}`;
+              const timerColor = v7Timer > 600 ? '#10B981' : v7Timer >= 300 ? '#F59E0B' : '#EF4444';
+              const sectionLabel = current.kind === 'mcq' ? 'MCQ' : current.kind === 'coding' ? 'Coding Task' : current.kind === 'scenario' ? 'Real-World Scenario' : 'Framework Design';
+              const sectionColor = current.kind === 'mcq' ? '#3B82F6' : current.kind === 'coding' ? '#10B981' : current.kind === 'scenario' ? '#8B5CF6' : '#EC4899';
+              const flagged = v7FlaggedQuestions[`i${flatIdx}`] === true;
+
+              const primarySkillI = v7ExtractedData?.primarySkill || 'Automation Testing';
+              const isApiI = primarySkillI.toLowerCase().includes('api') || primarySkillI.toLowerCase().includes('postman');
+              const isPerfI = primarySkillI.toLowerCase().includes('performance') || primarySkillI.toLowerCase().includes('jmeter');
+              const codingFallback = isApiI
+                ? { title: 'Write API Tests for POST /api/transfer', desc: 'Write REST Assured or Postman-style tests for a money transfer API. Cover success, insufficient funds, invalid auth, and concurrency.' }
+                : isPerfI
+                ? { title: 'Write k6 Performance Test', desc: 'Write a k6 load test for a login endpoint with staged load, p95<2s thresholds, 100 VUs.' }
+                : { title: 'Fix the Failing Selenium Test', desc: 'Identify and fix the intermittent failure, and write a reusable login helper.' };
+
+              return (
+                <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }} className="fadeIn assess-continuous">
+                  <div style={{ flex: 1, minWidth: 0, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, display: 'flex', flexDirection: 'column', gap: 20, minHeight: 480 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${T.bdr}`, paddingBottom: 12 }}>
+                      <div>
+                        <strong style={{ fontSize: 12, color: sectionColor, textTransform: 'uppercase' }}>{sectionLabel} — {v7SelectedSkill || getActiveSkillName()}</strong>
+                        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>
+                          {current.kind === 'mcq' ? `Question ${current.globalIdx + 1} of ${mcqCount}` : current.kind === 'scenario' ? `Scenario ${current.globalIdx - mcqCount - codingCount + 1} of ${scenarioCount}` : sectionLabel}
+                        </h3>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: timerColor, fontWeight: 800, fontSize: 14 }}><Clock size={16} /> {timerText} remaining</div>
+                    </div>
+
+                    {current.kind === 'mcq' && (
+                      <>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: T.text, lineHeight: 1.4, padding: '10px 0' }}>{current.data.question}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {current.data.options.map((opt: string, i: number) => {
+                            const optNum = i + 1;
+                            const selected = (v7McqAnswers as any)[current.id] === optNum;
+                            return (
+                              <div key={i} onClick={() => setV7McqAnswers(prev => ({ ...prev, [current.id]: optNum }))}
+                                style={{ padding: 14, borderRadius: 10, border: selected ? '2px solid #3B82F6' : `1px solid ${T.bdr}`, background: selected ? 'rgba(59,130,246,0.04)' : T.card, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }} className="hover-card">
+                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: selected ? '5px solid #3B82F6' : `1px solid ${T.bdr}`, background: '#fff', flexShrink: 0 }} />
+                                <span style={{ fontSize: 13, color: T.text }}>{opt}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+
+                    {current.kind === 'coding' && (codingProblem ? (
+                      <CodeEditor
+                        problem={codingProblem}
+                        defaultLanguage="python"
+                        dark={dark}
+                        onResults={(results: any, vPass: number, vTotal: number, hPass: number, hTotal: number) => {
+                          setV7CodingResults({ visiblePassed: vPass, totalVisible: vTotal, hiddenPassed: hPass, totalHidden: hTotal });
+                          const score = Math.round(((vPass / Math.max(vTotal, 1)) * 0.5 + (hPass / Math.max(hTotal, 1)) * 0.5) * 100);
+                          setSectionScores(prev => ({ ...prev, coding: score }));
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                          <strong style={{ fontSize: 13, color: T.text }}>{codingFallback.title}</strong>
+                          <p style={{ margin: '6px 0 0', fontSize: 13, color: T.sub, lineHeight: 1.6 }}>{codingFallback.desc}</p>
+                        </div>
+                        <textarea value={codingAnswer} onChange={e => setCodingAnswer(e.target.value)} placeholder="Write your code here..." style={{ width: '100%', height: 220, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: "'Courier New',monospace", boxSizing: 'border-box' }} />
+                      </>
+                    ))}
+
+                    {current.kind === 'scenario' && (
+                      <>
+                        <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
+                          {current.data.desc ? <p style={{ margin: '0 0 8px', fontSize: 12, color: T.sub, lineHeight: 1.5 }}>{current.data.desc}</p> : null}
+                          <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: T.text }}>{current.data.question}</p>
+                        </div>
+                        <textarea value={v7ScenarioAnswers[current.id] || ''} onChange={e => setV7ScenarioAnswers(prev => ({ ...prev, [current.id]: e.target.value }))} placeholder="Describe your approach..." style={{ width: '100%', height: 180, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                      </>
+                    )}
+
+                    {current.kind === 'framework' && (
+                      <>
+                        <div style={{ padding: 16, borderRadius: 12, background: dark ? 'rgba(236,72,153,0.04)' : 'rgba(236,72,153,0.03)', border: '1px solid rgba(236,72,153,0.2)' }}>
+                          <p style={{ margin: 0, fontSize: 13, color: T.sub, lineHeight: 1.6 }}>{frameworkQ?.question || `Describe the folder structure and core components of a ${v7ExtractedData?.primarySkill || 'Selenium'} framework for a banking app with 200 test cases: project structure, page objects, test data, reporting, CI/CD.`}</p>
+                        </div>
+                        <textarea value={frameworkAnswer} onChange={e => setFrameworkAnswer(e.target.value)} placeholder="Your framework design..." style={{ width: '100%', height: 220, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                      </>
+                    )}
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: `1px solid ${T.bdr}`, paddingTop: 16, marginTop: 'auto' }}>
+                      <button onClick={() => setV7FlatIdx(Math.max(0, flatIdx - 1))} disabled={flatIdx === 0} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.sub, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: flatIdx === 0 ? 0.5 : 1 }}>Previous</button>
+                      <button onClick={() => setV7FlaggedQuestions(prev => ({ ...prev, [`i${flatIdx}`]: !prev[`i${flatIdx}`] }))} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #F59E0B55', background: flagged ? 'rgba(245,158,11,0.1)' : T.card, color: '#F59E0B', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{flagged ? 'Marked ⚑' : 'Mark for Review ⚐'}</button>
+                      <button onClick={() => setV7FlatIdx(Math.min(total - 1, flatIdx + 1))} disabled={flatIdx === total - 1} style={{ padding: '8px 18px', borderRadius: 8, background: '#3B82F6', color: '#fff', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer', opacity: flatIdx === total - 1 ? 0.5 : 1 }}>Next</button>
+                    </div>
                   </div>
+
+                  <AssessmentSidebar timerText={timerText} timerColor={timerColor} sections={sidebarSections} onNavigate={(gi) => setV7FlatIdx(gi)} onSubmit={submitIntermediateAssessment} submitLabel="Submit Test" theme={T} dark={dark} />
                 </div>
               );
             }
@@ -3397,39 +4238,15 @@ export default function ZenAssessPage() {
               );
             }
 
-            // ── EXPERT: Capstone Submission ───────────────────────────────────
+            // ── EXPERT: the capstone is NO LONGER part of the timed test. It is
+            // issued after submission as a separate, deadline-gated deliverable
+            // (see CapstonePage / capstoneEngine) and is what certifies Expert at
+            // 100%. This branch is an unreachable defensive fallback. ──────────
             return (
-              <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, display: 'flex', flexDirection: 'column', gap: 20 }} className="fadeIn">
-                <div style={{ borderBottom: `1px solid ${T.bdr}`, paddingBottom: 12 }}>
-                  <strong style={{ fontSize: 12, color: '#10B981', textTransform: 'uppercase' }}>Capstone Project Submission</strong>
-                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Submit Your Real Work</h3>
-                </div>
-                <div style={{ padding: 16, borderRadius: 12, background: 'rgba(16,185,129,0.04)', border: '1px solid rgba(16,185,129,0.2)' }}>
-                  <p style={{ margin: 0, fontSize: 13, color: T.sub, lineHeight: 1.6 }}>Submit something real you have built: a complete automation framework, performance test suite, API test collection, test strategy document, or LLM evaluation harness. This is 40% of your Expert score.</p>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  <div>
-                    <label style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', display: 'block', marginBottom: 6 }}>GitHub Repository URL</label>
-                    <input value={capstoneUrl} onChange={e => setCapstoneUrl(e.target.value)} placeholder="https://github.com/yourname/your-framework" style={{ width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, boxSizing: 'border-box' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: 'uppercase', display: 'block', marginBottom: 6 }}>Description — What did you build and why?</label>
-                    <textarea value={capstoneNotes} onChange={e => setCapstoneNotes(e.target.value)} placeholder="Describe: what the framework does, technologies used, scale (# of tests), CI/CD integration, real project usage..." style={{ width: '100%', height: 180, padding: 14, borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
-                  </div>
-                  <div style={{ padding: 12, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}` }}>
-                    <div style={{ fontSize: 11, fontWeight: 800, color: T.sub, marginBottom: 8 }}>SCORING RUBRIC (20 pts each):</div>
-                    {['Completeness — all scripts, config, docs, readme present', 'Code quality — modular, reusable, follows best practices', 'Complexity — covers edge cases, multiple environments', 'CI/CD integration — Jenkins/GitHub Actions config present', 'Evidence of real use — commit history, project references, screenshots'].map((c, i) => (
-                      <div key={i} style={{ fontSize: 12, color: T.text, padding: '4px 0', borderBottom: i < 4 ? `1px solid ${T.bdr}` : 'none' }}>• {c}</div>
-                    ))}
-                  </div>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: `1px solid ${T.bdr}`, paddingTop: 16 }}>
-                  <button onClick={() => {
-                    const score = Math.min(100, (capstoneUrl.trim() ? 40 : 0) + Math.min(60, Math.round(capstoneNotes.trim().split(/\s+/).filter(Boolean).length * 1.2)));
-                    setSectionScores(prev => ({ ...prev, capstone: score }));
-                    setV7Step(7);
-                  }} style={{ padding: '12px 28px', borderRadius: 10, background: 'linear-gradient(135deg,#10B981,#059669)', color: '#fff', fontSize: 13, fontWeight: 900, border: 'none', cursor: 'pointer' }}>Submit Capstone → Mentoring Evidence</button>
-                </div>
+              <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: 28, textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 16 }} className="fadeIn">
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Capstone issued separately</h3>
+                <p style={{ margin: 0, fontSize: 13, color: T.sub }}>Your Expert capstone is issued after you submit the test and is completed on its own page within 2 weeks.</p>
+                <button onClick={() => { setV7TimerActive(false); setV7Step(8); }} style={{ alignSelf: 'center', padding: '12px 28px', borderRadius: 10, background: 'linear-gradient(135deg,#10B981,#059669)', color: '#fff', fontSize: 13, fontWeight: 900, border: 'none', cursor: 'pointer' }}>Continue →</button>
               </div>
             );
           })()}
@@ -3724,6 +4541,12 @@ export default function ZenAssessPage() {
           {v7Step === 8 && (() => {
             if (!v7ResultsProcessing) {
               setV7ResultsProcessing(true);
+              // Beginner reaches step 8 from the continuous flow (manual submit) or
+              // directly via timer auto-submit — finalize its section scores here so
+              // both paths score identically before evaluation.
+              if (assessmentPath === 'Beginner') finalizeBeginnerScores();
+              else if (assessmentPath === 'Intermediate') finalizeIntermediateScores();
+              else if (assessmentPath === 'Expert') finalizeExpertScores();
               setTimeout(() => {
                 evaluateSkillTestOutcome();
                 setV7ResultsProcessing(false);
@@ -3781,6 +4604,17 @@ export default function ZenAssessPage() {
             const selfLevel = v7SelfClaimedLevels[lastResult.skill] || 'Beginner';
             const resultAction = lastResult.v7Action || 'pass';
             const resultScore = lastResult.finalScore;
+
+            // ── Expert capstone gate ────────────────────────────────────────
+            // A validated-Expert result unlocks the capstone: a separate,
+            // deadline-gated deliverable that certifies Expert at 100%. Issuing
+            // is idempotent — it never resets an already-open window.
+            const isExpertResult = lastResult.validatedLevel === 'Expert';
+            const capState: CapstoneState | null = isExpertResult
+              ? issueCapstone(employeeId || '', lastResult.skill, resultScore ?? 0)
+              : getCapstoneState(employeeId || '', lastResult.skill);
+            const capLeft = capstoneTimeLeft(capState);
+            const capDeadlineStr = capState ? new Date(capState.deadline).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
             const coachTip = lastResult.validatedLevel === 'Not Validated'
               ? `Build hands-on practice in ${lastResult.skill} fundamentals — revisit core concepts and try small real-world tasks before your next assessment.`
               : `You're validated at ${lastResult.validatedLevel} in ${lastResult.skill}. To progress further, focus on advanced ${lastResult.skill} scenarios and gather more project evidence.`;
@@ -3810,7 +4644,16 @@ export default function ZenAssessPage() {
                     </div>
                   )}
 
-                  {/* NOT VALIDATED */}
+                  {/* FAIL — Retake Required (Universal Fail Rule: final score < 50%) */}
+                  {resultAction === 'fail' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                      <div style={{ fontSize: 20, fontWeight: 900, color: '#EF4444' }}>Not Cleared — Score {resultScore}%</div>
+                      <div style={{ fontSize: 15, fontWeight: 800, color: '#EF4444' }}>Retake Required</div>
+                      <span style={{ padding: '4px 12px', borderRadius: 20, background: 'rgba(239,68,68,0.1)', color: '#EF4444', fontSize: 12, fontWeight: 800 }}>No badge awarded</span>
+                    </div>
+                  )}
+
+                  {/* NOT VALIDATED (legacy silent-drop path — retained for safety) */}
                   {resultAction === 'dropdown' && !lastResult.badgeAwarded && (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                       <div style={{ fontSize: 18, fontWeight: 700, color: T.sub }}>Keep practising</div>
@@ -3828,6 +4671,43 @@ export default function ZenAssessPage() {
                     </p>
                   </div>
                 </div>
+
+                {/* Block 1b: EXPERT CAPSTONE — separate, deadline-gated deliverable */}
+                {isExpertResult && capState && (
+                  <div style={{ background: T.card, border: `1px solid ${capState.status === 'completed' ? 'rgba(16,185,129,0.45)' : capState.status === 'expired' ? 'rgba(239,68,68,0.45)' : 'rgba(245,158,11,0.45)'}`, borderRadius: 24, padding: 28 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                      <Award size={20} color={capState.status === 'completed' ? '#10B981' : capState.status === 'expired' ? '#EF4444' : '#F59E0B'} />
+                      <span style={{ fontSize: 12, fontWeight: 800, color: capState.status === 'completed' ? '#10B981' : capState.status === 'expired' ? '#EF4444' : '#F59E0B', textTransform: 'uppercase' }}>Final step — Expert Capstone</span>
+                    </div>
+
+                    {capState.status === 'pending' && (
+                      <>
+                        <p style={{ margin: '0 0 8px', fontSize: 14, color: T.text, lineHeight: 1.6 }}>
+                          You cleared the {lastResult.skill} Expert test. To certify <strong>Expert at 100%</strong> you must complete a real-world <strong>capstone deliverable</strong>.
+                        </p>
+                        <p style={{ margin: '0 0 16px', fontSize: 13, color: T.sub, lineHeight: 1.6 }}>
+                          You have <strong style={{ color: '#F59E0B' }}>2 weeks</strong> (until {capDeadlineStr} · {capLeft.days}d {capLeft.hours}h left) to submit it. If the deadline passes, the capstone expires and you’ll need to <strong>retake the Expert assessment from the start</strong>.
+                        </p>
+                        <button onClick={() => navigate('/employee/zenassess/capstone')} style={{ padding: '12px 28px', borderRadius: 12, background: 'linear-gradient(135deg,#F59E0B,#D97706)', color: '#fff', fontSize: 14, fontWeight: 900, border: 'none', cursor: 'pointer' }}>Open Capstone →</button>
+                      </>
+                    )}
+
+                    {capState.status === 'completed' && (
+                      <p style={{ margin: 0, fontSize: 14, color: T.text, lineHeight: 1.6 }}>
+                        🎓 Capstone submitted — <strong style={{ color: '#10B981' }}>Expert level 100% complete</strong> for {lastResult.skill} (capstone score {capState.score}%).
+                      </p>
+                    )}
+
+                    {capState.status === 'expired' && (
+                      <>
+                        <p style={{ margin: '0 0 16px', fontSize: 14, color: T.text, lineHeight: 1.6 }}>
+                          Your capstone window has expired. The Expert certification is incomplete — you’ll need to retake the Expert assessment from the start.
+                        </p>
+                        <button onClick={() => navigate('/employee/zenassess/capstone')} style={{ padding: '12px 28px', borderRadius: 12, background: 'linear-gradient(135deg,#EF4444,#B91C1C)', color: '#fff', fontSize: 14, fontWeight: 900, border: 'none', cursor: 'pointer' }}>Review & Restart →</button>
+                      </>
+                    )}
+                  </div>
+                )}
 
                 {/* Block 2: ZenAICoach Tip — show if improvement needed */}
                 {(lastResult.validatedLevel === 'Not Validated' || resultAction !== 'dropup') && (

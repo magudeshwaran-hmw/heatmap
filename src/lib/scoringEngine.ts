@@ -274,6 +274,82 @@ export function determineTierResult(
   return { action: 'dropdown', validatedLevel: lowerLevel, badgeLevel: null, nextTestLevel: lowerLevel };
 }
 
+// ─── CHANGE 4: ADAPTIVE CHECKPOINT (Expert path, mid-exam) ──────────────────
+export type CheckpointAction = 'reroute_intermediate' | 'continue' | 'continue_bonus';
+
+export interface CheckpointResult {
+  action: CheckpointAction;
+  bonusDepthQuestions: boolean;
+  reason: string;
+}
+
+// Applies ONLY on the Expert path, mid-exam.
+//   checkpoint < 50%  → reroute to Intermediate (served as a shortlist — CHANGE 5)
+//   checkpoint 50-84% → continue Expert
+//   checkpoint ≥ 85%  → continue Expert + bonus depth questions
+export function applyAdaptiveCheckpoint(checkpointPct: number): CheckpointResult {
+  if (checkpointPct < 50) {
+    return { action: 'reroute_intermediate', bonusDepthQuestions: false, reason: `Checkpoint ${Math.round(checkpointPct)}% < 50% — reroute to Intermediate.` };
+  }
+  if (checkpointPct >= 85) {
+    return { action: 'continue_bonus', bonusDepthQuestions: true, reason: `Checkpoint ${Math.round(checkpointPct)}% ≥ 85% — continue Expert with bonus depth questions.` };
+  }
+  return { action: 'continue', bonusDepthQuestions: false, reason: `Checkpoint ${Math.round(checkpointPct)}% — continue Expert.` };
+}
+
+// GATE A (resolved: mid-test drop-UP allowed): mid-exam checkpoint for the
+// Intermediate path — a very high checkpoint promotes UP to Expert, served as
+// an Expert shortlist (CHANGE 5). Promotion threshold reuses the ≥85 band.
+export const INTERMEDIATE_PROMOTE_THRESHOLD = 85;
+
+export function applyIntermediateCheckpoint(checkpointPct: number): { action: 'promote_expert' | 'continue'; reason: string } {
+  if (checkpointPct >= INTERMEDIATE_PROMOTE_THRESHOLD) {
+    return { action: 'promote_expert', reason: `Checkpoint ${Math.round(checkpointPct)}% ≥ ${INTERMEDIATE_PROMOTE_THRESHOLD}% — promote to Expert.` };
+  }
+  return { action: 'continue', reason: `Checkpoint ${Math.round(checkpointPct)}% — continue Intermediate.` };
+}
+
+// ─── CHANGE 4: FINAL EXPERT AUTHENTICATION ──────────────────────────────────
+export interface ExpertAuthResult {
+  level: 'Expert' | 'Intermediate' | 'Not Validated';
+  action: 'authenticated' | 'reroute_down' | 'retake';
+  capstoneUnlocked: boolean;
+  capstoneWindowDays: number | null;
+  retakeDays: number | null;
+  profileFlag: string | null;
+}
+
+// Final authentication after the Expert path completes.
+//   ≥70  → Expert (capstone unlocked, 7-day window)
+//   65-69 → Intermediate
+//   <65  → retake in 14 days
+// When the candidate reached Expert via a reroute (down from Expert attempt),
+// flag the profile "Attempted Expert · Authenticated Intermediate".
+export function authenticateExpertFinal(finalPct: number, wasReroutedDown = false): ExpertAuthResult {
+  if (finalPct >= 70) {
+    return { level: 'Expert', action: 'authenticated', capstoneUnlocked: true, capstoneWindowDays: 7, retakeDays: null, profileFlag: null };
+  }
+  if (finalPct >= 65) {
+    return { level: 'Intermediate', action: 'reroute_down', capstoneUnlocked: false, capstoneWindowDays: null, retakeDays: null,
+      profileFlag: 'Attempted Expert · Authenticated Intermediate' };
+  }
+  return { level: 'Not Validated', action: 'retake', capstoneUnlocked: false, capstoneWindowDays: null, retakeDays: 14,
+    profileFlag: wasReroutedDown ? 'Attempted Expert · Authenticated Intermediate' : null };
+}
+
+// ─── CHANGE 5: REROUTE = SHORTLIST ──────────────────────────────────────────
+// Whenever a candidate is rerouted mid-flow (up OR down) they do NOT write the
+// full new-level test — they get a fixed-N core subset (auto top-N by
+// difficulty). Pass the subset → authenticate at the new level; fail → retake.
+export const REROUTE_SHORTLIST_SIZE = 10;
+export const REROUTE_RETAKE_DAYS = 14;
+
+// Pass threshold for a rerouted shortlist — authenticate at the new level if met.
+export function passedRerouteShortlist(scorePct: number, level: AssessmentLevel): boolean {
+  const threshold = level === 'expert' ? 70 : level === 'intermediate' ? 65 : 60;
+  return scorePct >= threshold;
+}
+
 // ─── INTEGRITY SCORING ────────────────────────────────────────────────────────
 
 export interface IntegrityFlags {

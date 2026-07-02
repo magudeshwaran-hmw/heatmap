@@ -15,11 +15,11 @@
 // ─── 32 Canonical ZenMatrix Skills ───────────────────────────────────────────
 export const CANONICAL_SKILLS = [
   // Tools
-  'Selenium', 'Appium', 'JMeter', 'Postman', 'JIRA', 'TestRail',
+  'Selenium', 'Appium', 'JMeter', 'Postman', 'JIRA', 'TestRail', 'Playwright',
   // Technologies
   'Python', 'Java', 'JavaScript', 'TypeScript', 'C#', 'SQL',
   // Application Testing
-  'API Testing', 'Mobile Testing', 'Performance Testing', 'Security Testing', 'Database Testing',
+  'API Testing', 'Mobile Testing', 'Performance Testing', 'Security Testing', 'Database Testing', 'Accessibility Testing',
   // Domain
   'Banking', 'Healthcare', 'E-Commerce', 'Insurance', 'Telecom',
   // Testing Types
@@ -31,6 +31,50 @@ export const CANONICAL_SKILLS = [
 ] as const;
 
 export type CanonicalSkill = typeof CANONICAL_SKILLS[number];
+
+// ─── 7 Job Families → Skill membership ───────────────────────────────────────
+// Routing taxonomy. CHANGE 1 realignment applied:
+//   F2 +Playwright · F3 +Security Testing (moved from F5) +Accessibility Testing · F5 −Security Testing
+// NOTE: This is a code-only routing layer. It does NOT touch the DB schema.
+export interface JobFamily {
+  id: number;
+  name: string;
+  skills: CanonicalSkill[];
+}
+
+export const JOB_FAMILIES: JobFamily[] = [
+  { id: 1, name: 'Functional & Process QA',  skills: ['Functional Testing', 'Regression Testing', 'UAT', 'JIRA', 'TestRail'] },
+  { id: 2, name: 'Automation & Tools',       skills: ['Selenium', 'Appium', 'Mobile Testing', 'Automation Testing', 'AI Test Automation', 'Playwright'] },
+  { id: 3, name: 'NFT & API Testing',        skills: ['API Testing', 'Postman', 'Performance Testing', 'JMeter', 'Security Testing', 'Accessibility Testing'] },
+  { id: 4, name: 'Domain',                   skills: ['Banking', 'Healthcare', 'E-Commerce', 'Insurance', 'Telecom'] },
+  { id: 5, name: 'Programming & Security',   skills: ['Python', 'Java', 'JavaScript', 'TypeScript', 'C#'] },
+  { id: 6, name: 'Data & Database',          skills: ['SQL', 'Database Testing'] },
+  { id: 7, name: 'DevOps & AI',              skills: ['Git', 'Jenkins', 'Docker', 'Azure DevOps', 'ChatGPT/Prompt Engineering'] },
+];
+
+// skill → family lookup (built once)
+const SKILL_FAMILY_MAP: Map<CanonicalSkill, JobFamily> = (() => {
+  const m = new Map<CanonicalSkill, JobFamily>();
+  JOB_FAMILIES.forEach(fam => fam.skills.forEach(s => m.set(s, fam)));
+  return m;
+})();
+
+export function getSkillFamily(skill: CanonicalSkill | string | null | undefined): JobFamily | null {
+  if (!skill) return null;
+  const canonical = CANONICAL_SKILLS.includes(skill as CanonicalSkill)
+    ? (skill as CanonicalSkill)
+    : findCanonicalSkill(skill);
+  if (!canonical) return null;
+  return SKILL_FAMILY_MAP.get(canonical) ?? null;
+}
+
+export function getFamilyById(id: number): JobFamily | null {
+  return JOB_FAMILIES.find(f => f.id === id) ?? null;
+}
+
+// New skills that still need question banks (flagged, not fabricated):
+//   Playwright (F2), Accessibility Testing (F3), Security Testing expert/intermediate banks (F3)
+export const SKILLS_NEEDING_BANKS: CanonicalSkill[] = ['Playwright', 'Accessibility Testing'];
 
 // ─── Technology → Canonical Skill Mapping ────────────────────────────────────
 // ML/DS frameworks map to Python because Python IS in the 32 skills; ML is not.
@@ -169,6 +213,23 @@ export const TECH_SKILL_MAP: Record<string, CanonicalSkill> = {
   'api validation': 'API Testing',
   'web services testing': 'API Testing',
 
+  // ── Playwright (own skill in Family 2: Automation & Tools) ──
+  'playwright': 'Playwright',
+  'playwright test': 'Playwright',
+  '@playwright/test': 'Playwright',
+
+  // ── Accessibility Testing (Family 3: NFT & API Testing) ──
+  'accessibility testing': 'Accessibility Testing',
+  'accessibility': 'Accessibility Testing',
+  'a11y': 'Accessibility Testing',
+  'wcag': 'Accessibility Testing',
+  'axe-core': 'Accessibility Testing',
+  'axe core': 'Accessibility Testing',
+  'screen reader': 'Accessibility Testing',
+  'aria': 'Accessibility Testing',
+  'section 508': 'Accessibility Testing',
+  'ada compliance': 'Accessibility Testing',
+
   // ── Mobile Testing ──
   'mobile testing': 'Mobile Testing',
   'android testing': 'Mobile Testing',
@@ -282,7 +343,6 @@ export const TECH_SKILL_MAP: Record<string, CanonicalSkill> = {
   'automation testing': 'Automation Testing',
   'test automation': 'Automation Testing',
   'cypress': 'Automation Testing',
-  'playwright': 'Automation Testing',
   'robot framework': 'Automation Testing',
   'cucumber': 'Automation Testing',
   'bdd': 'Automation Testing',
@@ -459,6 +519,29 @@ export interface TaxonomyInput {
   department?: string;
 }
 
+// Boundary-aware keyword match. Plain String.includes() lets short keys like
+// 'ts' (TypeScript) or 'js' (JavaScript) match INSIDE unrelated words such as
+// "agents" or "documents", fabricating skill evidence. This requires the key to
+// sit on a non-alphanumeric boundary on any side whose edge char is alphanumeric,
+// while still matching symbol keys like 'c#', '.net' and 'node.js'.
+export function textIncludesTech(text: string, tech: string): boolean {
+  if (!tech) return false;
+  const isAlnum = (c: string) => c >= 'a' && c <= 'z' || c >= '0' && c <= '9';
+  const firstAlnum = isAlnum(tech[0]);
+  const lastAlnum = isAlnum(tech[tech.length - 1]);
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf(tech, from);
+    if (idx === -1) return false;
+    const before = idx > 0 ? text[idx - 1] : '';
+    const after = idx + tech.length < text.length ? text[idx + tech.length] : '';
+    const startOk = firstAlnum ? !isAlnum(before) : true;
+    const endOk = lastAlnum ? !isAlnum(after) : true;
+    if (startOk && endOk) return true;
+    from = idx + 1;
+  }
+}
+
 // ─── Main Taxonomy Engine ─────────────────────────────────────────────────────
 export function computeSkillTaxonomy(input: TaxonomyInput): TaxonomyResult {
   const scores: Map<CanonicalSkill, SkillScore & { techs: Set<string>; keywordCount: number }> = new Map();
@@ -501,7 +584,7 @@ export function computeSkillTaxonomy(input: TaxonomyInput): TaxonomyResult {
     ].join(' ').toLowerCase();
 
     Object.entries(TECH_SKILL_MAP).forEach(([tech, skill]) => {
-      if (allProjText.includes(tech)) {
+      if (textIncludesTech(allProjText, tech)) {
         projectTechs.add(skill);
         initSkill(skill).techs.add(tech);
       }
@@ -562,7 +645,7 @@ export function computeSkillTaxonomy(input: TaxonomyInput): TaxonomyResult {
   // ── 5. Designation keyword scoring (5%) ──────────────────────────────────
   const designationText = `${input.designation || ''} ${input.department || ''}`.toLowerCase();
   Object.entries(TECH_SKILL_MAP).forEach(([tech, skill]) => {
-    if (designationText.includes(tech)) {
+    if (textIncludesTech(designationText, tech)) {
       const entry = initSkill(skill);
       entry.techs.add(tech);
       entry.keywordCount++;
@@ -619,7 +702,7 @@ export function findCanonicalSkill(text: string): CanonicalSkill | null {
   if (CANONICAL_SKILLS.includes(text as CanonicalSkill)) return text as CanonicalSkill;
 
   for (const [key, skill] of Object.entries(TECH_SKILL_MAP)) {
-    if (lower.includes(key)) return skill;
+    if (textIncludesTech(lower, key)) return skill;
   }
 
   for (const cs of CANONICAL_SKILLS) {
@@ -731,6 +814,203 @@ export function deriveGradeFromYears(years: number): string {
   if (years >= 13) return 'D';
   if (years >= 4) return 'E1';
   return 'F1';
+}
+
+// ─── CHANGE 2: Family + Grade + Depth assessment flow ────────────────────────
+// Canonical 9-phase model. Replaces self_claimed_level for TEST ROUTING.
+// (DB column self_claimed_level is left untouched — it is simply no longer used
+//  to choose the test level.)
+export type AssessPath = 'Beginner' | 'Intermediate' | 'Expert';
+
+export interface FamilyScore {
+  family: JobFamily;
+  score: number;                 // 0-100 weighted (freq 40 / tool 40 / tenure 20)
+  components: { skillFrequency: number; projectToolUsage: number; tenure: number };
+  matchedSkillNames: CanonicalSkill[];
+}
+
+export interface DepthScored {
+  skill: CanonicalSkill;
+  depthScore: number;            // 0-100 — years · projects · frequency, NO self-rating
+  depthYears: number;
+  depthProjects: number;
+  depthFrequency: number;
+  base: SkillScore;
+}
+
+export interface AssessmentFlow {
+  grade: string;
+  gradeBand: string;
+  winningFamily: JobFamily | null;
+  familyScores: FamilyScore[];
+  top3: DepthScored[];
+  path: AssessPath;
+  pathScore: number;             // depth score that drove the grade×score matrix
+  taxonomy: TaxonomyResult;      // reordered so primary/secondary/tertiary = family top-3
+}
+
+// tenure-allocated years derived from PROJECTS + IT experience only — never self-rating
+function cleanTenureYears(sc: SkillScore, input: TaxonomyInput): number {
+  const totalProjects = Math.max(input.projects.length, 1);
+  if (sc.projectCount <= 0) return 0;
+  return Math.min(input.yearsIT, sc.projectCount * (input.yearsIT / totalProjects));
+}
+
+// Depth score (Filter 3): years · projects · frequency. Explicitly self-rating-free.
+function computeDepth(sc: SkillScore, input: TaxonomyInput): DepthScored {
+  const cleanYears = cleanTenureYears(sc, input);
+  const projects = sc.projectCount;
+  const frequency = sc.technologies.length;
+  const yearsComp = Math.min(40, cleanYears * 8);   // ~5 yrs → 40
+  const projComp = Math.min(40, projects * 13);     // ~3 projects → 39
+  const freqComp = Math.min(20, frequency * 5);     // ~4 techs → 20
+  const depthScore = Math.min(100, Math.round(yearsComp + projComp + freqComp));
+  return {
+    skill: sc.skill,
+    depthScore,
+    depthYears: Math.round(cleanYears * 10) / 10,
+    depthProjects: projects,
+    depthFrequency: frequency,
+    base: sc,
+  };
+}
+
+// Phase 3: JOB FAMILY scoring.
+// The winning family is the one that owns the candidate's SINGLE STRONGEST skill
+// (peak depth), not the one with the most distinct shallow skills. This stops a
+// specialist (e.g. a Performance Tester: one deep skill, 3 projects) from being
+// out-voted by a family of several shallowly-evidenced skills (e.g. 3 domain
+// skills with 1 project each). Project-tool-usage / frequency / tenure remain as
+// supporting components (and are surfaced for transparency).
+export function scoreJobFamilies(taxonomy: TaxonomyResult, input: TaxonomyInput): FamilyScore[] {
+  const bySkill = new Map(taxonomy.allSkills.map(s => [s.skill, s]));
+  const depthBySkill = new Map(taxonomy.allSkills.map(s => [s.skill, computeDepth(s, input).depthScore]));
+  const raw = JOB_FAMILIES.map(fam => {
+    let freq = 0, tool = 0, ten = 0, peakDepth = 0;
+    const matched: CanonicalSkill[] = [];
+    fam.skills.forEach(sk => {
+      const sc = bySkill.get(sk);
+      if (!sc) return;
+      freq += sc.technologies.length;
+      tool += sc.projectCount;
+      ten += cleanTenureYears(sc, input);
+      peakDepth = Math.max(peakDepth, depthBySkill.get(sk) ?? 0);
+      if (sc.projectCount > 0 || sc.technologies.length > 0) matched.push(sk);
+    });
+    return { fam, freq, tool, ten, peakDepth, matched };
+  });
+  const maxFreq = Math.max(1, ...raw.map(r => r.freq));
+  const maxTool = Math.max(1, ...raw.map(r => r.tool));
+  const maxTen = Math.max(1, ...raw.map(r => r.ten));
+  return raw
+    .map(r => {
+      const skillFrequency = (r.freq / maxFreq) * 100;
+      const projectToolUsage = (r.tool / maxTool) * 100;
+      const tenure = (r.ten / maxTen) * 100;
+      // Depth-led: the family's strongest single skill dominates; tool usage,
+      // frequency and tenure act as supporting/tie-break signals.
+      const score = Math.round(r.peakDepth * 0.60 + projectToolUsage * 0.20 + skillFrequency * 0.10 + tenure * 0.10);
+      return {
+        family: r.fam,
+        score,
+        components: {
+          skillFrequency: Math.round(skillFrequency),
+          projectToolUsage: Math.round(projectToolUsage),
+          tenure: Math.round(tenure),
+        },
+        matchedSkillNames: r.matched,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+// Phase 4: grade band normalisation (G0 < F2 < F1 < E2 < E1 < D < C)
+export function normalizeGradeBand(grade: string | null | undefined): string {
+  if (!grade) return 'G0';
+  const g = grade.trim().toUpperCase();
+  if (['G0', 'F2', 'F1', 'E2', 'E1', 'D', 'C'].includes(g)) return g;
+  if (g === '—' || g === 'NOT ASSIGNED') return 'G0';
+  return g;
+}
+
+// Phase 6: PATH from the grade × score matrix.
+//   G0/F2 → always Beginner · F1≥80 → Intermediate · E2<60 → Beginner ·
+//   E1≥80 → Expert · D/C → Expert. (score = primary skill depth score, 0-100)
+export function assignPathFromGradeScore(grade: string | null | undefined, score: number): AssessPath {
+  const g = normalizeGradeBand(grade);
+  switch (g) {
+    case 'G0':
+    case 'F2': return 'Beginner';
+    case 'F1': return score >= 80 ? 'Intermediate' : 'Beginner';
+    case 'E2': return score < 60 ? 'Beginner' : 'Intermediate';
+    case 'E1': return score >= 80 ? 'Expert' : 'Intermediate';
+    case 'D':
+    case 'C':  return 'Expert';
+    default:   return 'Beginner';
+  }
+}
+
+// Full flow: family scoring → top-3 (3 sequential filters) → grade×score path.
+export function computeAssessmentFlow(input: TaxonomyInput, grade: string | null | undefined): AssessmentFlow {
+  const taxonomy = computeSkillTaxonomy(input);
+  const familyScores = scoreJobFamilies(taxonomy, input);
+  const winningFamily = familyScores[0]?.family ?? null;
+
+  // Real, résumé-grounded evidence = depthScore > 0 (projects · tenure · tech
+  // frequency). This deliberately ignores self-ratings AND declared DB skills
+  // (primary/secondary/tertiary_skill), so a phantom skill — e.g. a declared
+  // "TypeScript" with no projects and no matched technologies — can NEVER reach
+  // the top-3. (Filters 2 & 3 of the spec collapse into this single depth gate.)
+  const allDepth = taxonomy.allSkills
+    .map(s => computeDepth(s, input))
+    .filter(d => d.depthScore > 0)
+    .sort((a, b) => b.depthScore - a.depthScore || b.base.score - a.base.score);
+
+  // Filter 1 — Job Family: prefer the winning family's evidenced skills first.
+  const familySkillSet = new Set<CanonicalSkill>(winningFamily ? winningFamily.skills : []);
+  const top3: DepthScored[] = allDepth.filter(d => familySkillSet.has(d.skill));
+
+  // Thin family → pad from the candidate's next-best EVIDENCED skills across all
+  // families (real résumé evidence only — never zero-evidence padding).
+  if (top3.length < 3) {
+    const used = new Set(top3.map(t => t.skill));
+    for (const d of allDepth) {
+      if (top3.length >= 3) break;
+      if (!used.has(d.skill)) { top3.push(d); used.add(d.skill); }
+    }
+  }
+
+  // Last resort only (essentially no résumé evidence at all): fall back to the
+  // global taxonomy order so the UI still renders 3 cards.
+  if (top3.length < 3) {
+    const used = new Set(top3.map(t => t.skill));
+    for (const s of taxonomy.allSkills) {
+      if (top3.length >= 3) break;
+      if (!used.has(s.skill)) { top3.push(computeDepth(s, input)); used.add(s.skill); }
+    }
+  }
+  const finalTop3 = top3.slice(0, 3);
+
+  const pathScore = finalTop3[0]?.depthScore ?? 0;
+  const path = assignPathFromGradeScore(grade, pathScore);
+
+  const reordered: TaxonomyResult = {
+    primary: finalTop3[0]?.base ?? taxonomy.primary,
+    secondary: finalTop3[1]?.base ?? taxonomy.secondary,
+    tertiary: finalTop3[2]?.base ?? taxonomy.tertiary,
+    allSkills: taxonomy.allSkills,
+  };
+
+  return {
+    grade: grade || '',
+    gradeBand: normalizeGradeBand(grade),
+    winningFamily,
+    familyScores,
+    top3: finalTop3,
+    path,
+    pathScore,
+    taxonomy: reordered,
+  };
 }
 
 function buildFillerSkill(input: TaxonomyInput, exclude: CanonicalSkill[]): SkillScore {
