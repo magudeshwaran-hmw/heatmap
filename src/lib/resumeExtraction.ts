@@ -98,6 +98,46 @@ export async function extractTextFromFile(file: File): Promise<string> {
   }
 }
 
+// ─── Zensar ID detection (resume text + filename) ────────────────────────────
+// A valid Zensar employee ID is EXACTLY 5 or 6 digits (matches zensarIdUtils).
+// We look for it in two places, in priority order:
+//   1. Explicitly labelled in the resume text ("Zensar ID: 123456", "Emp Code 12345"…)
+//   2. Embedded in the file name ("123456_John_Doe.pdf", "John Doe 654321.docx"…)
+// Returns the digits as a string, or null when nothing trustworthy is found.
+const ZID_LABELS = [
+  'zensar\\s*id', 'zensar\\s*employee\\s*id', 'employee\\s*id', 'employee\\s*code',
+  'emp\\s*id', 'emp\\s*code', 'emp\\s*no', 'associate\\s*id', 'associate\\s*code',
+  'personnel\\s*(?:no|number)', 'staff\\s*id', 'z\\s*id', 'zid',
+];
+
+function pickValidZid(candidate: string | undefined | null): string | null {
+  if (!candidate) return null;
+  const digits = candidate.replace(/[^0-9]/g, '');
+  return digits.length === 5 || digits.length === 6 ? digits : null;
+}
+
+export function extractZensarIdFromText(resumeText: string, fileName?: string): string | null {
+  const text = resumeText || '';
+
+  // 1. Labelled ID inside the resume — strongest signal.
+  for (const label of ZID_LABELS) {
+    const re = new RegExp(`${label}\\s*[:#\\-]?\\s*([0-9][0-9\\s\\-]{3,10}[0-9])`, 'i');
+    const m = text.match(re);
+    const zid = pickValidZid(m?.[1]);
+    if (zid) return zid;
+  }
+
+  // 2. File name — e.g. "654321 - Nilesh Brahme.pdf" or "Nilesh_Brahme_654321.docx".
+  //    Take the first standalone 5-6 digit group that is not part of a longer number
+  //    (avoids matching phone numbers or years embedded in the name).
+  const base = (fileName || '').replace(/\.(pdf|docx?|txt)$/i, '');
+  const fileMatch = base.match(/(?<![0-9])([0-9]{5,6})(?![0-9])/);
+  const fileZid = pickValidZid(fileMatch?.[1]);
+  if (fileZid) return fileZid;
+
+  return null;
+}
+
 // ─── Fast Resume Extraction (8s timeout) ─────────────────────────────────────
 export async function fastExtractFromResume(resumeText: string): Promise<any> {
   const fullText = resumeText.slice(0, 20000); // Smaller text for faster processing

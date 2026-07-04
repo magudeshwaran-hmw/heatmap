@@ -39,14 +39,17 @@ export const isValidZensarId = (id: string | number | null | undefined): boolean
  * @returns Formatted Zensar ID
  */
 export const extractZensarId = (employee: any): string => {
+  // Prefer the dedicated Zensar ID fields over the internal primary key `id`.
+  // For auto-imported employees the real Zensar ID lives in `zensar_id` while `id`
+  // stays as the internal sequential key — so `zensar_id` must win for display.
   const possibleIds = [
+    employee?.ZensarID,
+    employee?.zensar_id,
+    employee?.zensarId,
     employee?.id,
     employee?.ID,
     employee?.employee_id,
-    employee?.employeeId,
-    employee?.ZensarID,
-    employee?.zensar_id,
-    employee?.zensarId
+    employee?.employeeId
   ];
   
   for (const id of possibleIds) {

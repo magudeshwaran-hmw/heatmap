@@ -197,10 +197,10 @@ export default function AuthPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!lZensarId.trim()) { toast.error('Enter your Zensar ID, email, or phone'); return; }
-    const isZensarId = /^\d{6}$/.test(lZensarId.trim());
+    const isZensarId = /^\d{5,6}$/.test(lZensarId.trim());
     const isEmail = lZensarId.includes('@');
     const isPhone = /^[+\d][\d\s-]{6,}$/.test(lZensarId.trim());
-    if (!isZensarId && !isEmail && !isPhone) { toast.error('Enter a valid 6-digit Zensar ID, email, or phone number'); return; }
+    if (!isZensarId && !isEmail && !isPhone) { toast.error('Enter a valid 5 or 6-digit Zensar ID, email, or phone number'); return; }
     if (!lPassword)  { toast.error('Enter your password'); return; }
 
     setLoading(true);

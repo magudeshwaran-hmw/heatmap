@@ -29,8 +29,9 @@ import AIIntelligencePage from './AIIntelligencePage';
 import AdminResumeUploadPage from './AdminResumeUploadPage';
 import ResumeBuilderPage from './ResumeBuilderPage';
 import GitHubIntelligencePage from './GitHubIntelligencePage';
+import Modal from '@/components/Modal';
 import { callResumeLLM } from '@/lib/llm';
-import { extractTextFromFile, accurateExtractFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, accurateExtractFromResume, extractZensarIdFromText } from '@/lib/resumeExtraction';
 import {
   resolveQEAssignment, setQEOverride, clearQEOverride,
   QE_FAMILIES, groupsForFamily, essentialSkillsFor,
@@ -820,12 +821,17 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [bulkImporting, setBulkImporting] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
   const [bulkResult, setBulkResult] = useState<{ created: number; failed: number; skills: number } | null>(null);
+  // Login password applied to every profile created in a bulk import batch. Editable
+  // per batch; defaults to 1234567890. If a resume already carries its own credentials
+  // those are kept (handled below), otherwise this password is used.
+  const [bulkPassword, setBulkPassword] = useState('1234567890');
   const bulkInputRef = useRef<HTMLInputElement>(null);
 
   const handleBulkResumeImport = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     const list = Array.from(files).filter(f => /\.(pdf|docx)$/i.test(f.name)).slice(0, 100);
     if (list.length === 0) { toast.error('Please select PDF or Word (.docx) resume files'); return; }
+    const batchPassword = (bulkPassword || '').trim() || '1234567890';
     setBulkImporting(true);
     setBulkResult(null);
     setBulkProgress({ current: 0, total: list.length });
@@ -852,17 +858,22 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           .map((c: any) => ({ name: c.CertName || c.certName || c.name || (typeof c === 'string' ? c : ''), issuer: c.Provider || c.issuer || '' }))
           .filter((c: any) => c.name);
         const education = (data.education || []).map((e: any) => ({ degree: e.degree || '', institution: e.institution || '', field: e.field || '', year: e.year || '' }));
-        const id = 'IMP' + Date.now().toString(36) + i;
-        const email = (p.email && String(p.email).includes('@')) ? p.email : `${id.toLowerCase()}@imported.zensar`;
+        // Use the Zensar ID mentioned on the resume (or in the file name) when present.
+        // If none is found, leave employeeId blank — the backend auto-assigns the next
+        // sequential ID (100001, 100002, …) and flags it so an admin can fill it in later.
+        const detectedZid = extractZensarIdFromText(text, list[i].name) || (data.profile?.zensarId ? String(data.profile.zensarId) : '') || '';
+        // A stable, unique-ish email only used when the resume has no email of its own.
+        const emailSeed = detectedZid || `imp${Date.now().toString(36)}${i}`;
+        const email = (p.email && String(p.email).includes('@')) ? p.email : `${emailSeed.toLowerCase()}@imported.zensar`;
         const token = localStorage.getItem('zn_access_token');
         const res = await fetch(`${API_BASE}/admin/create-employee`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({
             name: p.name || list[i].name.replace(/\.(pdf|docx)$/i, ''),
-            email, employeeId: id, phone: p.phone || '',
+            email, employeeId: detectedZid, phone: p.phone || '',
             designation: p.designation || '', location: p.location || '',
-            yearsIT: p.yearsIT || 0, yearsZensar: 0, password: 'Imported@2026',
+            yearsIT: p.yearsIT || 0, yearsZensar: 0, password: (p.password && String(p.password).trim()) ? String(p.password).trim() : batchPassword,
             primarySkill: p.primarySkill || '', secondarySkill: p.secondarySkill || '', tertiarySkill: p.tertiarySkill || '',
             skills: skillsArr, projects, certificates, education,
           }),
@@ -875,6 +886,36 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     if (bulkInputRef.current) bulkInputRef.current.value = '';
     await loadAllData();
     toast.success(`Bulk import complete: ${created} created · ${failed} failed`);
+  };
+
+  // ── Set the real Zensar ID for an auto-assigned (imported) employee ──
+  const [zidModalEmp, setZidModalEmp] = useState<any | null>(null);
+  const [zidInput, setZidInput] = useState('');
+  const [zidSaving, setZidSaving] = useState(false);
+  const openSetZensarId = (emp: any) => { setZidModalEmp(emp); setZidInput(''); };
+  const handleSetZensarId = async () => {
+    if (!zidModalEmp) return;
+    const clean = (zidInput || '').replace(/[^0-9]/g, '');
+    if (clean.length !== 5 && clean.length !== 6) { toast.error('Zensar ID must be exactly 5 or 6 digits'); return; }
+    setZidSaving(true);
+    try {
+      const token = localStorage.getItem('zn_access_token');
+      const res = await fetch(`${API_BASE}/admin/employees/set-zensar-id`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ id: String(zidModalEmp.id), zensarId: clean }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(data.error || 'Could not set Zensar ID'); return; }
+      toast.success(`Zensar ID set to ${clean}`);
+      setZidModalEmp(null);
+      setZidInput('');
+      await loadAllData();
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not set Zensar ID');
+    } finally {
+      setZidSaving(false);
+    }
   };
 
   // Bench risk from project history (days since last project ended)
@@ -1608,6 +1649,19 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     <Upload size={16} /> {bulkImporting ? `Processing ${bulkProgress.current} of ${bulkProgress.total}...` : 'Upload Multiple Resumes'}
                   </button>
                 </div>
+                {/* Customizable login password for this import batch */}
+                <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>Login password for imported employees</label>
+                  <input
+                    type="text"
+                    value={bulkPassword}
+                    disabled={bulkImporting}
+                    onChange={e => setBulkPassword(e.target.value)}
+                    placeholder="1234567890"
+                    style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.text, fontSize: 13, fontWeight: 600, minWidth: 180 }}
+                  />
+                  <span style={{ fontSize: 11, color: T.muted }}>Applied to every profile in this batch (default 1234567890). Zensar IDs are read from each resume; missing ones are auto-numbered from 100001.</span>
+                </div>
                 {bulkImporting && (
                   <div style={{ marginTop: 14, height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
                     <div style={{ height: '100%', width: `${bulkProgress.total ? Math.round(bulkProgress.current / bulkProgress.total * 100) : 0}%`, background: 'linear-gradient(90deg,#3B82F6,#8B5CF6)', transition: 'width 0.3s ease' }} />
@@ -2027,6 +2081,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           <div style={{ flex: 1, minWidth: 0 }}>
                              <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.name}>{e.name}</div>
                              <div style={{ fontSize: 11, color: T.sub }}>{e.zensar_id || e.id}</div>
+                             {e.zensar_id_auto && (
+                               <button
+                                 onClick={ev => { ev.stopPropagation(); openSetZensarId(e); }}
+                                 title="This ID was auto-generated. Click to set the real Zensar ID."
+                                 style={{ marginTop: 6, display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', color: '#F59E0B', border: '1px solid rgba(245,158,11,0.35)', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                               >
+                                 <Edit2 size={11} /> Set Zensar ID
+                               </button>
+                             )}
                           </div>
                           <div style={{ textAlign: 'right', flexShrink: 0 }}>
                              {aiSearchActive && e._aiScore ? (
@@ -4978,6 +5041,44 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           </div>
         </div>
       )}
+
+      {/* Set Zensar ID modal (for auto-imported employees without a real ID) */}
+      <Modal open={!!zidModalEmp} onClose={() => { if (!zidSaving) { setZidModalEmp(null); setZidInput(''); } }} maxWidth={440} label="Set Zensar ID">
+        <div style={{ padding: 28 }}>
+          <h2 style={{ margin: '0 0 8px', fontSize: 20, fontWeight: 800, color: T.text }}>Set Zensar ID</h2>
+          <p style={{ margin: '0 0 4px', fontSize: 14, color: T.sub }}>
+            {zidModalEmp?.name} currently has an auto-generated ID <strong style={{ color: T.text }}>{zidModalEmp?.zensar_id || zidModalEmp?.id}</strong>.
+          </p>
+          <p style={{ margin: '0 0 16px', fontSize: 13, color: T.muted }}>Enter the employee's real Zensar ID (5 or 6 digits). This button disappears once it is set.</p>
+          <input
+            autoFocus
+            type="text"
+            inputMode="numeric"
+            value={zidInput}
+            disabled={zidSaving}
+            onChange={e => setZidInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+            onKeyDown={e => { if (e.key === 'Enter') handleSetZensarId(); }}
+            placeholder="e.g. 654321"
+            style={{ width: '100%', boxSizing: 'border-box', padding: '12px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 15, fontWeight: 700, letterSpacing: 1, marginBottom: 20 }}
+          />
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => { setZidModalEmp(null); setZidInput(''); }}
+              disabled={zidSaving}
+              style={{ padding: '10px 20px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 13, fontWeight: 700, cursor: zidSaving ? 'not-allowed' : 'pointer' }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSetZensarId}
+              disabled={zidSaving}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 20px', borderRadius: 10, background: '#3B82F6', border: 'none', color: '#fff', fontSize: 13, fontWeight: 700, cursor: zidSaving ? 'not-allowed' : 'pointer', opacity: zidSaving ? 0.7 : 1 }}
+            >
+              <CheckCircle2 size={14} /> {zidSaving ? 'Saving...' : 'Save Zensar ID'}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {showAddEmployeeModal && (
         <div style={{

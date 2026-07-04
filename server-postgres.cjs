@@ -1312,6 +1312,10 @@ async function syncDatabaseSchema() {
     await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS secondary_skill VARCHAR(255)`);
     await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS tertiary_skill VARCHAR(255)`);
     await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS grade VARCHAR(50)`);
+    // Marks employees whose Zensar ID was auto-generated (no ID found on the resume
+    // during bulk import). Admins can fill in the real ID later via a per-row button;
+    // setting the real ID clears this flag.
+    await query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS zensar_id_auto BOOLEAN DEFAULT FALSE`);
 
     // Create skills table
     await query(`
@@ -2708,14 +2712,41 @@ app.post('/api/admin/employees/add', requireAdmin, async (req, res) => {
   }
 });
 
+// Compute the next auto-generated Zensar ID. Auto IDs occupy the 100001–999999
+// range; we take the current max in that range and increment, skipping any value
+// already used by an existing id/zensar_id (e.g. a manually-created one).
+async function nextAutoZensarId() {
+  const r = await query(
+    `SELECT COALESCE(MAX(CAST(zensar_id AS BIGINT)), 100000) AS mx
+       FROM employees
+      WHERE zensar_id ~ '^[0-9]+$' AND CAST(zensar_id AS BIGINT) BETWEEN 100001 AND 999999`
+  );
+  let next = Number(r.rows[0]?.mx || 100000) + 1;
+  if (next < 100001) next = 100001;
+  for (let i = 0; i < 5000; i++) {
+    const exists = await query('SELECT 1 FROM employees WHERE id = $1 OR zensar_id = $1 LIMIT 1', [String(next)]);
+    if (exists.rows.length === 0) return String(next);
+    next++;
+  }
+  return String(next);
+}
+
 // Admin create employee (used by AdminDashboard)
 app.post('/api/admin/create-employee', requireAdmin, async (req, res) => {
   try {
     const { name, email, employeeId, phone, designation, department, location, yearsIT, yearsZensar, password, skills, projects, certificates, education, primarySkill, secondarySkill, tertiarySkill, primaryDomain } = req.body;
-    const zid = (employeeId || '').trim();
+    let zid = (employeeId || '').trim();
     const emailTrimmed = (email || '').trim().toLowerCase();
     const phoneTrimmed = (phone || '').trim();
 
+    // No Zensar ID supplied (e.g. bulk resume import where the resume/filename had
+    // no ID) → auto-assign the next sequential ID (100001, 100002, …) and flag it so
+    // an admin can fill in the real ID later.
+    let zensarIdAuto = false;
+    if (!zid) {
+      zid = await nextAutoZensarId();
+      zensarIdAuto = true;
+    }
 
     // Check for duplicates with specific field validation
     const existingZensarId = await query(
@@ -2766,10 +2797,10 @@ app.post('/api/admin/create-employee', requireAdmin, async (req, res) => {
 
     // Create the employee
     const result = await query(`
-      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain, zensar_id_auto)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *
-    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, encryptPw(password), finalPrimarySkill, finalSecondarySkill, finalTertiarySkill, finalPrimaryDomain]);
+    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, encryptPw(password), finalPrimarySkill, finalSecondarySkill, finalTertiarySkill, finalPrimaryDomain, zensarIdAuto]);
 
 
     // Save skills if provided
@@ -2870,6 +2901,50 @@ app.post('/api/admin/create-employee', requireAdmin, async (req, res) => {
     console.error('[Admin Create Employee] Error:', error);
     if (error.code === '23505') {
       return res.status(400).json({ error: 'Zensar ID or Email already exists in the database.' });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Set the real Zensar ID for an auto-assigned employee.
+// We only update the `zensar_id` column (the display ID) — the internal `id`
+// primary key is left untouched because child tables (skills, projects, …)
+// reference it. Clears the zensar_id_auto flag so the "Set Zensar ID" button
+// disappears from the admin table.
+app.post('/api/admin/employees/set-zensar-id', requireAdmin, async (req, res) => {
+  try {
+    const { id, zensarId } = req.body;
+    const internalId = (id || '').trim();
+    const newZid = (zensarId || '').toString().replace(/[^0-9]/g, '');
+
+    if (!internalId) return res.status(400).json({ error: 'Employee id is required.' });
+    if (newZid.length !== 5 && newZid.length !== 6) {
+      return res.status(400).json({ error: 'Zensar ID must be exactly 5 or 6 digits.' });
+    }
+
+    // The target employee must exist.
+    const target = await query('SELECT id FROM employees WHERE id = $1', [internalId]);
+    if (target.rows.length === 0) return res.status(404).json({ error: 'Employee not found.' });
+
+    // The new Zensar ID must not clash with anyone else.
+    const clash = await query(
+      'SELECT id FROM employees WHERE (zensar_id = $1 OR id = $1) AND id <> $2 LIMIT 1',
+      [newZid, internalId]
+    );
+    if (clash.rows.length > 0) {
+      return res.status(400).json({ error: `Zensar ID '${newZid}' is already used by another employee.` });
+    }
+
+    const updated = await query(
+      `UPDATE employees SET zensar_id = $1, zensar_id_auto = FALSE, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2 RETURNING *`,
+      [newZid, internalId]
+    );
+    res.json({ success: true, ...updated.rows[0] });
+  } catch (error) {
+    console.error('[Set Zensar ID] Error:', error);
+    if (error.code === '23505') {
+      return res.status(400).json({ error: 'That Zensar ID is already in use.' });
     }
     res.status(500).json({ error: error.message });
   }

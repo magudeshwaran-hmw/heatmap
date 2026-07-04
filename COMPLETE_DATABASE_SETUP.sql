@@ -31,9 +31,11 @@ CREATE TABLE IF NOT EXISTS employees (
   secondary_skill    VARCHAR(255),
   tertiary_skill     VARCHAR(255),
   grade              VARCHAR(50),
+  zensar_id_auto     BOOLEAN      DEFAULT FALSE,
   created_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS zensar_id_auto BOOLEAN DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_employees_email     ON employees(email);
 CREATE INDEX IF NOT EXISTS idx_employees_zensar_id ON employees(zensar_id);
