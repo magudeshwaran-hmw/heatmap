@@ -63,6 +63,10 @@ ok "PostgreSQL client: $(psql --version)"
 # ── 3. npm dependencies ─────────────────────────────────────────────────────
 say ""
 say "[1/4] Installing npm dependencies (this can take a couple of minutes)…"
+# Skip Puppeteer's Chrome download — it's only used for optional screenshot
+# tooling, is large, and often fails behind proxies/VPNs. The app runs without it.
+export PUPPETEER_SKIP_DOWNLOAD=true
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 npm install
 ok "Dependencies installed"
 
