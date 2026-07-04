@@ -1,0 +1,5 @@
+# Shell scripts must keep LF line endings so they run on macOS/Linux
+# even when authored/checked out on Windows (CRLF breaks the shebang).
+*.sh text eol=lf
+installation.sh text eol=lf
+run.sh text eol=lf
