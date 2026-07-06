@@ -209,3 +209,12 @@ export async function apiClearCompletions(): Promise<void> {
 export async function apiResetCompletionFlag(flag: 'aiForQe' | 'qeForAi' | 'testAutomation'): Promise<void> {
   await req('POST', '/skill-completions/reset-flag', { flag });
 }
+
+// ─── QISL ZenMatrix — employee self-ratings for QE-taxonomy skills ────────────
+export async function apiGetQislSkills(employeeId: string): Promise<{ ratings: Record<string, number> }> {
+  return req('GET', `/qisl-skills/${encodeURIComponent(employeeId)}`);
+}
+
+export async function apiSaveQislSkills(employeeId: string, ratings: Record<string, number>): Promise<void> {
+  await req('POST', `/qisl-skills/${encodeURIComponent(employeeId)}`, { ratings });
+}

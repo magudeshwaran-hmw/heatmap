@@ -361,6 +361,7 @@ export default function EmployeeDashboard({
              {[
                { label: 'ZenScan',              path: '/employee/resume-upload', icon: <Upload size={20}/>,        color: '#3B82F6', desc: 'AI reads your resume and maps every skill, cert and project — instantly.' },
                { label: 'ZenMatrix',             path: '/employee/skills',         icon: <PenTool size={20}/>,       color: '#8B5CF6', desc: 'Rate yourself. Let your manager confirm. Own your skill profile.' },
+               { label: 'QI SL ZenMatrix',        path: '/employee/qisl-skills',    icon: <PenTool size={20}/>,       color: '#EC4899', desc: 'Rate your proficiency across every job family in the QI SL skill taxonomy.', hideInPopup: true },
                { label: 'ZenAssess',             path: '/employee/zenassess',      icon: <ClipboardCheck size={20}/>, color: '#10B981', desc: 'Validate your skills. Earn verified badges.' },
                { label: 'ZenAlign',              path: '/employee/resume-builder', icon: <FileText size={20}/>,      color: '#ec4899', desc: 'Convert your resume to Zensar standard instantly.', hideInPopup: true },
                { label: 'ZenAICoach',            path: '/employee/ai',             icon: <Bot size={20}/>,           color: '#c084fc', desc: 'Career intelligence', hideInPopup: true },

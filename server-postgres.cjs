@@ -1520,6 +1520,18 @@ async function syncDatabaseSchema() {
       )
     `);
 
+    // QISL ZenMatrix — employee self-ratings (0–3) for the QE-taxonomy skills,
+    // keyed per employee + skill name. Level 0 rows are not stored.
+    await query(`
+      CREATE TABLE IF NOT EXISTS qisl_skill_ratings (
+        employee_id VARCHAR(120) NOT NULL,
+        skill_name  VARCHAR(255) NOT NULL,
+        level       INTEGER      DEFAULT 0,
+        updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (employee_id, skill_name)
+      )
+    `);
+
     // Seed default admin if missing
     const hasAdmin = await query("SELECT * FROM app_settings WHERE key = 'admin_id'");
     if (hasAdmin.rowCount === 0) {
@@ -7260,6 +7272,49 @@ app.post('/api/skill-completions/reset-flag', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── QISL ZenMatrix — employee self-ratings (0–3) for QE-taxonomy skills ──────
+// GET /api/qisl-skills/:employeeId — { ratings: { [skillName]: level } }
+app.get('/api/qisl-skills/:employeeId', async (req, res) => {
+  try {
+    const result = await query('SELECT skill_name, level FROM qisl_skill_ratings WHERE employee_id = $1', [String(req.params.employeeId)]);
+    const ratings = {};
+    result.rows.forEach(r => { ratings[r.skill_name] = r.level; });
+    res.json({ ratings });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/qisl-skills/:employeeId — upsert the whole ratings map (0 = delete)
+app.post('/api/qisl-skills/:employeeId', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const empId = String(req.params.employeeId);
+    const ratings = (req.body && req.body.ratings) || {};
+    await client.query('BEGIN');
+    for (const [skill, raw] of Object.entries(ratings)) {
+      const level = Math.max(0, Math.min(3, parseInt(raw, 10) || 0));
+      if (level > 0) {
+        await client.query(
+          `INSERT INTO qisl_skill_ratings (employee_id, skill_name, level, updated_at)
+           VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+           ON CONFLICT (employee_id, skill_name) DO UPDATE SET level = EXCLUDED.level, updated_at = CURRENT_TIMESTAMP`,
+          [empId, String(skill), level]
+        );
+      } else {
+        await client.query('DELETE FROM qisl_skill_ratings WHERE employee_id = $1 AND skill_name = $2', [empId, String(skill)]);
+      }
+    }
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 

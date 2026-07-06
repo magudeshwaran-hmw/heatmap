@@ -3,7 +3,7 @@
  * Elite Terminal Aesthetic with Global Capability Analytics.
  * Features: Personnel Intelligence Audit, Reversible Encryption, and Live Session Sync.
  */
-import { useMemo, useState, useEffect, useRef } from 'react';
+import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 
 import { SKILLS, MOCK_EMPLOYEES } from '@/lib/mockData';
 import { useNavigate } from 'react-router-dom';
@@ -21,6 +21,7 @@ import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
 import SkillMatrixPage from './SkillMatrixPage';
+import QislZenMatrixPage from './QislZenMatrixPage';
 import CertificationsPage from './CertificationsPage';
 import ProjectsPage from './ProjectsPage';
 import EducationPage from './EducationPage';
@@ -63,7 +64,10 @@ export default function AdminDashboard() {
   const { dark } = useDark();
   const T = mkTheme(dark);
 
-  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'Skill Groups' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Re-assessment' | 'Workforce Intelligence'>('Overview');
+  const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'QI SL Heatmap' | 'Skill Groups' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Re-assessment' | 'Workforce Intelligence'>('Overview');
+  // QISL Heatmap explorer: selected family + group (step-by-step drill-down).
+  const [qislFam, setQislFam] = useState<string>('');
+  const [qislGroup, setQislGroup] = useState<string>('');
   // bumped whenever a QE Skill-Group override is saved, to force a re-derive/re-render
   const [qeTick, setQeTick] = useState(0);
   // filters for the "Skill Groups" tab
@@ -205,6 +209,37 @@ export default function AdminDashboard() {
     setResetOpen(false);
     setResetSel([]);
   };
+
+  // Shared colour legend + grade-explanation strip for the heatmap pages.
+  const HeatKey = ({ items, formula }: { items: { c: string; label: string; range: string }[]; formula: ReactNode }) => (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center', padding: '12px 16px', background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 12, marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center' }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 0.4 }}>Colour key</span>
+        {items.map(it => (
+          <span key={it.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, color: T.text }}>
+            <span style={{ width: 12, height: 12, borderRadius: 3, background: it.c, flexShrink: 0 }} />
+            {it.label} <span style={{ color: T.sub, fontWeight: 600 }}>{it.range}</span>
+          </span>
+        ))}
+      </div>
+      <div style={{ flex: 1, minWidth: 240, fontSize: 11.5, color: T.sub, lineHeight: 1.5 }}>
+        <b style={{ color: T.text }}>How the grade is calculated:</b> {formula}
+      </div>
+    </div>
+  );
+  // The four heat colours + a helper that grades a 0–5 value at given thresholds.
+  const HEAT = { green: '#10B981', blue: '#3B82F6', orange: '#F59E0B', grey: T.bdr };
+  const gradeColor = (v: number, hi: number, mid: number) => v >= hi ? HEAT.green : v >= mid ? HEAT.blue : v > 0 ? HEAT.orange : HEAT.grey;
+  // Everything is graded as a percentage on the 0–3 proficiency scale:
+  //   Expert (3 ≈ 100%) · Intermediate (2 ≈ 67%) · Beginner (1 ≈ 33%) · Not rated (0).
+  const pctColor = (v: number) => v >= 67 ? HEAT.green : v >= 34 ? HEAT.blue : v > 0 ? HEAT.orange : HEAT.grey;
+  const PCT_LEGEND = [
+    { c: HEAT.green, label: 'Expert', range: '67–100%' },
+    { c: HEAT.blue, label: 'Intermediate', range: '34–66%' },
+    { c: HEAT.orange, label: 'Beginner', range: '1–33%' },
+    { c: HEAT.grey, label: 'Not rated', range: '0%' },
+  ];
+
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [newEmployee, setNewEmployee] = useState({
@@ -1085,7 +1120,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [previewUser, setPreviewUser] = useState<any | null>(null);
   const [previewData, setPreviewData] = useState<AppData | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'Skill Group' | 'ZenScan' | 'ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
+  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'Skill Group' | 'ZenScan' | 'ZenMatrix' | 'QI SL ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
   // ── Multi-select delete (Manage Employees) ──
@@ -1542,6 +1577,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
               { id: 'Overview',          icon: BarChart3,      color: '#3B82F6' },
               { id: 'Manage Employees',  icon: Users,          color: '#3B82F6' },
               { id: 'Skill Heatmap',     icon: Grid,           color: '#3B82F6' },
+              { id: 'QI SL Heatmap',      icon: Brain,          color: '#EC4899' },
               { id: 'Skill Groups',      icon: Layers,         color: '#06B6D4' },
               { id: 'Certifications',    icon: Award,          color: '#10B981' },
               { id: 'Achievements',      icon: Sparkles,       color: '#F59E0B' },
@@ -2249,19 +2285,19 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                  }));
                  const activeFamilies = familyData.filter(f => f.count > 0);
 
-                 // Weighted average index per skill group (coverage of essential skills → 0-5)
+                 // Weighted average index per skill group (essential-skill coverage → %)
                  const groupData: { family: string; group: string; count: number; index: number; total: number }[] = [];
                  QE_FAMILIES.forEach(fam => groupsForFamily(fam).forEach(grp => {
                    const members = assignments.filter(a => a.qe.family === fam && a.qe.group === grp);
                    const total = essentialSkillsFor(fam, grp).length || 1;
                    const index = members.length
-                     ? +(members.reduce((s, a) => s + Math.min(a.qe.matchedSkills.length, total) / total, 0) / members.length * 5).toFixed(1)
+                     ? Math.round(members.reduce((s, a) => s + Math.min(a.qe.matchedSkills.length, total) / total, 0) / members.length * 100)
                      : 0;
                    groupData.push({ family: fam, group: grp, count: members.length, index, total });
                  }));
                  const activeGroups = groupData.filter(g => g.count > 0).sort((a, b) => b.count - a.count);
-                 const avgIndex = activeGroups.length ? +(activeGroups.reduce((s, g) => s + g.index, 0) / activeGroups.length).toFixed(1) : 0;
-                 const idxColor = (v: number) => v >= 3.5 ? '#10B981' : v >= 2 ? '#3B82F6' : v > 0 ? '#F59E0B' : T.bdr;
+                 const avgIndex = activeGroups.length ? Math.round(activeGroups.reduce((s, g) => s + g.index, 0) / activeGroups.length) : 0;
+                 const idxColor = pctColor;
 
                  // Drill-down selections (fall back to the top family / group)
                  const selFam = (heatFamily && activeFamilies.some(f => f.family === heatFamily)) ? heatFamily : (activeFamilies[0]?.family || '');
@@ -2308,7 +2344,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                          { l: 'Total Employees', v: totalEmp, c: '#3B82F6' },
                          { l: 'Skill Families', v: activeFamilies.length, c: '#8B5CF6' },
                          { l: 'Skill Groups', v: activeGroups.length, c: '#06B6D4' },
-                         { l: 'Avg Weighted Index', v: avgIndex.toFixed(1), c: idxColor(avgIndex) },
+                         { l: 'Avg Coverage', v: `${avgIndex}%`, c: idxColor(avgIndex) },
                        ].map(s => (
                          <div key={s.l} style={{ ...card, textAlign: 'center' }}>
                            <div style={{ fontSize: 30, fontWeight: 900, color: s.c }}>{s.v}</div>
@@ -2319,8 +2355,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
                      {/* ── Weighted average index by skill group ── */}
                      <div style={{ marginBottom: 24 }}>
-                       <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>Weighted Average Index by Skill Group</div>
-                       <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Essential-skill coverage (0–5) across each group, with headcount.</div>
+                       <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>Weighted Average Coverage by Skill Group</div>
+                       <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Essential-skill coverage (%) across each group, with headcount.</div>
+                       <HeatKey
+                         items={PCT_LEGEND}
+                         formula={<>coverage = (essential skills a member has ÷ skills in the group), averaged over the <b>group members</b> and shown as a <b>%</b>. Higher = the group's people cover more of its essential skills.</>}
+                       />
                        {activeGroups.length === 0 ? (
                          <div style={{ ...card, textAlign: 'center', color: T.sub }}>No employees mapped to any skill group yet.</div>
                        ) : (
@@ -2336,9 +2376,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                </div>
                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                  <div style={{ flex: 1, height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
-                                   <div style={{ width: `${(g.index / 5) * 100}%`, height: '100%', background: idxColor(g.index), borderRadius: 999 }} />
+                                   <div style={{ width: `${g.index}%`, height: '100%', background: idxColor(g.index), borderRadius: 999 }} />
                                  </div>
-                                 <span style={{ fontSize: 15, fontWeight: 900, color: idxColor(g.index), minWidth: 34, textAlign: 'right' }}>{g.index.toFixed(1)}</span>
+                                 <span style={{ fontSize: 15, fontWeight: 900, color: idxColor(g.index), minWidth: 42, textAlign: 'right' }}>{g.index}%</span>
                                </div>
                              </div>
                            ))}
@@ -2434,7 +2474,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                    border: `1px solid ${selGrp === g.group ? 'rgba(59,130,246,0.45)' : T.bdr}` }}>
                                  <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{g.group}</span>
                                  <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                                   <span style={{ fontSize: 11, fontWeight: 800, color: idxColor(g.index) }}>{g.index.toFixed(1)}</span>
+                                   <span style={{ fontSize: 11, fontWeight: 800, color: idxColor(g.index) }}>{g.index}%</span>
                                    <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{g.count}</span>
                                  </span>
                                </button>
@@ -2470,8 +2510,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                      </div>
 
                      {/* ── Individual skill averages — grouped by skill category ── */}
-                     <div style={{ fontSize: 13, fontWeight: 800, color: T.text, margin: '28px 0 4px' }}>Individual Skill Averages <span style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>(out of 5)</span></div>
-                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Mean self-rating (0–5) for each skill, grouped by category, averaged over all {employees.length} employee{employees.length === 1 ? '' : 's'} — including those who haven't rated it (counted as 0).</div>
+                     <div style={{ fontSize: 13, fontWeight: 800, color: T.text, margin: '28px 0 4px' }}>Individual Skill Averages <span style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>(%)</span></div>
+                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Mean self-rating for each skill (on the 0–3 scale), grouped by category, averaged over all {employees.length} employee{employees.length === 1 ? '' : 's'} and shown as a % — including those who haven't rated it (counted as 0).</div>
+                     <HeatKey
+                       items={PCT_LEGEND}
+                       formula={<>score = the mean of every employee's self-rating (0–3) for that skill across all <b>{employees.length}</b> employees, shown as a <b>%</b> of Expert (3); anyone who hasn't rated it counts as <b>0</b>.</>}
+                     />
                      {(() => {
                        const CATEGORY_LABELS: Record<string, string> = {
                          Tool: 'Tools', Technology: 'Technologies', Application: 'Application Testing',
@@ -2482,12 +2526,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                        const renderCard = (sk: typeof SKILLS[number]) => {
                          const rated = employees.filter((e: any) => (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0) > 0).length;
                          const avg = employees.length ? employees.reduce((sum, e) => (sum + (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0)), 0) / employees.length : 0;
+                         const pct = Math.min(100, Math.round(avg / 3 * 100));   // 0–3 self-rating → %
                          return (
                            <div key={sk.id} title={`${rated} of ${employees.length} employees rated this skill`} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 16, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
                              <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>{sk.name}</div>
-                             <div style={{ fontSize: 20, fontWeight: 900, color: T.text, marginBottom: 2 }}>{avg.toFixed(1)}<span style={{ fontSize: 12, fontWeight: 700, color: T.muted }}> / 5</span></div>
+                             <div style={{ fontSize: 20, fontWeight: 900, color: pct ? pctColor(pct) : T.text, marginBottom: 2 }}>{pct}<span style={{ fontSize: 12, fontWeight: 700, color: T.muted }}>%</span></div>
                              <div style={{ fontSize: 10, fontWeight: 700, color: T.sub, marginBottom: 6 }}>{rated}/{employees.length} rated</div>
-                             <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: 4, background: avg >= 2.5 ? '#10B981' : avg >= 1.5 ? '#3B82F6' : avg > 0 ? '#F59E0B' : T.bdr }} />
+                             <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: 4, background: pctColor(pct) }} />
                            </div>
                          );
                        };
@@ -2511,6 +2556,268 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                    </>
                  );
                })()}
+            </div>
+          )}
+
+          {/* ── QISL HEATMAP TAB ── */}
+          {activeTab === 'QI SL Heatmap' && (
+            <div style={{ animation: 'fadeIn 0.4s ease' }}>
+              <h3 style={{ margin: '0 0 6px', fontSize: 16, fontWeight: 800 }}>QI SL Heatmap</h3>
+              <div style={{ fontSize: 12, color: T.sub, marginBottom: 18 }}>Click a family in the chart → pick a group → view its skills. Each score is the <b>% of that family's members</b> who have the skill.</div>
+              {(() => {
+                const PIE = ['#3B82F6', '#8B5CF6', '#06B6D4', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
+                const assignments = employees.map((e: any) => ({ e, qe: resolveQEAssignment(e) }));
+                const totalEmp = employees.length;
+
+                // Families by headcount
+                const familyData = QE_FAMILIES.map((fam, i) => ({
+                  family: fam,
+                  count: assignments.filter(a => a.qe.family === fam).length,
+                  color: PIE[i % PIE.length],
+                }));
+                const activeFamilies = familyData.filter(f => f.count > 0);
+
+                // Coverage % per group = avg over its skills of (members with skill ÷ family members)
+                const groupData: { family: string; group: string; count: number; pct: number }[] = [];
+                QE_FAMILIES.forEach(fam => {
+                  const famCnt = assignments.filter(a => a.qe.family === fam).length || 1;
+                  groupsForFamily(fam).forEach(grp => {
+                    const members = assignments.filter(a => a.qe.family === fam && a.qe.group === grp);
+                    const skills = essentialSkillsFor(fam, grp);
+                    const pct = skills.length
+                      ? Math.round(skills.reduce((s, sk) => s + assignments.filter(a => a.qe.family === fam && a.qe.group === grp && a.qe.matchedSkills.includes(sk)).length / famCnt, 0) / skills.length * 100)
+                      : 0;
+                    groupData.push({ family: fam, group: grp, count: members.length, pct });
+                  });
+                });
+                const activeGroups = groupData.filter(g => g.count > 0);
+                const avgPct = activeGroups.length ? Math.round(activeGroups.reduce((s, g) => s + g.pct, 0) / activeGroups.length) : 0;
+
+                // Drill-down selections (fall back to the top family / group).
+                // Show ALL of the family's groups — including any with 0 members —
+                // so a family with two groups always shows both.
+                const selFam = (qislFam && activeFamilies.some(f => f.family === qislFam)) ? qislFam : (activeFamilies[0]?.family || '');
+                const famGroups = groupData.filter(g => g.family === selFam);
+                const selGrp = (qislGroup && famGroups.some(g => g.group === qislGroup)) ? qislGroup : (famGroups.find(g => g.count > 0)?.group || famGroups[0]?.group || '');
+                const famCount = assignments.filter(a => a.qe.family === selFam).length || 1;
+                const skillPct = (selFam && selGrp)
+                  ? essentialSkillsFor(selFam, selGrp).map(sk => {
+                      const cnt = assignments.filter(a => a.qe.family === selFam && a.qe.group === selGrp && a.qe.matchedSkills.includes(sk)).length;
+                      return { skill: sk, cnt, pct: Math.round(cnt / famCount * 100) };
+                    }).sort((a, b) => b.pct - a.pct)
+                  : [];
+
+                // Donut geometry (same beautiful pie as the Skill Heatmap)
+                const pieTotal = activeFamilies.reduce((s, f) => s + f.count, 0) || 1;
+                const CX = 130, CY = 130, R = 112, RI = 60;
+                const polar = (r: number, ang: number, ox = 0, oy = 0) => [CX + ox + r * Math.cos(ang), CY + oy + r * Math.sin(ang)];
+                const buildArc = (start: number, end: number, ox = 0, oy = 0) => {
+                  const large = end - start > Math.PI ? 1 : 0;
+                  const [x1, y1] = polar(R, start, ox, oy), [x2, y2] = polar(R, end, ox, oy);
+                  const [x3, y3] = polar(RI, end, ox, oy), [x4, y4] = polar(RI, start, ox, oy);
+                  return `M${x1},${y1} A${R},${R} 0 ${large} 1 ${x2},${y2} L${x3},${y3} A${RI},${RI} 0 ${large} 0 ${x4},${y4} Z`;
+                };
+                let cursor = -Math.PI / 2;
+                const slices = activeFamilies.map((f, i) => {
+                  const frac = f.count / pieTotal;
+                  const sweep = Math.min(frac, 0.9999) * Math.PI * 2;
+                  const start = cursor, end = cursor + sweep, mid = (start + end) / 2;
+                  cursor = end;
+                  return { ...f, i, start, end, mid, frac };
+                });
+                const selSlice = slices.find(s => s.family === selFam);
+
+                const card = { background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 18 } as const;
+                const colTitle = { fontSize: 11, fontWeight: 800, textTransform: 'uppercase' as const, letterSpacing: 0.5, color: T.muted, marginBottom: 12 };
+
+                if (totalEmp === 0) return <div style={{ ...card, textAlign: 'center', color: T.sub }}>No employees yet.</div>;
+
+                return (
+                  <>
+                    {/* summary */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 14, marginBottom: 20 }}>
+                      {[
+                        { l: 'Members', v: totalEmp, c: '#3B82F6' },
+                        { l: 'Skill Families', v: activeFamilies.length, c: '#8B5CF6' },
+                        { l: 'Skill Groups', v: activeGroups.length, c: '#06B6D4' },
+                        { l: 'Avg Coverage', v: `${avgPct}%`, c: pctColor(avgPct) },
+                      ].map(s => (
+                        <div key={s.l} style={{ ...card, textAlign: 'center' }}>
+                          <div style={{ fontSize: 30, fontWeight: 900, color: s.c }}>{s.v}</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 4 }}>{s.l}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* legend + grade explanation (percentage) */}
+                    <HeatKey
+                      items={PCT_LEGEND}
+                      formula={<>each score = the <b>%</b> of the family's members who have that skill (members with skill ÷ family members). A group's % is the average across its skills. Skills are auto-detected from each member's ratings, projects, certifications &amp; resume.</>}
+                    />
+
+                    {/* Explorer: Family → Group → Skills (step by step, left → right) */}
+                    <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>Skill Explorer</div>
+                    <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Click a family in the chart → pick a group → view its skills.</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, alignItems: 'stretch' }}>
+                      {/* Column 1 — Family pie */}
+                      <div style={card}>
+                        <div style={colTitle}>Families · by headcount</div>
+                        {activeFamilies.length === 0 ? (
+                          <div style={{ color: T.sub, fontSize: 13 }}>No data.</div>
+                        ) : (
+                          <>
+                            <svg viewBox="0 0 260 260" style={{ width: '100%', maxWidth: 240, margin: '0 auto', display: 'block', overflow: 'visible' }}>
+                              <defs>
+                                {slices.map(s => (
+                                  <linearGradient key={s.family} id={`qislGrad-${s.i}`} x1="0" y1="0" x2="1" y2="1">
+                                    <stop offset="0%" stopColor={s.color} stopOpacity={1} />
+                                    <stop offset="100%" stopColor={s.color} stopOpacity={0.62} />
+                                  </linearGradient>
+                                ))}
+                                <filter id="qislShadow" x="-30%" y="-30%" width="160%" height="160%">
+                                  <feDropShadow dx="0" dy="3" stdDeviation="4" floodColor="#000" floodOpacity="0.28" />
+                                </filter>
+                              </defs>
+                              <circle cx={CX} cy={CY} r={(R + RI) / 2} fill="none" stroke={dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'} strokeWidth={R - RI} />
+                              {slices.map(s => {
+                                const on = selFam === s.family;
+                                const off = on ? 8 : 0;
+                                const ox = Math.cos(s.mid) * off, oy = Math.sin(s.mid) * off;
+                                return (
+                                  <path key={s.family} d={buildArc(s.start, s.end, ox, oy)} fill={`url(#qislGrad-${s.i})`}
+                                    stroke={T.bg} strokeWidth={3} strokeLinejoin="round"
+                                    opacity={selFam && !on ? 0.4 : 1} filter={on ? 'url(#qislShadow)' : undefined}
+                                    style={{ cursor: 'pointer', transition: 'opacity 0.25s, d 0.25s' }}
+                                    onClick={() => { setQislFam(s.family); setQislGroup(''); }}>
+                                    <title>{`${s.family}: ${s.count} (${Math.round(s.frac * 100)}%)`}</title>
+                                  </path>
+                                );
+                              })}
+                              {slices.filter(s => s.frac >= 0.07).map(s => {
+                                const off = selFam === s.family ? 8 : 0;
+                                const [lx, ly] = polar((R + RI) / 2, s.mid, Math.cos(s.mid) * off, Math.sin(s.mid) * off);
+                                return (
+                                  <text key={s.family} x={lx} y={ly + 4} textAnchor="middle" style={{ fontSize: 13, fontWeight: 900, fill: '#fff', pointerEvents: 'none', textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}>{Math.round(s.frac * 100)}%</text>
+                                );
+                              })}
+                              <text x={CX} y={CY - 4} textAnchor="middle" style={{ fontSize: 30, fontWeight: 900, fill: selSlice ? selSlice.color : T.text }}>{selSlice ? selSlice.count : totalEmp}</text>
+                              <text x={CX} y={CY + 16} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: T.sub }}>{selSlice ? `of ${totalEmp} members` : 'members'}</text>
+                            </svg>
+                            {selFam && <div style={{ textAlign: 'center', fontSize: 12, fontWeight: 800, color: T.text, marginTop: 8 }}>{selFam}</div>}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 14 }}>
+                              {slices.map(s => {
+                                const on = selFam === s.family;
+                                return (
+                                  <button key={s.family} onClick={() => { setQislFam(s.family); setQislGroup(''); }}
+                                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 10, cursor: 'pointer', textAlign: 'left', transition: '0.15s',
+                                      background: on ? (dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)') : 'transparent',
+                                      border: `1px solid ${on ? s.color : 'transparent'}` }}>
+                                    <span style={{ width: 10, height: 24, borderRadius: 4, background: s.color, flexShrink: 0 }} />
+                                    <span style={{ flex: 1, fontSize: 12, fontWeight: on ? 800 : 600, color: T.text }}>{s.family}</span>
+                                    <span style={{ fontSize: 12, fontWeight: 800, color: on ? s.color : T.sub }}>{s.count} · {Math.round(s.frac * 100)}%</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Column 2 — Groups within family */}
+                      <div style={card}>
+                        <div style={colTitle}>Groups{selFam ? ` · ${selFam}` : ''}</div>
+                        {famGroups.length === 0 ? (
+                          <div style={{ color: T.sub, fontSize: 13 }}>Select a family to see its groups.</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {famGroups.map(g => (
+                              <button key={g.group} onClick={() => setQislGroup(g.group)}
+                                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', textAlign: 'left',
+                                  background: selGrp === g.group ? 'rgba(59,130,246,0.12)' : (dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)'),
+                                  border: `1px solid ${selGrp === g.group ? 'rgba(59,130,246,0.45)' : T.bdr}` }}>
+                                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{g.group}</span>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                  <span style={{ fontSize: 11, fontWeight: 800, color: pctColor(g.pct) }}>{g.pct}%</span>
+                                  <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}>{g.count}👤</span>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Column 3 — Skills within group (as % coverage bars) */}
+                      <div style={card}>
+                        <div style={colTitle}>Skills{selGrp ? ` · ${selGrp}` : ''}</div>
+                        {skillPct.length === 0 ? (
+                          <div style={{ color: T.sub, fontSize: 13 }}>Select a group to see its skills.</div>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 11, color: T.sub, marginTop: -6, marginBottom: 12 }}>% of the {famCount} member{famCount === 1 ? '' : 's'} in {selFam}</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              {skillPct.map(s => (
+                                <div key={s.skill} title={`${s.cnt} of ${famCount} members have ${s.skill}`}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                                    <span style={{ fontSize: 12, fontWeight: 700, color: s.pct ? T.text : T.muted }}>{s.skill}</span>
+                                    <span style={{ fontSize: 12, fontWeight: 800, color: s.pct ? pctColor(s.pct) : T.muted }}>{s.pct}% <span style={{ color: T.muted, fontWeight: 600 }}>({s.cnt})</span></span>
+                                  </div>
+                                  <div style={{ height: 7, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+                                    <div style={{ width: `${s.pct}%`, height: '100%', background: pctColor(s.pct), borderRadius: 999, transition: 'width .3s' }} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ── Individual Skill Averages — every QISL skill by family & group ── */}
+                    <div style={{ fontSize: 13, fontWeight: 800, color: T.text, margin: '28px 0 4px' }}>Individual Skill Averages <span style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>(coverage %)</span></div>
+                    <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Every skill across all {QE_FAMILIES.length} families — the % of each family's members who have it.</div>
+                    <HeatKey
+                      items={PCT_LEGEND}
+                      formula={<>each score = the <b>%</b> of that family's members who have the skill (members with skill ÷ family members). A member counts once, in their auto-assigned group.</>}
+                    />
+                    {QE_FAMILIES.map((fam, fi) => {
+                      const famCnt = assignments.filter(a => a.qe.family === fam).length;
+                      const groups = groupsForFamily(fam).map(grp => {
+                        const gCnt = assignments.filter(a => a.qe.family === fam && a.qe.group === grp).length;
+                        const skills = essentialSkillsFor(fam, grp).map(sk => {
+                          const cnt = assignments.filter(a => a.qe.family === fam && a.qe.group === grp && a.qe.matchedSkills.includes(sk)).length;
+                          return { skill: sk, cnt, pct: famCnt ? Math.round(cnt / famCnt * 100) : 0 };
+                        });
+                        return { group: grp, gCnt, skills };
+                      });
+                      return (
+                        <div key={fam} style={{ marginBottom: 22 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 12px', flexWrap: 'wrap' }}>
+                            <span style={{ width: 10, height: 10, borderRadius: 999, background: PIE[fi % PIE.length], flexShrink: 0 }} />
+                            <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{fam}</span>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: T.muted }}>{famCnt} member{famCnt === 1 ? '' : 's'}</span>
+                            <div style={{ flex: 1, minWidth: 40, height: 1, background: T.bdr }} />
+                          </div>
+                          {groups.map(g => (
+                            <div key={g.group} style={{ marginBottom: 16 }}>
+                              <div style={{ fontSize: 11.5, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 8, marginLeft: 20 }}>{g.group} <span style={{ color: T.muted, fontWeight: 700 }}>· {g.skills.length} skills · {g.gCnt} members</span></div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 12 }}>
+                                {g.skills.map(sk => (
+                                  <div key={sk.skill} title={`${sk.cnt} of ${famCnt} ${fam} members have ${sk.skill}`} style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 14, padding: 14, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+                                    <div style={{ fontSize: 10, fontWeight: 800, color: T.sub, marginBottom: 10, minHeight: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', textTransform: 'uppercase', letterSpacing: 0.3 }}>{sk.skill}</div>
+                                    <div style={{ fontSize: 20, fontWeight: 900, color: sk.pct ? pctColor(sk.pct) : T.text }}>{sk.pct}<span style={{ fontSize: 12, fontWeight: 700, color: T.muted }}>%</span></div>
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: T.sub, marginBottom: 6 }}>{sk.cnt}/{famCnt} members</div>
+                                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: 4, background: pctColor(sk.pct) }} />
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()}
             </div>
           )}
 
@@ -4588,7 +4895,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
                
                <div style={{ display: 'flex', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, overflowX: 'auto', flex: 1, minWidth: 200, WebkitOverflowScrolling: 'touch' }}>
-                {(['ZenRadar', 'Skill Group', 'ZenScan', 'ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
+                {(['ZenRadar', 'Skill Group', 'ZenScan', 'ZenMatrix', 'QI SL ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
                    <button 
                      key={tab} 
                      onClick={() => setPopupActiveTab(tab)}
@@ -5040,6 +5347,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     )}
 
                     {popupActiveTab === 'ZenMatrix' && <SkillMatrixPage key="skills" isPopup={true} />}
+                    {popupActiveTab === 'QI SL ZenMatrix' && <QislZenMatrixPage key="qisl-skills" isPopup={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'ZenCode' && <GitHubIntelligencePage key="zencode" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'My Certification' && <CertificationsPage key="certs" isPopup={true} />}
                     {popupActiveTab === 'My Projects' && <ProjectsPage key="projects" isPopup={true} />}

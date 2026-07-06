@@ -23,6 +23,7 @@ import SetupGuidePage from "@/pages/SetupGuidePage";
 
 import EmployeeDashboard from "@/pages/EmployeeDashboard";
 import SkillMatrixPage from "@/pages/SkillMatrixPage";
+import QislZenMatrixPage from "@/pages/QislZenMatrixPage";
 import SkillReportPage from "@/pages/SkillReportPage";
 import AIIntelligencePage from "@/pages/AIIntelligencePage";
 import ResumeBuilderPage from "@/pages/ResumeBuilderPage";
@@ -66,6 +67,7 @@ function AppRoutes() {
         {/* Employee routes */}
         <Route path="/employee/dashboard"      element={isLoggedIn ? <EmployeeDashboard />  : <Navigate to="/login" />} />
         <Route path="/employee/skills"         element={isLoggedIn ? <SkillMatrixPage />    : <Navigate to="/login" />} />
+        <Route path="/employee/qisl-skills"    element={isLoggedIn ? <QislZenMatrixPage />  : <Navigate to="/login" />} />
         <Route path="/employee/report"         element={isLoggedIn ? <SkillReportPage />    : <Navigate to="/login" />} />
         <Route path="/employee/ai"             element={isLoggedIn ? <AIIntelligencePage /> : <Navigate to="/login" />} />
         <Route path="/employee/resume-builder" element={isLoggedIn ? <ResumeBuilderPage />  : <Navigate to="/login" />} />
