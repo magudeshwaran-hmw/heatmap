@@ -37,6 +37,10 @@ import {
   QE_FAMILIES, groupsForFamily, essentialSkillsFor,
   QE_DOMAINS, QE_DOMAIN_LABEL, normalizeDomain, deriveDomain,
 } from '@/lib/qeSkillTaxonomy';
+import {
+  StoredCompletions, loadCompletions, saveCompletions, clearCompletions,
+  parseCompletionRows, completionFlagsFor,
+} from '@/lib/courseCompletions';
 import * as XLSX from 'xlsx';
 
 import {
@@ -71,6 +75,10 @@ export default function AdminDashboard() {
     try { return JSON.parse(localStorage.getItem(SG_EXCEL_KEY) || '{}'); } catch { return {}; }
   });
   const sgFileRef = useRef<HTMLInputElement>(null);
+  // Course-completion log (drives the AI-for-QE / QE-for-AI / Automation flags).
+  // Raw rows are NOT retained — only computed per-person YES flags. Removable.
+  const [completions, setCompletions] = useState<StoredCompletions | null>(() => loadCompletions());
+  const compFileRef = useRef<HTMLInputElement>(null);
   // which rows have their certification / trainings list expanded
   const [sgCertOpen, setSgCertOpen] = useState<Record<string, boolean>>({});
   const [sgTrainOpen, setSgTrainOpen] = useState<Record<string, boolean>>({});
@@ -118,6 +126,31 @@ export default function AdminDashboard() {
 
   const sgLookup = (emp: any) =>
     sgExcel[String(emp.zensar_id || '').toLowerCase()] || sgExcel[String(emp.id || '').toLowerCase()] || null;
+
+  // Parse an uploaded completion log → per-person YES flags (raw rows discarded).
+  const handleCompletionExcel = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const raw: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const data = parseCompletionRows(raw, file.name);
+      saveCompletions(data);
+      setCompletions(data);
+      toast.success(`Loaded ${data.rowsMatched} completion${data.rowsMatched !== 1 ? 's' : ''} from ${file.name}`);
+    } catch (e: any) {
+      toast.error('Could not read completion Excel: ' + (e?.message || 'invalid file'));
+    }
+    if (compFileRef.current) compFileRef.current.value = '';
+  };
+
+  const clearCompletionUpload = () => {
+    clearCompletions();
+    setCompletions(null);
+    toast.success('Removed completion data — all flags reset to No');
+  };
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [newEmployee, setNewEmployee] = useState({
@@ -2382,11 +2415,17 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                        </div>
                      </div>
 
-                     {/* ── Individual skill averages (original heatmap, kept) ── */}
+                     {/* ── Individual skill averages — grouped by skill category ── */}
                      <div style={{ fontSize: 13, fontWeight: 800, color: T.text, margin: '28px 0 4px' }}>Individual Skill Averages <span style={{ fontSize: 12, fontWeight: 700, color: T.sub }}>(out of 5)</span></div>
-                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Mean self-rating (0–5) for each skill, averaged over all {employees.length} employee{employees.length === 1 ? '' : 's'} — including those who haven't rated it (counted as 0).</div>
-                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 12 }}>
-                       {SKILLS.map(sk => {
+                     <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Mean self-rating (0–5) for each skill, grouped by category, averaged over all {employees.length} employee{employees.length === 1 ? '' : 's'} — including those who haven't rated it (counted as 0).</div>
+                     {(() => {
+                       const CATEGORY_LABELS: Record<string, string> = {
+                         Tool: 'Tools', Technology: 'Technologies', Application: 'Application Testing',
+                         Domain: 'Domains', TestingType: 'Testing Types', DevOps: 'DevOps & CI/CD', AI: 'AI & Gen AI',
+                       };
+                       // Preserve the order categories first appear in SKILLS.
+                       const categories = Array.from(new Set(SKILLS.map(sk => sk.category)));
+                       const renderCard = (sk: typeof SKILLS[number]) => {
                          const rated = employees.filter((e: any) => (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0) > 0).length;
                          const avg = employees.length ? employees.reduce((sum, e) => (sum + (e.skills.find((s: any) => s.skillId === sk.id)?.selfRating || 0)), 0) / employees.length : 0;
                          return (
@@ -2397,8 +2436,24 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                              <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: 4, background: avg >= 2.5 ? '#10B981' : avg >= 1.5 ? '#3B82F6' : avg > 0 ? '#F59E0B' : T.bdr }} />
                            </div>
                          );
-                       })}
-                     </div>
+                       };
+                       return categories.map(cat => {
+                         const catSkills = SKILLS.filter(sk => sk.category === cat);
+                         return (
+                           <div key={cat} style={{ marginBottom: 22 }}>
+                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 10px' }}>
+                               <span style={{ width: 8, height: 8, borderRadius: 999, background: '#3B82F6', flexShrink: 0 }} />
+                               <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text, textTransform: 'uppercase', letterSpacing: 0.4 }}>{CATEGORY_LABELS[cat] || cat}</span>
+                               <span style={{ fontSize: 11, fontWeight: 700, color: T.muted }}>{catSkills.length} skill{catSkills.length === 1 ? '' : 's'}</span>
+                               <div style={{ flex: 1, height: 1, background: T.bdr }} />
+                             </div>
+                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 12 }}>
+                               {catSkills.map(renderCard)}
+                             </div>
+                           </div>
+                         );
+                       });
+                     })()}
                    </>
                  );
                })()}
@@ -4121,17 +4176,39 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
                 <div>
                   <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>Skill Group Dashboard</h3>
-                  <div style={{ fontSize: 12, color: T.sub }}>Upload an Excel of <b>ID, Name, Domain, Skill Group</b> — it's matched to people by ID. Skill, experience &amp; certifications come from their profile; AI/QE flags are auto-derived.</div>
+                  <div style={{ fontSize: 12, color: T.sub }}>Upload an Excel of <b>ID, Name, Domain, Skill Group</b> — matched to people by ID. The <b>AI for QE / QE for AI / Automation</b> flags are <b>No</b> for everyone until you upload a <b>Completions</b> Excel (ID, Name + a <b>Yes/No</b> column for each flag) — <b>Yes</b> flips that flag on.</div>
+                  <div style={{ fontSize: 11.5, color: T.sub, marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Download size={13} color="#3B82F6" />
+                    <span style={{ fontWeight: 700 }}>Sample format:</span>
+                    <a href="/samples/skill-group-mapping-template.xlsx" download style={{ color: '#3B82F6', fontWeight: 700, textDecoration: 'none' }}>Mapping template</a>
+                    <span style={{ opacity: 0.5 }}>·</span>
+                    <a href="/samples/course-completions-template.xlsx" download style={{ color: '#10B981', fontWeight: 700, textDecoration: 'none' }}>Completions template</a>
+                  </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
                   <input ref={sgFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleSkillGroupExcel(e.target.files)} />
                   <button onClick={() => sgFileRef.current?.click()} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10, background: '#06B6D4', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
-                    <Upload size={16} /> Upload Excel
+                    <Upload size={16} /> Upload Mapping
                   </button>
                   {Object.keys(sgExcel).length > 0 && (
                     <button onClick={() => { setSgExcel({}); localStorage.removeItem(SG_EXCEL_KEY); toast.success('Cleared uploaded mapping'); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
                       <Trash2 size={14} /> Clear ({Object.keys(sgExcel).length})
                     </button>
+                  )}
+
+                  {/* Completion log — drives the Yes/No flags. Raw rows stay hidden. */}
+                  <input ref={compFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleCompletionExcel(e.target.files)} />
+                  <button onClick={() => compFileRef.current?.click()} title="Excel of ID/Name, Course, Status — completed courses set the Yes flags" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10, background: '#10B981', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                    <Upload size={16} /> Upload Completions
+                  </button>
+                  {completions && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px 6px 12px', borderRadius: 10, border: `1px solid rgba(16,185,129,0.4)`, background: 'rgba(16,185,129,0.10)', fontSize: 12, fontWeight: 700, color: '#10B981', maxWidth: 260 }}
+                      title={`${completions.fileName} · ${completions.rowsMatched} completed course match${completions.rowsMatched === 1 ? '' : 'es'} · uploaded ${new Date(completions.uploadedAt).toLocaleString()}`}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {completions.rowsMatched} from {completions.fileName}</span>
+                      <button onClick={clearCompletionUpload} title="Remove completion data (all flags → No)" style={{ display: 'flex', alignItems: 'center', padding: 4, borderRadius: 6, border: 'none', background: 'transparent', color: '#10B981', cursor: 'pointer' }}>
+                        <X size={14} />
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -4167,7 +4244,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   const certNames = (emp.certifications || [])
                     .map((c: any) => c.cert_name || c.CertName || c.certName || c.name || c.Name || c.title || c.Title || c.certification_name || c.certificationName || (typeof c === 'string' ? c : ''))
                     .filter(Boolean);
-                  return { emp, qe, domain, skillGroup, experience, primarySkill, secondarySkill, skillOptions, trainingList, certNames };
+                  // AI-for-QE / QE-for-AI / Automation flags come ONLY from the
+                  // uploaded completion log — everyone defaults to NO.
+                  const flags = completionFlagsFor(emp, completions);
+                  return { emp, qe, domain, skillGroup, experience, primarySkill, secondarySkill, skillOptions, trainingList, certNames, flags };
                 });
 
                 const groupOptions = Array.from(new Set(merged.map(m => m.skillGroup).filter(Boolean))).sort();
@@ -4181,9 +4261,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   if (sgFilter.group.length && !sgFilter.group.includes(m.skillGroup)) return false;
                   if (sgFilter.skill.length && !sgFilter.skill.includes(m.primarySkill) && !sgFilter.skill.includes(m.secondarySkill)) return false;
                   if (sgFilter.experience.length && !sgFilter.experience.includes(m.experience)) return false;
-                  if (sgFilter.aiForQe.length && !sgFilter.aiForQe.includes(yn(m.qe.aiForQe))) return false;
-                  if (sgFilter.qeForAi.length && !sgFilter.qeForAi.includes(yn(m.qe.qeForAi))) return false;
-                  if (sgFilter.testAutomation.length && !sgFilter.testAutomation.includes(yn(m.qe.testAutomation))) return false;
+                  if (sgFilter.aiForQe.length && !sgFilter.aiForQe.includes(yn(m.flags.aiForQe))) return false;
+                  if (sgFilter.qeForAi.length && !sgFilter.qeForAi.includes(yn(m.flags.qeForAi))) return false;
+                  if (sgFilter.testAutomation.length && !sgFilter.testAutomation.includes(yn(m.flags.testAutomation))) return false;
                   return true;
                 });
 
@@ -4201,9 +4281,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     'Secondary Skill': m.secondarySkill || '',
                     'Related Trainings': m.trainingList.join(', '),
                     Certifications: m.certNames.join(', '),
-                    'Test AI for QE (Zense.AI QI)': m.qe.aiForQe ? 'Yes' : 'No',
-                    'Test QE for AI (AssureAI)': m.qe.qeForAi ? 'Yes' : 'No',
-                    'Test Automation': m.qe.testAutomation ? 'Yes' : 'No',
+                    'Test AI for QE (Zense.AI QI)': m.flags.aiForQe ? 'Yes' : 'No',
+                    'Test QE for AI (AssureAI)': m.flags.qeForAi ? 'Yes' : 'No',
+                    'Test Automation': m.flags.testAutomation ? 'Yes' : 'No',
                   }));
                   const ws = XLSX.utils.json_to_sheet(data);
                   const wb = XLSX.utils.book_new();
@@ -4307,7 +4387,6 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             {rows.map(m => {
                               const emp = m.emp;
                               const rowKey = String(emp.id);
-                              const skillKey = emp.id ?? emp.zensar_id;
                               const certOpen = !!sgCertOpen[rowKey];
                               const shownCerts = certOpen ? m.certNames : m.certNames.slice(0, 2);
                               const trainOpen = !!sgTrainOpen[rowKey];
@@ -4379,16 +4458,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                     )}
                                   </td>
                                   {([
-                                    { key: 'aiForQe' as const, on: m.qe.aiForQe },
-                                    { key: 'qeForAi' as const, on: m.qe.qeForAi },
-                                    { key: 'testAutomation' as const, on: m.qe.testAutomation },
+                                    { key: 'aiForQe' as const, on: m.flags.aiForQe },
+                                    { key: 'qeForAi' as const, on: m.flags.qeForAi },
+                                    { key: 'testAutomation' as const, on: m.flags.testAutomation },
                                   ]).map(f => (
                                     <td key={f.key} style={{ ...cell, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-                                      <button
-                                        title="Click to toggle"
-                                        onClick={() => { setQEOverride(skillKey, { [f.key]: !f.on }); setQeTick(t => t + 1); }}
-                                        style={{ fontSize: 11, fontWeight: 900, padding: '4px 12px', borderRadius: 999, border: 'none', cursor: 'pointer', background: f.on ? 'rgba(16,185,129,0.14)' : (dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'), color: f.on ? '#10B981' : T.muted }}
-                                      >{f.on ? 'YES' : 'NO'}</button>
+                                      <span
+                                        title={completions ? (f.on ? 'Course completed (from uploaded log)' : 'No matching completed course') : 'Upload a completion Excel to set this'}
+                                        style={{ display: 'inline-block', fontSize: 11, fontWeight: 900, padding: '4px 12px', borderRadius: 999, background: f.on ? 'rgba(16,185,129,0.14)' : (dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'), color: f.on ? '#10B981' : T.muted }}
+                                      >{f.on ? 'YES' : 'NO'}</span>
                                     </td>
                                   ))}
                                 </tr>
