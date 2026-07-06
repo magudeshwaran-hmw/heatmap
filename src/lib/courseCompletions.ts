@@ -8,8 +8,9 @@
  *     aiForQe · qeForAi · testAutomation
  *
  * Result: a per-person set of YES flags. No upload → everyone is NO. The upload is
- * removable (→ back to all NO). Frontend-only, persisted in localStorage. The raw
- * rows are NOT retained or shown anywhere — only the computed YES flags survive.
+ * removable (→ back to all NO) and each person can be reset individually. Persisted
+ * in the database (skill_group_completions) with a localStorage mirror for instant
+ * paint / offline. The raw rows are NOT retained — only the computed YES flags.
  */
 
 export type CompletionFlag = 'aiForQe' | 'qeForAi' | 'testAutomation';
@@ -20,13 +21,21 @@ export interface CompletionFlags {
   testAutomation: boolean;
 }
 
-/** What we persist — no raw rows, just the computed per-person flag sets. */
+/** One resolved person → their Yes flags. Maps 1:1 to a DB row. */
+export interface CompletionRecord {
+  empKey: string;   // stable key: id (preferred) or name, lowercased
+  empId: string;
+  empName: string;
+  aiForQe: boolean;
+  qeForAi: boolean;
+  testAutomation: boolean;
+}
+
+/** What we persist — no raw rows, just the computed per-person records. */
 export interface StoredCompletions {
   fileName: string;
   uploadedAt: string;   // ISO
-  rowsMatched: number;  // completed rows that mapped to at least one flag
-  byId: Record<string, CompletionFlag[]>;
-  byName: Record<string, CompletionFlag[]>;
+  records: CompletionRecord[];
 }
 
 const STORE_KEY = 'qe_course_completions';
@@ -104,17 +113,21 @@ function isYes(v: string): boolean {
 // ─── Parse an uploaded sheet (array of row objects) ──────────────────────────
 const norm = (k: string) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
 
-function addFlags(bucket: Record<string, CompletionFlag[]>, key: string, flags: CompletionFlag[]) {
-  const cur = bucket[key] || (bucket[key] = []);
-  flags.forEach(f => { if (!cur.includes(f)) cur.push(f); });
-}
-
+/** Parse an uploaded sheet → one CompletionRecord per person (merged). */
 export function parseCompletionRows(raw: any[], fileName: string): StoredCompletions {
-  const byId: Record<string, CompletionFlag[]> = {};
-  const byName: Record<string, CompletionFlag[]> = {};
-  let rowsMatched = 0;
-
+  // Keyed by a stable person key so multiple rows for the same person merge.
+  const byKey = new Map<string, CompletionRecord>();
   const allFlagCols = ([] as string[]).concat(...Object.values(FLAG_COLUMNS));
+
+  const upsert = (id: string, name: string, flags: CompletionFlag[]) => {
+    const key = (id || name).toLowerCase().trim();
+    if (!key) return;
+    const rec = byKey.get(key) || { empKey: key, empId: id, empName: name, aiForQe: false, qeForAi: false, testAutomation: false };
+    if (id && !rec.empId) rec.empId = id;
+    if (name && !rec.empName) rec.empName = name;
+    flags.forEach(f => { rec[f] = true; });
+    byKey.set(key, rec);
+  };
 
   (raw || []).forEach(r => {
     const get = (...names: string[]): string => {
@@ -142,19 +155,20 @@ export function parseCompletionRows(raw: any[], fileName: string): StoredComplet
     }
 
     if (flags.length === 0) return;
-    if (id) addFlags(byId, id.toLowerCase(), flags);
-    if (name) addFlags(byName, name.toLowerCase(), flags);
-    rowsMatched++;
+    upsert(id, name, flags);
   });
 
-  return { fileName, uploadedAt: new Date().toISOString(), rowsMatched, byId, byName };
+  return { fileName, uploadedAt: new Date().toISOString(), records: Array.from(byKey.values()) };
 }
 
-// ─── Persistence ─────────────────────────────────────────────────────────────
+// ─── Persistence (localStorage mirror — DB is the source of truth) ───────────
 export function loadCompletions(): StoredCompletions | null {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    return raw ? (JSON.parse(raw) as StoredCompletions) : null;
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    // Ignore any stale pre-records-model cache.
+    return Array.isArray(data?.records) ? (data as StoredCompletions) : null;
   } catch { return null; }
 }
 
@@ -168,23 +182,18 @@ export function clearCompletions(): void {
 
 // ─── Per-employee lookup (match by ID first, then Name) ───────────────────────
 export function completionFlagsFor(emp: any, data: StoredCompletions | null): CompletionFlags {
-  if (!data) return { ...EMPTY_FLAGS };
+  if (!data?.records?.length) return { ...EMPTY_FLAGS };
 
   const idKeys = [emp?.zensar_id, emp?.id, emp?.ID]
     .map(x => String(x ?? '').toLowerCase().trim())
     .filter(Boolean);
-  let flags: CompletionFlag[] | null = null;
-  for (const k of idKeys) { if (data.byId[k]) { flags = data.byId[k]; break; } }
+  const name = String(emp?.name ?? '').toLowerCase().trim();
 
-  if (!flags) {
-    const name = String(emp?.name ?? '').toLowerCase().trim();
-    if (name && data.byName[name]) flags = data.byName[name];
-  }
-  if (!flags) return { ...EMPTY_FLAGS };
+  let rec = idKeys.length
+    ? data.records.find(r => idKeys.includes(String(r.empId || '').toLowerCase().trim()) || idKeys.includes(r.empKey))
+    : undefined;
+  if (!rec && name) rec = data.records.find(r => String(r.empName || '').toLowerCase().trim() === name);
+  if (!rec) return { ...EMPTY_FLAGS };
 
-  return {
-    aiForQe: flags.includes('aiForQe'),
-    qeForAi: flags.includes('qeForAi'),
-    testAutomation: flags.includes('testAutomation'),
-  };
+  return { aiForQe: rec.aiForQe, qeForAi: rec.qeForAi, testAutomation: rec.testAutomation };
 }

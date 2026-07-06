@@ -1504,6 +1504,22 @@ async function syncDatabaseSchema() {
       )
     `);
 
+    // Skill-group completion flags (admin Excel upload → AI-for-QE / QE-for-AI /
+    // Automation Yes/No per person). One row per uploaded person, matched to
+    // employees by ID or Name. Persisted so uploads survive restarts.
+    await query(`
+      CREATE TABLE IF NOT EXISTS skill_group_completions (
+        emp_key VARCHAR(160) PRIMARY KEY,
+        emp_id VARCHAR(120),
+        emp_name VARCHAR(200),
+        ai_for_qe BOOLEAN DEFAULT FALSE,
+        qe_for_ai BOOLEAN DEFAULT FALSE,
+        test_automation BOOLEAN DEFAULT FALSE,
+        source_file VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Seed default admin if missing
     const hasAdmin = await query("SELECT * FROM app_settings WHERE key = 'admin_id'");
     if (hasAdmin.rowCount === 0) {
@@ -7156,6 +7172,91 @@ app.post('/api/settings', async (req, res) => {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
       [key, value]
     );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── Skill-group completion flags (admin Excel-driven Yes/No) ────────────────
+// GET /api/skill-completions — all stored completion rows + upload meta
+app.get('/api/skill-completions', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT emp_key, emp_id, emp_name, ai_for_qe, qe_for_ai, test_automation, source_file, updated_at
+         FROM skill_group_completions ORDER BY updated_at DESC`
+    );
+    const records = result.rows.map(r => ({
+      empKey: r.emp_key,
+      empId: r.emp_id || '',
+      empName: r.emp_name || '',
+      aiForQe: !!r.ai_for_qe,
+      qeForAi: !!r.qe_for_ai,
+      testAutomation: !!r.test_automation,
+    }));
+    const fileName = result.rows[0]?.source_file || '';
+    const uploadedAt = result.rows[0]?.updated_at || null;
+    res.json({ records, fileName, uploadedAt });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/skill-completions — replace the whole set with a fresh upload
+app.post('/api/skill-completions', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { fileName, records } = req.body || {};
+    const rows = Array.isArray(records) ? records : [];
+    await client.query('BEGIN');
+    // Latest upload is the source of truth — clear previous, then insert.
+    await client.query('DELETE FROM skill_group_completions');
+    for (const rec of rows) {
+      const empId = String(rec?.empId || '').trim();
+      const empName = String(rec?.empName || '').trim();
+      const empKey = String(rec?.empKey || empId || empName).toLowerCase().trim();
+      if (!empKey) continue;
+      await client.query(
+        `INSERT INTO skill_group_completions
+           (emp_key, emp_id, emp_name, ai_for_qe, qe_for_ai, test_automation, source_file, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,CURRENT_TIMESTAMP)
+         ON CONFLICT (emp_key) DO UPDATE SET
+           emp_id = EXCLUDED.emp_id, emp_name = EXCLUDED.emp_name,
+           ai_for_qe = EXCLUDED.ai_for_qe, qe_for_ai = EXCLUDED.qe_for_ai,
+           test_automation = EXCLUDED.test_automation,
+           source_file = EXCLUDED.source_file, updated_at = CURRENT_TIMESTAMP`,
+        [empKey, empId, empName, !!rec?.aiForQe, !!rec?.qeForAi, !!rec?.testAutomation, String(fileName || '')]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ success: true, count: rows.length });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/skill-completions — remove all (everyone back to No)
+app.delete('/api/skill-completions', async (req, res) => {
+  try {
+    await query('DELETE FROM skill_group_completions');
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/skill-completions/reset-flag — reset ONE flag to No for everyone
+app.post('/api/skill-completions/reset-flag', async (req, res) => {
+  try {
+    const COLS = { aiForQe: 'ai_for_qe', qeForAi: 'qe_for_ai', testAutomation: 'test_automation' };
+    const col = COLS[req.body?.flag];
+    if (!col) return res.status(400).json({ error: 'flag must be aiForQe, qeForAi or testAutomation' });
+    // Turn that flag off for all, then drop rows that no longer carry any flag.
+    await query(`UPDATE skill_group_completions SET ${col} = FALSE, updated_at = CURRENT_TIMESTAMP`);
+    await query(`DELETE FROM skill_group_completions WHERE ai_for_qe = FALSE AND qe_for_ai = FALSE AND test_automation = FALSE`);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });

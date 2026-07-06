@@ -187,3 +187,25 @@ export async function apiSaveSkills(
 export async function apiSubmit(employeeId: string): Promise<void> {
   await req('POST', `/employees/${employeeId}/submit`, {});
 }
+
+// ─── Skill-group completion flags (admin Excel-driven Yes/No) ─────────────────
+export interface ApiCompletionRecord {
+  empKey: string; empId: string; empName: string;
+  aiForQe: boolean; qeForAi: boolean; testAutomation: boolean;
+}
+
+export async function apiGetCompletions(): Promise<{ records: ApiCompletionRecord[]; fileName: string; uploadedAt: string | null }> {
+  return req('GET', '/skill-completions');
+}
+
+export async function apiSaveCompletions(fileName: string, records: ApiCompletionRecord[]): Promise<{ success: boolean; count: number }> {
+  return req('POST', '/skill-completions', { fileName, records });
+}
+
+export async function apiClearCompletions(): Promise<void> {
+  await req('DELETE', '/skill-completions');
+}
+
+export async function apiResetCompletionFlag(flag: 'aiForQe' | 'qeForAi' | 'testAutomation'): Promise<void> {
+  await req('POST', '/skill-completions/reset-flag', { flag });
+}

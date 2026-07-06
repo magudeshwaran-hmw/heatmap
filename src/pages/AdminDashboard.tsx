@@ -16,7 +16,7 @@ import { toast } from '@/lib/ToastContext';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { computeCompletion, exportAllToExcel } from '@/lib/localDB';
-import { apiGetAllEmployees, API_BASE } from '@/lib/api';
+import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag } from '@/lib/api';
 import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
@@ -79,6 +79,9 @@ export default function AdminDashboard() {
   // Raw rows are NOT retained — only computed per-person YES flags. Removable.
   const [completions, setCompletions] = useState<StoredCompletions | null>(() => loadCompletions());
   const compFileRef = useRef<HTMLInputElement>(null);
+  // Reset-flags checklist dropdown (pick which flag columns to reset for everyone).
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetSel, setResetSel] = useState<Array<'aiForQe' | 'qeForAi' | 'testAutomation'>>([]);
   // which rows have their certification / trainings list expanded
   const [sgCertOpen, setSgCertOpen] = useState<Record<string, boolean>>({});
   const [sgTrainOpen, setSgTrainOpen] = useState<Record<string, boolean>>({});
@@ -127,7 +130,26 @@ export default function AdminDashboard() {
   const sgLookup = (emp: any) =>
     sgExcel[String(emp.zensar_id || '').toLowerCase()] || sgExcel[String(emp.id || '').toLowerCase()] || null;
 
-  // Parse an uploaded completion log → per-person YES flags (raw rows discarded).
+  // Load completion flags from the DB on mount (localStorage is only a mirror).
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGetCompletions();
+        if (res.records && res.records.length) {
+          const data: StoredCompletions = { fileName: res.fileName || '', uploadedAt: res.uploadedAt || new Date().toISOString(), records: res.records };
+          setCompletions(data);
+          saveCompletions(data);
+        } else {
+          setCompletions(null);
+          clearCompletions();
+        }
+      } catch {
+        // Backend unreachable — keep whatever the localStorage mirror gave us.
+      }
+    })();
+  }, []);
+
+  // Parse an uploaded completion Excel → per-person flags, then persist to DB.
   const handleCompletionExcel = async (files: FileList | null) => {
     const file = files?.[0];
     if (!file) return;
@@ -137,19 +159,51 @@ export default function AdminDashboard() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const raw: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
       const data = parseCompletionRows(raw, file.name);
+      await apiSaveCompletions(data.fileName, data.records);  // store & update in DB
       saveCompletions(data);
       setCompletions(data);
-      toast.success(`Loaded ${data.rowsMatched} completion${data.rowsMatched !== 1 ? 's' : ''} from ${file.name}`);
+      toast.success(`Saved ${data.records.length} record${data.records.length !== 1 ? 's' : ''} from ${file.name} to database`);
     } catch (e: any) {
-      toast.error('Could not read completion Excel: ' + (e?.message || 'invalid file'));
+      toast.error('Could not save completions: ' + (e?.message || 'invalid file'));
     }
     if (compFileRef.current) compFileRef.current.value = '';
   };
 
-  const clearCompletionUpload = () => {
-    clearCompletions();
-    setCompletions(null);
-    toast.success('Removed completion data — all flags reset to No');
+  const clearCompletionUpload = async () => {
+    try {
+      await apiClearCompletions();
+      clearCompletions();
+      setCompletions(null);
+      toast.success('Removed completion data — all flags reset to No');
+    } catch (e: any) {
+      toast.error('Could not clear completions: ' + (e?.message || 'server error'));
+    }
+  };
+
+  // Reset the SELECTED flag columns to No for everyone (checklist-driven).
+  const FLAG_LABELS: Record<'aiForQe' | 'qeForAi' | 'testAutomation', string> = {
+    aiForQe: 'Test AI for QE', qeForAi: 'Test QE for AI', testAutomation: 'Test Automation',
+  };
+  const resetCompletionFlags = async (flags: Array<'aiForQe' | 'qeForAi' | 'testAutomation'>) => {
+    if (!flags.length) return;
+    try {
+      for (const f of flags) await apiResetCompletionFlag(f);   // reset each in the DB
+      setCompletions(prev => {
+        if (!prev) return prev;
+        // Turn the chosen flags off on every record, then drop now-empty records.
+        const records = prev.records
+          .map(r => { const nr = { ...r }; flags.forEach(f => { nr[f] = false; }); return nr; })
+          .filter(r => r.aiForQe || r.qeForAi || r.testAutomation);
+        const next = { ...prev, records };
+        saveCompletions(next);
+        return next;
+      });
+      toast.success(`Reset ${flags.map(f => FLAG_LABELS[f]).join(', ')} → No for everyone`);
+    } catch (e: any) {
+      toast.error('Could not reset: ' + (e?.message || 'server error'));
+    }
+    setResetOpen(false);
+    setResetSel([]);
   };
   const [sortOrder, setSortOrder] = useState<'A-Z' | 'Z-A' | 'Newest' | 'Oldest'>('A-Z');
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
@@ -4185,31 +4239,67 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                     <a href="/samples/course-completions-template.xlsx" download style={{ color: '#10B981', fontWeight: 700, textDecoration: 'none' }}>Completions template</a>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
-                  <input ref={sgFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleSkillGroupExcel(e.target.files)} />
-                  <button onClick={() => sgFileRef.current?.click()} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10, background: '#06B6D4', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
-                    <Upload size={16} /> Upload Mapping
-                  </button>
-                  {Object.keys(sgExcel).length > 0 && (
-                    <button onClick={() => { setSgExcel({}); localStorage.removeItem(SG_EXCEL_KEY); toast.success('Cleared uploaded mapping'); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 14px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
-                      <Trash2 size={14} /> Clear ({Object.keys(sgExcel).length})
+                <div style={{ display: 'flex', gap: 10, flexShrink: 0, flexWrap: 'wrap', alignItems: 'stretch' }}>
+                  {/* Group 1 — ID→Skill Group mapping */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 12, border: `1px solid ${T.bdr}`, background: T.bg }}>
+                    <input ref={sgFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleSkillGroupExcel(e.target.files)} />
+                    <button onClick={() => sgFileRef.current?.click()} style={{ display: 'flex', alignItems: 'center', gap: 8, height: 38, padding: '0 14px', borderRadius: 8, background: '#06B6D4', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                      <Upload size={16} /> Upload Mapping
                     </button>
-                  )}
-
-                  {/* Completion log — drives the Yes/No flags. Raw rows stay hidden. */}
-                  <input ref={compFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleCompletionExcel(e.target.files)} />
-                  <button onClick={() => compFileRef.current?.click()} title="Excel of ID/Name, Course, Status — completed courses set the Yes flags" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10, background: '#10B981', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
-                    <Upload size={16} /> Upload Completions
-                  </button>
-                  {completions && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px 6px 12px', borderRadius: 10, border: `1px solid rgba(16,185,129,0.4)`, background: 'rgba(16,185,129,0.10)', fontSize: 12, fontWeight: 700, color: '#10B981', maxWidth: 260 }}
-                      title={`${completions.fileName} · ${completions.rowsMatched} completed course match${completions.rowsMatched === 1 ? '' : 'es'} · uploaded ${new Date(completions.uploadedAt).toLocaleString()}`}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✓ {completions.rowsMatched} from {completions.fileName}</span>
-                      <button onClick={clearCompletionUpload} title="Remove completion data (all flags → No)" style={{ display: 'flex', alignItems: 'center', padding: 4, borderRadius: 6, border: 'none', background: 'transparent', color: '#10B981', cursor: 'pointer' }}>
-                        <X size={14} />
+                    {Object.keys(sgExcel).length > 0 && (
+                      <button onClick={() => { setSgExcel({}); localStorage.removeItem(SG_EXCEL_KEY); toast.success('Cleared uploaded mapping'); }} title="Clear mapping" style={{ display: 'flex', alignItems: 'center', gap: 6, height: 38, padding: '0 12px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.card, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                        <Trash2 size={14} /> {Object.keys(sgExcel).length}
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
+
+                  {/* Group 2 — Completions (drives the Yes/No flags; raw rows hidden) */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 12, border: `1px solid ${completions ? 'rgba(16,185,129,0.4)' : T.bdr}`, background: completions ? 'rgba(16,185,129,0.06)' : T.bg }}>
+                    <input ref={compFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleCompletionExcel(e.target.files)} />
+                    <button onClick={() => compFileRef.current?.click()} title="Excel of ID/Name + a Yes/No column per flag — saved to the database" style={{ display: 'flex', alignItems: 'center', gap: 8, height: 38, padding: '0 14px', borderRadius: 8, background: '#10B981', border: 'none', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                      <Upload size={16} /> Upload Completions
+                    </button>
+                    {completions && (
+                      <div style={{ position: 'relative' }}>
+                        <button onClick={() => setResetOpen(o => !o)} title="Reset selected flags to No for everyone"
+                          style={{ display: 'flex', alignItems: 'center', gap: 6, height: 38, padding: '0 12px', borderRadius: 8, border: `1px solid rgba(239,68,68,0.35)`, background: 'rgba(239,68,68,0.08)', color: '#EF4444', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                          <RotateCcw size={15} /> Reset <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
+                        </button>
+                        {resetOpen && (
+                          <>
+                            <div onClick={() => setResetOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 30 }} />
+                            <div style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 31, width: 260, background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 12, boxShadow: '0 12px 32px rgba(0,0,0,0.25)', padding: 8 }}>
+                              <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 0.4, padding: '4px 8px 8px' }}>Which flags to reset?</div>
+                              {([
+                                { key: 'aiForQe' as const, label: 'Test AI for QE' },
+                                { key: 'qeForAi' as const, label: 'Test QE for AI' },
+                                { key: 'testAutomation' as const, label: 'Test Automation' },
+                              ]).map(f => {
+                                const cnt = completions.records.filter(r => r[f.key]).length;
+                                const on = resetSel.includes(f.key);
+                                return (
+                                  <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 8px', borderRadius: 8, cursor: cnt ? 'pointer' : 'not-allowed', opacity: cnt ? 1 : 0.5, fontSize: 13, fontWeight: 600, color: T.text }}>
+                                    <input type="checkbox" checked={on} disabled={!cnt}
+                                      onChange={() => setResetSel(s => s.includes(f.key) ? s.filter(x => x !== f.key) : [...s, f.key])}
+                                      style={{ width: 16, height: 16, accentColor: '#EF4444', cursor: 'pointer' }} />
+                                    <span style={{ flex: 1 }}>{f.label}</span>
+                                    <span style={{ fontSize: 11, fontWeight: 800, color: cnt ? '#10B981' : T.muted }}>{cnt} Yes</span>
+                                  </label>
+                                );
+                              })}
+                              <div style={{ display: 'flex', gap: 8, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.bdr}` }}>
+                                <button onClick={() => setResetSel(['aiForQe', 'qeForAi', 'testAutomation'])} style={{ flex: 1, height: 34, borderRadius: 8, border: `1px solid ${T.bdr}`, background: T.bg, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Select all</button>
+                                <button onClick={() => resetCompletionFlags(resetSel)} disabled={resetSel.length === 0}
+                                  style={{ flex: 1, height: 34, borderRadius: 8, border: 'none', background: resetSel.length ? '#EF4444' : T.bdr, color: '#fff', fontSize: 12, fontWeight: 800, cursor: resetSel.length ? 'pointer' : 'not-allowed', opacity: resetSel.length ? 1 : 0.6 }}>
+                                  Reset{resetSel.length ? ` (${resetSel.length})` : ''}
+                                </button>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
