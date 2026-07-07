@@ -14,7 +14,7 @@ export function shouldUseGatewayProxies(): boolean {
   if (isTunnelHost()) return true;
   if (import.meta.env.VITE_SINGLE_PORT === 'true') return true;
   if (import.meta.env.DEV && typeof window !== 'undefined') {
-    const gatewayPort = String(import.meta.env.VITE_GATEWAY_PORT || '8080');
+    const gatewayPort = String(import.meta.env.VITE_GATEWAY_PORT || '7000');
     if (window.location.port === gatewayPort) return true;
   }
   return false;

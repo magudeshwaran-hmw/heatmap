@@ -6,7 +6,7 @@
 #  Starts the whole stack on a single port:
 #    • Backend API      (internal :3001)
 #    • Ollama LLM        (internal :11434, optional — used for AI features)
-#    • Frontend gateway  (public   :8080)  ← open this in your browser
+#    • Frontend gateway  (public   :7000)  ← open this in your browser
 #
 #  Usage:   ./run.sh
 #  Stop:    press Ctrl+C
@@ -27,7 +27,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-printf '\033[1;36mStarting ZenSkill Navigator…  → http://localhost:8080\033[0m\n'
+printf '\033[1;36mStarting ZenSkill Navigator…  → http://localhost:7000\033[0m\n'
 
 # start-all.cjs verifies the DB, then launches backend + Ollama + Vite gateway.
 exec npm run dev

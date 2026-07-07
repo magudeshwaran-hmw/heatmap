@@ -4,7 +4,7 @@
  */
 const { spawn } = require('child_process');
 
-const PORT = process.env.GATEWAY_PORT || '8080';
+const PORT = process.env.GATEWAY_PORT || '7000';
 
 console.log('');
 console.log('📡 Starting LocalTunnel → http://localhost:' + PORT);

@@ -1,14 +1,18 @@
 /**
- * Start full ZenSkill stack on a single gateway port (default 8080).
- * Internal services: backend :3001, Ollama :11434, PostgreSQL :5432
- * Public entry: http://localhost:8080 (proxy via Vite)
+ * Start full ZenSkill stack on a single gateway port (default 7000).
+ * Internal services: backend :3001, Ollama :11434, PostgreSQL :1234
+ * Public entry: http://localhost:7000 (proxy via Vite)
  */
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
 
 const ROOT = path.join(__dirname, '..');
-const GATEWAY_PORT = process.env.GATEWAY_PORT || '8080';
+
+// Load .env BEFORE reading any env vars so GATEWAY_PORT is available
+require('dotenv').config({ path: path.join(ROOT, '.env') });
+
+const GATEWAY_PORT = process.env.GATEWAY_PORT || '7000';
 const BACKEND_PORT = process.env.PORT || '3001';
 const isWin = process.platform === 'win32';
 
@@ -78,15 +82,14 @@ process.on('SIGTERM', shutdown);
   console.log(` Gateway (public):  http://localhost:${GATEWAY_PORT}`);
   console.log(` Backend (internal): http://localhost:${BACKEND_PORT}/api`);
   console.log(` Ollama (internal):  http://127.0.0.1:11434`);
-  console.log(` Database:           PostgreSQL :5432`);
+  console.log(` Database:           PostgreSQL :1234`);
   console.log('══════════════════════════════════════════════════\n');
 
   // DB connectivity check
   const { Pool } = require('pg');
-  require('dotenv').config({ path: path.join(ROOT, '.env') });
   const dbPool = new Pool({
     host: process.env.DB_HOST || 'localhost',
-    port: Number(process.env.DB_PORT) || 5432,
+    port: Number(process.env.DB_PORT) || 1234,
     database: process.env.DB_NAME || 'skillmatrix',
     user: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD || 'password',

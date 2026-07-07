@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev:ui": "vite",
-    "dev:gateway": "vite --port 8080 --strictPort --host",
+    "dev:gateway": "vite --port 7000 --strictPort --host",
     "server": "node server-postgres.cjs",
     "db:test": "node scripts/test-db.cjs",
     "ollama:serve": "node scripts/ollama-serve.cjs",

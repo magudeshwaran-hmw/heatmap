@@ -1,5 +1,5 @@
 /**
- * Start ngrok tunnel on gateway port 8080 (single URL for full stack).
+ * Start ngrok tunnel on gateway port 7000 (single URL for full stack).
  *
  * Auth (pick ONE):
  *   - NGROK_AUTHTOKEN in .env
@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const PORT = process.env.GATEWAY_PORT || '8080';
+const PORT = process.env.GATEWAY_PORT || '7000';
 const token = process.env.NGROK_AUTHTOKEN?.trim();
 
 const args = token ? ['http', PORT, `--authtoken=${token}`] : ['http', PORT];

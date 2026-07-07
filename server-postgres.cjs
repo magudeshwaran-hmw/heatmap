@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3001;
 // PostgreSQL connection with SSL support for cloud databases
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
+  port: process.env.DB_PORT || 1234,
   database: process.env.DB_NAME || 'skillmatrix',
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'password',
@@ -1922,7 +1922,7 @@ app.get('/api/system/status', async (req, res) => {
     database: db,
     ollama,
     employeeCount,
-    gatewayPort: Number(process.env.GATEWAY_PORT) || 8080,
+    gatewayPort: Number(process.env.GATEWAY_PORT) || 7000,
     backendPort: PORT,
     singlePortMode: process.env.VITE_SINGLE_PORT === 'true',
   });

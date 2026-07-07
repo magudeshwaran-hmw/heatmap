@@ -28,7 +28,7 @@ Then, from the project root, run **two commands**:
 ./run.sh            # starts the whole app
 ```
 
-Open **http://localhost:8080** in your browser. That's it.
+Open **http://localhost:7000** in your browser. That's it.
 
 > **Windows users:** run the commands inside **Git Bash** (ships with
 > [Git for Windows](https://git-scm.com/download/win)), not `cmd` or PowerShell.
@@ -58,7 +58,7 @@ Launches the full stack on a single public port via `npm run dev`:
 
 | Service | Port | Notes |
 |---------|------|-------|
-| Frontend gateway | **8080** | ← open this in your browser |
+| Frontend gateway | **7000** | ← open this in your browser |
 | Backend API | 3001 | internal |
 | Ollama LLM | 11434 | internal, optional (powers AI features) |
 
@@ -100,7 +100,7 @@ npm install
 cp .env.example .env          # then edit DB_PASSWORD in .env
 psql -U postgres -c "CREATE DATABASE skillmatrix;"
 psql -U postgres -d skillmatrix -f COMPLETE_DATABASE_SETUP.sql
-npm run dev                   # starts backend + gateway on :8080
+npm run dev                   # starts backend + gateway on :7000
 ```
 
 ---
@@ -112,10 +112,10 @@ Only `DB_PASSWORD` normally needs changing. Full reference lives in
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DB_HOST` / `DB_PORT` | `localhost` / `5432` | PostgreSQL connection |
+| `DB_HOST` / `DB_PORT` | `localhost` / `1234` | PostgreSQL connection |
 | `DB_NAME` | `skillmatrix` | Database name |
 | `DB_USER` / `DB_PASSWORD` | `postgres` / — | PostgreSQL credentials |
-| `GATEWAY_PORT` | `8080` | Public app URL |
+| `GATEWAY_PORT` | `7000` | Public app URL |
 | `PORT` | `3001` | Internal backend API |
 | `LLM_PROVIDER` | `ollama` | `ollama` (local, free) or `gemini` (cloud) |
 | `CLOUD_API_KEY` | — | Google Gemini key (only if `LLM_PROVIDER=gemini`) |
@@ -154,7 +154,7 @@ resumes (PDF / `.docx`) at once. For each resume the platform:
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start the full stack on port 8080 (used by `run.sh`) |
+| `npm run dev` | Start the full stack on port 7000 (used by `run.sh`) |
 | `npm run server` | Backend API only |
 | `npm run dev:ui` | Frontend (Vite) only |
 | `npm run build` | Production build into `dist/` |
@@ -170,4 +170,4 @@ resumes (PDF / `.docx`) at once. For each resume the platform:
 - **`./installation.sh: permission denied`** — run `chmod +x installation.sh run.sh`.
 - **Windows: `./installation.sh` not found / syntax errors** — you're not in Git
   Bash. Open "Git Bash" and `cd` into the project, then re-run.
-- **Port 8080 already in use** — change `GATEWAY_PORT` in `.env`.
+- **Port 7000 already in use** — change `GATEWAY_PORT` in `.env`.

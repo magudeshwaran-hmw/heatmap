@@ -1,5 +1,5 @@
 /**
- * Production build + preview on :8080 — most reliable for public tunnel sharing.
+ * Production build + preview on :7000 — most reliable for public tunnel sharing.
  * (Vite dev + localtunnel often shows blank page until bypass click.)
  */
 const { spawn, execSync } = require('child_process');
@@ -7,7 +7,11 @@ const path = require('path');
 const http = require('http');
 
 const ROOT = path.join(__dirname, '..');
-const GATEWAY_PORT = process.env.GATEWAY_PORT || '8080';
+
+// Load .env BEFORE reading any env vars
+require('dotenv').config({ path: path.join(ROOT, '.env') });
+
+const GATEWAY_PORT = process.env.GATEWAY_PORT || '7000';
 const BACKEND_PORT = process.env.PORT || '3001';
 const isWin = process.platform === 'win32';
 const children = [];

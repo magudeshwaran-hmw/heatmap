@@ -91,7 +91,7 @@ fi
 # Read the DB settings back out of .env (ignores comments / blank lines).
 get_env() { grep -E "^$1=" .env | tail -n1 | cut -d'=' -f2- | tr -d '\r'; }
 DB_HOST="$(get_env DB_HOST)";     DB_HOST="${DB_HOST:-localhost}"
-DB_PORT="$(get_env DB_PORT)";     DB_PORT="${DB_PORT:-5432}"
+DB_PORT="$(get_env DB_PORT)";     DB_PORT="${DB_PORT:-1234}"
 DB_NAME="$(get_env DB_NAME)";     DB_NAME="${DB_NAME:-skillmatrix}"
 DB_USER="$(get_env DB_USER)";     DB_USER="${DB_USER:-postgres}"
 DB_PASSWORD="$(get_env DB_PASSWORD)"
@@ -123,5 +123,5 @@ say ""
 say "════════════════════════════════════════════════════════"
 ok  "Installation complete!"
 say "  Start the app with:   ./run.sh"
-say "  Then open:            http://localhost:8080"
+say "  Then open:            http://localhost:7000"
 say "════════════════════════════════════════════════════════"
