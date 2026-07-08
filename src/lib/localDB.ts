@@ -183,7 +183,13 @@ export function loadSession(): SessionUser | null {
   const id = localStorage.getItem('skill_nav_session_id');
   const role = localStorage.getItem('skill_nav_session_role');
   const name = localStorage.getItem('skill_nav_session_name');
-  if (!id) return null;
+  // Admin sessions store only the role (no employee id), so restore them here — else
+  // a full page load / direct URL to an /admin/* route loses the session and bounces
+  // to the login page even though the admin is signed in.
+  if (!id) {
+    if (role === 'admin') return { employeeId: 'admin', role: 'admin', name: name || 'Admin User' };
+    return null;
+  }
   return { employeeId: id, role: (role as any) || 'employee', name: name || 'User' };
 }
 export function clearSession() { 
