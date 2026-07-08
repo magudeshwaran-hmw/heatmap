@@ -579,6 +579,10 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
   // Badge-gated P/S/T editor (QISL mode): open state + the in-flight selection + saving.
   const [pstEdit, setPstEdit] = useState<{ primary: string; secondary: string; tertiary: string } | null>(null);
   const [pstSaving, setPstSaving] = useState(false);
+  // 4th "Select your skill" card: chosen skill + dropdown open + search text.
+  const [ownSkill, setOwnSkill] = useState('');
+  const [ownOpen, setOwnOpen] = useState(false);
+  const [ownSearch, setOwnSearch] = useState('');
   // Dynamic question state
   const [v7DynamicQuestions, setV7DynamicQuestions] = useState<any[]>([]);
   const [v7DynamicScenarios, setV7DynamicScenarios] = useState<any[]>([]);
@@ -3252,57 +3256,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                 </div>
               </div>
 
-              {/* Section A2: QI SL 166-skill map (QISL mode only) — admin-style family → group view */}
-              {skillSource === 'qisl' && qislLanding && (
-                <div style={{ marginBottom: 4 }}>
-                  <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6' }} />
-                    QI SL Skill Map <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>· 166-skill taxonomy</span>
-                  </h3>
-                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 20, display: 'flex', flexDirection: 'column', gap: 18, maxHeight: 420, overflowY: 'auto' }}>
-                    {qislLanding.map(fam => (
-                      <div key={fam.family}>
-                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#8B5CF6', marginBottom: 8 }}>{fam.family}</div>
-                        {fam.groups.map(g => (
-                          <div key={g.group} style={{ marginBottom: 8 }}>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, marginBottom: 5 }}>{g.group}</div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                              {g.skills.map(s => {
-                                const isP = s.name === v7Taxonomy?.primary?.skill;
-                                const isS = s.name === v7Taxonomy?.secondary?.skill;
-                                const isT = s.name === v7Taxonomy?.tertiary?.skill;
-                                const badge = isP ? 'PRIMARY' : isS ? 'SECONDARY' : isT ? 'TERTIARY' : null;
-                                const bcolor = isP ? '#3B82F6' : isS ? '#8B5CF6' : isT ? '#10B981' : T.muted;
-                                const lvl = s.level >= 3 ? 'Expert' : s.level === 2 ? 'Intermediate' : 'Beginner';
-                                const earned = v7SkillBadges[s.name];
-                                return (
-                                  <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 8, background: badge ? `${bcolor}12` : 'transparent', border: badge ? `1px solid ${bcolor}44` : `1px solid ${T.bdr}` }}>
-                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: bcolor, flexShrink: 0 }} />
-                                    <span style={{ fontSize: 13.5, fontWeight: badge ? 800 : 600, color: T.text }}>{s.name}</span>
-                                    {badge && <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', color: bcolor, background: `${bcolor}1f`, padding: '2px 8px', borderRadius: 999 }}>{badge}</span>}
-                                    <span style={{ marginLeft: 'auto', fontSize: 11, color: T.sub, flexShrink: 0 }}>{lvl}</span>
-                                    {earned
-                                      ? <span style={{ fontSize: 10, fontWeight: 800, color: '#10B981', background: 'rgba(16,185,129,0.15)', padding: '3px 9px', borderRadius: 999, flexShrink: 0 }}>✓ Badge: {earned}</span>
-                                      : <button
-                                          onClick={() => {
-                                            proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + s.name.replace(/\s+/g, '_');
-                                            setActiveSkillIdx(0);
-                                            setPendingTestStart({ skill: s.name, level: assessmentPath, idx: 0 });
-                                            setShowPermissionScreen(true);
-                                          }}
-                                          style={{ fontSize: 11, fontWeight: 700, color: '#3B82F6', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.3)', padding: '4px 10px', borderRadius: 8, cursor: 'pointer', flexShrink: 0 }}
-                                        >Take test →</button>}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* (QI SL Skill Map table moved to the bottom of the page — see Section D) */}
 
               {/* Section A3: Badge-gated Primary/Secondary/Tertiary change (QISL mode only) */}
               {skillSource === 'qisl' && v7Taxonomy && (() => {
@@ -3426,6 +3380,53 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                       </div>
                     );
                   })}
+
+                  {/* 4th card: Select your own skill (QISL mode) — searchable, family-grouped */}
+                  {skillSource === 'qisl' && qislLanding && (
+                    <div style={{ background: T.card, borderRadius: 16, padding: 20, border: `2px dashed ${T.bdr}`, display: 'flex', flexDirection: 'column' }}>
+                      <div style={{ fontSize: 10, fontWeight: 800, color: '#F59E0B', letterSpacing: '0.08em', marginBottom: 8 }}>SELECT YOUR SKILL</div>
+                      {!ownSkill ? (
+                        <>
+                          <p style={{ margin: '0 0 12px', fontSize: 12.5, color: T.sub }}>Prove a skill beyond your top 3. Pick one, pass its test, then you can promote it to Primary / Secondary / Tertiary.</p>
+                          <div style={{ position: 'relative', marginTop: 'auto' }}>
+                            <button onClick={() => setOwnOpen(o => !o)} style={{ width: '100%', padding: '12px', borderRadius: 10, border: `1px solid ${T.inputBdr}`, background: T.input, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer', textAlign: 'left', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span>Choose a skill…</span><span style={{ color: T.sub }}>▾</span>
+                            </button>
+                            {ownOpen && (
+                              <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 12, boxShadow: '0 12px 34px rgba(0,0,0,0.25)', maxHeight: 300, overflowY: 'auto', zIndex: 30 }}>
+                                <input autoFocus value={ownSearch} onChange={e => setOwnSearch(e.target.value)} placeholder="Search skills…" style={{ width: '100%', padding: '11px 12px', border: 'none', borderBottom: `1px solid ${T.bdr}`, background: 'transparent', color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', position: 'sticky', top: 0 }} />
+                                {qislLanding.map(fam => {
+                                  const matches = fam.groups.flatMap(g => g.skills).filter(s => s.name.toLowerCase().includes(ownSearch.toLowerCase()));
+                                  if (matches.length === 0) return null;
+                                  return (
+                                    <div key={fam.family}>
+                                      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8B5CF6', padding: '8px 12px 4px' }}>{fam.family}</div>
+                                      {matches.map(s => (
+                                        <button key={s.name} onClick={() => { setOwnSkill(s.name); setOwnOpen(false); setOwnSearch(''); }} style={{ width: '100%', textAlign: 'left', padding: '9px 14px', border: 'none', background: 'transparent', color: T.text, fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                          <span>{s.name}</span>{v7SkillBadges[s.name] && <span style={{ color: '#10B981', fontSize: 11, fontWeight: 800 }}>✓ {v7SkillBadges[s.name]}</span>}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <h4 style={{ margin: '0 0 6px', fontSize: 18, fontWeight: 900, color: T.text }}>{ownSkill}</h4>
+                          <button onClick={() => setOwnSkill('')} style={{ alignSelf: 'flex-start', fontSize: 11, color: T.sub, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, marginBottom: 8 }}>↺ Change skill</button>
+                          <div style={{ marginTop: 'auto' }}>
+                            {v7SkillBadges[ownSkill]
+                              ? <div style={{ fontSize: 12, color: '#10B981', fontWeight: 700, marginBottom: 10 }}>✓ Verified: {v7SkillBadges[ownSkill]}</div>
+                              : <div style={{ fontSize: 12, color: '#EF4444', fontWeight: 600, marginBottom: 10 }}>Not Yet Verified</div>}
+                            <button onClick={() => { proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + ownSkill.replace(/\s+/g, '_'); setActiveSkillIdx(0); setPendingTestStart({ skill: ownSkill, level: assessmentPath, idx: 0 }); setShowPermissionScreen(true); }} style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg, #F59E0B, #D97706)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Start Assessment →</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -3474,6 +3475,53 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                   <div style={{ fontSize: 12, color: T.sub }}>Result: <span style={{ color: '#3B82F6', fontWeight: 600 }}>Shown after each test</span></div>
                 </div>
               </div>
+
+              {/* Section D: QI SL Skill Map — full 166-skill taxonomy as a table (QISL mode, last) */}
+              {skillSource === 'qisl' && qislLanding && (
+                <div style={{ marginTop: 8 }}>
+                  <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6' }} />
+                    QI SL Skill Map <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>· 166-skill taxonomy</span>
+                  </h3>
+                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', textAlign: 'left' }}>
+                            {['Skill Category (Family)', 'Group', 'Skill', 'Level', 'Priority'].map(h => (
+                              <th key={h} style={{ padding: '11px 14px', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: T.sub, whiteSpace: 'nowrap' }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {qislLanding.flatMap(fam => fam.groups.flatMap(g => g.skills.map(s => {
+                            const isP = s.name === v7Taxonomy?.primary?.skill;
+                            const isS = s.name === v7Taxonomy?.secondary?.skill;
+                            const isT = s.name === v7Taxonomy?.tertiary?.skill;
+                            const priority = isP ? 'PRIMARY' : isS ? 'SECONDARY' : isT ? 'TERTIARY' : null;
+                            const pcolor = isP ? '#3B82F6' : isS ? '#8B5CF6' : isT ? '#10B981' : T.muted;
+                            const lvl = s.level >= 3 ? 'Expert' : s.level === 2 ? 'Intermediate' : 'Beginner';
+                            const earned = v7SkillBadges[s.name];
+                            return (
+                              <tr key={fam.family + '|' + g.group + '|' + s.name} style={{ borderTop: `1px solid ${T.bdr}` }}>
+                                <td style={{ padding: '10px 14px', color: T.sub, fontWeight: 600, whiteSpace: 'nowrap' }}>{fam.family}</td>
+                                <td style={{ padding: '10px 14px', color: T.sub }}>{g.group}</td>
+                                <td style={{ padding: '10px 14px', color: T.text, fontWeight: priority ? 800 : 600 }}>{s.name}{earned && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: '#10B981' }}>✓ {earned}</span>}</td>
+                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{lvl}</td>
+                                <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                                  {priority
+                                    ? <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', color: pcolor, background: `${pcolor}1f`, padding: '3px 9px', borderRadius: 999 }}>{priority}</span>
+                                    : <span style={{ color: T.muted }}>—</span>}
+                                </td>
+                              </tr>
+                            );
+                          })))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
               </>
               )}
             </div>
