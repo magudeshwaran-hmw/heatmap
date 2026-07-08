@@ -60,7 +60,7 @@ export default function AppHeader() {
     { label: 'ZenRadar',        path: '/employee/dashboard',  icon: Radar },
     // { label: 'ZenMatrix', path: '/employee/skills', icon: Grid3x3 }, // temporarily hidden
     { label: 'QI SL ZenMatrix', path: '/employee/qisl-skills', icon: Grid3x3 },
-    { label: 'ZenAssess',       path: '/employee/zenassess',  icon: ClipboardCheck },
+    { label: 'ZenAssess',       path: '/employee/assessment',  icon: ClipboardCheck },
   ];
   // MORE items (inside the "More ▾" dropdown on desktop)
   const empMore: NavItem[] = [

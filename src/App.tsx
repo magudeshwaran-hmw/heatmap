@@ -79,6 +79,7 @@ function AppRoutes() {
         <Route path="/employee/resume-upload"  element={isLoggedIn ? <ResumeUploadPage />   : <Navigate to="/login" />} />
         <Route path="/employee/assessment-overview" element={isLoggedIn ? <AssessmentOverviewPage /> : <Navigate to="/login" />} />
         <Route path="/employee/zenassess"      element={isLoggedIn ? <ZenAssessPage />      : <Navigate to="/login" />} />
+        <Route path="/employee/assessment"     element={isLoggedIn ? <ZenAssessPage skillSource="qisl" /> : <Navigate to="/login" />} />
         <Route path="/employee/zenassess/capstone" element={isLoggedIn ? <CapstonePage />   : <Navigate to="/login" />} />
         <Route path="/employee/github-intelligence" element={isLoggedIn ? <GitHubIntelligencePage /> : <Navigate to="/login" />} />
 

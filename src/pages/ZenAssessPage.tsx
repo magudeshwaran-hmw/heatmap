@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useDark, mkTheme } from '../lib/themeContext';
 import { useAuth } from '../lib/authContext';
-import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee } from '../lib/api';
+import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee, apiGetQislSkills } from '../lib/api';
 import { toast } from '../lib/ToastContext';
 import { getPdfjs } from '../lib/resumeExtraction';
 import {
@@ -44,7 +44,7 @@ import {
   evaluateIntermediatePracticalAI,
   evaluateIntermediateScenariosAI,
 } from '../lib/expertPathAI';
-import { getQuestionBank, shuffleMCQs, correctLetterToIndex, getRerouteShortlist, LEVEL_FORMAT } from '../data/questionBank/index';
+import { getQuestionBank, shuffleMCQs, correctLetterToIndex, getRerouteShortlist, LEVEL_FORMAT, hasQuestionBank } from '../data/questionBank/index';
 import { determineTierResult, REROUTE_SHORTLIST_SIZE } from '../lib/scoringEngine';
 import CodeEditor from '../components/CodeEditor';
 import AssessmentSidebar, { type SidebarSection, type QuestionStatus } from '../components/AssessmentSidebar';
@@ -470,8 +470,58 @@ function IntegrityResultCard({ report, T }: { report: IntegrityReport | null; T:
   );
 }
 
+// ─── QISL (166-skill) assessment support ─────────────────────────────────────
+// The new /employee/assessment route (skillSource='qisl') tests the QI SL 166-skill
+// primary/secondary/tertiary. The question bank is keyed by the legacy canonical
+// skills, so each QISL skill resolves to a covered bank skill: an exact name match
+// first, else its QE family's representative skill (user-approved "family fallback").
+const QE_FAMILY_TO_BANK_SKILL: Record<string, string> = {
+  'Test Automation Engineering - SDET': 'Automation Testing',
+  'Non-Functional Testing': 'Performance Testing',
+  'AI Driven Quality Engineering': 'AI Test Automation',
+  'AI/ML & Gen AI-Augmented Quality Engineering': 'AI Test Automation',
+  'Data Quality Engineering': 'Database Testing',
+  'Digital, Mobile & Channel Testing': 'Mobile Testing',
+  'Service Integration Quality Engineering': 'API Testing',
+  'Functional & Domain Quality Engineering': 'Functional Testing',
+  'Packaged & Enterprise Applications Testing': 'Functional Testing',
+  'Continuous Testing & Release Quality Engineering': 'Jenkins',
+  'Test Data Management': 'Database Testing',
+  'Learning & Enablement': 'Functional Testing',
+  'Test Delivery, Governance & Pre-Sales support': 'Functional Testing',
+  'QI Pre-Sales & Governance': 'Functional Testing',
+};
+function resolveBankSkillForQisl(skillName: string, family: string | null | undefined): string {
+  if (hasQuestionBank(skillName)) return skillName;
+  return (family && QE_FAMILY_TO_BANK_SKILL[family]) || 'Functional Testing';
+}
+type QislLandingFamily = { family: string; strength: number; groups: { group: string; skills: { name: string; level: number; priority: string | null }[] }[] };
+// Build the admin-style family → group grouped view for the landing screen.
+function buildQislLanding(details: any[]): QislLandingFamily[] {
+  const famMap = new Map<string, Map<string, { name: string; level: number; priority: string | null }[]>>();
+  for (const d of details) {
+    const fam = d.family || 'Other';
+    const grp = d.group || d.skill_group || '—';
+    if (!famMap.has(fam)) famMap.set(fam, new Map());
+    const g = famMap.get(fam)!;
+    if (!g.has(grp)) g.set(grp, []);
+    g.get(grp)!.push({ name: d.skillName || d.skill_name, level: d.level || 0, priority: d.priority || null });
+  }
+  const out: QislLandingFamily[] = [];
+  for (const [family, groups] of famMap) {
+    let strength = 0;
+    const gs = Array.from(groups.entries()).map(([group, skills]) => {
+      skills.sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
+      strength += skills.reduce((n, s) => n + s.level, 0);
+      return { group, skills };
+    });
+    out.push({ family, strength, groups: gs });
+  }
+  return out.sort((a, b) => b.strength - a.strength);
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function ZenAssessPage() {
+export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?: 'legacy' | 'qisl' } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { employeeId } = useAuth();
@@ -522,6 +572,10 @@ export default function ZenAssessPage() {
   const [v7SelectedSkill, setV7SelectedSkill] = useState('Functional Testing');
   // Taxonomy Engine state
   const [v7Taxonomy, setV7Taxonomy] = useState<TaxonomyResult | null>(null);
+  // QISL mode (/employee/assessment): maps each tested QISL skill → its question-bank
+  // skill, and holds the admin-style family/group landing data. Empty in legacy mode.
+  const qislBankMapRef = useRef<Record<string, string>>({});
+  const [qislLanding, setQislLanding] = useState<QislLandingFamily[] | null>(null);
   // Dynamic question state
   const [v7DynamicQuestions, setV7DynamicQuestions] = useState<any[]>([]);
   const [v7DynamicScenarios, setV7DynamicScenarios] = useState<any[]>([]);
@@ -755,7 +809,47 @@ export default function ZenAssessPage() {
         const hasRealSkills = realSkills.length > 0;
         const canonicalRealSkills = realSkills.filter((s: any) => (CANONICAL_SKILLS as readonly string[]).includes(s.skillName));
 
-        if (!hasRealSkills) {
+        if (skillSource === 'qisl') {
+          // ── QISL 166-skill mode (/employee/assessment): test the QI SL primary/
+          // secondary/tertiary. Grade → path was already set above (years-based, the
+          // §experience conditions), so only the 3 skills change here. Each QISL skill
+          // maps to a covered question bank via resolveBankSkillForQisl (family fallback).
+          try {
+            const q = await apiGetQislSkills(employeeId);
+            const details = (q.details || []).filter((d: any) => (d.level || 0) > 0);
+            if (details.length === 0) {
+              setShowZenScanBanner(true); setV7TaxonomyMismatch(false); setV7Taxonomy(null); setQislLanding(null);
+            } else {
+              const nameOf = (d: any) => d.skillName || d.skill_name;
+              const findDetail = (name: string) => details.find((d: any) => nameOf(d) === name);
+              // Overall primary/secondary/tertiary = the employee's stored columns (set by
+              // the QISL chain, same values the admin skill columns show). Fill any blank
+              // slot from the highest-level remaining QISL skill so we always have 3.
+              const sorted = [...details].sort((a: any, b: any) => (b.level - a.level) || String(nameOf(a)).localeCompare(String(nameOf(b))));
+              const picked: any[] = [];
+              const pushByName = (name: string) => { const d = name && findDetail(name); if (d && !picked.includes(d)) picked.push(d); };
+              pushByName(primarySkill); pushByName(secondarySkill); pushByName(tertiarySkill);
+              for (const d of sorted) { if (picked.length >= 3) break; if (!picked.includes(d)) picked.push(d); }
+              const top3 = picked.slice(0, 3);
+              const map: Record<string, string> = {};
+              top3.forEach((d: any) => { map[nameOf(d)] = resolveBankSkillForQisl(nameOf(d), d.family); });
+              qislBankMapRef.current = map;
+              const mk = (d: any) => ({ skill: nameOf(d), score: Math.round(((d.level || 0) / 3) * 100), projectScore: 0, certScore: 0, expScore: 0, keywordScore: 0, projectCount: 0, technologies: [], selfClaimed: 0 } as any);
+              const tax: any = {
+                primary: mk(top3[0]),
+                secondary: top3[1] ? mk(top3[1]) : mk(top3[0]),
+                tertiary: top3[2] ? mk(top3[2]) : mk(top3[0]),
+                allSkills: details.map(mk),
+              };
+              setV7Taxonomy(tax);
+              setV7SelectedSkill(nameOf(top3[0]));
+              setQislLanding(buildQislLanding(details));
+              setShowZenScanBanner(false); setV7TaxonomyMismatch(false);
+            }
+          } catch (e) {
+            setShowZenScanBanner(true); setV7Taxonomy(null); setQislLanding(null);
+          }
+        } else if (!hasRealSkills) {
           setShowZenScanBanner(true);
           setV7TaxonomyMismatch(false);
           setV7Taxonomy(null);
@@ -1117,12 +1211,15 @@ export default function ZenAssessPage() {
 
     // Priority 1: pre-defined question bank
     const lowerLevel = level.toLowerCase() as 'beginner' | 'intermediate' | 'expert';
+    // QISL mode: the displayed skill is a 166-skill name; fetch questions from its
+    // resolved bank skill (family fallback). Legacy mode: identity (map is empty).
+    const bankSkill = qislBankMapRef.current[skillName] || skillName;
 
     // ── EXPERT: Enterprise Scenario Engine. Generates (and caches/reuses) skill
     // scenario groups — a scenario read once + 3–7 linked, objectively-gradable
     // questions of mixed primitive types. Capstone is rendered last. ──────────────
     if (lowerLevel === 'expert') {
-      const assessment = getExpertAssessment(skillName);
+      const assessment = getExpertAssessment(bankSkill);
       setV7ExpertAssessment(assessment);
       setV7ExpertAnswers({});
       setV7BankMCQs([]); setV7DynamicQuestions([]);
@@ -1132,11 +1229,11 @@ export default function ZenAssessPage() {
       return;
     }
 
-    const bankData = getQuestionBank(skillName, lowerLevel) as any;
+    const bankData = getQuestionBank(bankSkill, lowerLevel) as any;
     if (bankData) {
       // ── CHANGE 5: rerouted candidates sit only the shortlisted core subset ──
       if (shortlistN > 0) {
-        const core = getRerouteShortlist(skillName, lowerLevel, shortlistN);
+        const core = getRerouteShortlist(bankSkill, lowerLevel, shortlistN);
         const shuffled = shuffleMCQs(core).map((q: any) => ({ ...q, correct: correctLetterToIndex(q.correct) + 1 }));
         setV7BankMCQs(shuffled);
         // No secondary sections in a reroute shortlist
@@ -3128,11 +3225,51 @@ export default function ZenAssessPage() {
                 </div>
               </div>
 
+              {/* Section A2: QI SL 166-skill map (QISL mode only) — admin-style family → group view */}
+              {skillSource === 'qisl' && qislLanding && (
+                <div style={{ marginBottom: 4 }}>
+                  <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6' }} />
+                    QI SL Skill Map <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>· 166-skill taxonomy</span>
+                  </h3>
+                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 20, display: 'flex', flexDirection: 'column', gap: 18, maxHeight: 420, overflowY: 'auto' }}>
+                    {qislLanding.map(fam => (
+                      <div key={fam.family}>
+                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#8B5CF6', marginBottom: 8 }}>{fam.family}</div>
+                        {fam.groups.map(g => (
+                          <div key={g.group} style={{ marginBottom: 8 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, marginBottom: 5 }}>{g.group}</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                              {g.skills.map(s => {
+                                const isP = s.name === v7Taxonomy?.primary?.skill;
+                                const isS = s.name === v7Taxonomy?.secondary?.skill;
+                                const isT = s.name === v7Taxonomy?.tertiary?.skill;
+                                const badge = isP ? 'PRIMARY' : isS ? 'SECONDARY' : isT ? 'TERTIARY' : null;
+                                const bcolor = isP ? '#3B82F6' : isS ? '#8B5CF6' : isT ? '#10B981' : T.muted;
+                                const lvl = s.level >= 3 ? 'Expert' : s.level === 2 ? 'Intermediate' : 'Beginner';
+                                return (
+                                  <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 8, background: badge ? `${bcolor}12` : 'transparent', border: badge ? `1px solid ${bcolor}44` : `1px solid ${T.bdr}` }}>
+                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: bcolor, flexShrink: 0 }} />
+                                    <span style={{ fontSize: 13.5, fontWeight: badge ? 800 : 600, color: T.text }}>{s.name}</span>
+                                    <span style={{ marginLeft: 'auto', fontSize: 11, color: T.sub }}>{lvl}</span>
+                                    {badge && <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', color: bcolor, background: `${bcolor}1f`, padding: '2px 8px', borderRadius: 999 }}>{badge}</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Section B: Top 3 Skills Panel */}
               <div style={{ marginBottom: 4 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#3B82F6' }} />
-                  Top 3 Skills
+                  {skillSource === 'qisl' ? 'Skills You Will Be Assessed On' : 'Top 3 Skills'}
                 </h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 20 }}>
                   {v7Taxonomy && [

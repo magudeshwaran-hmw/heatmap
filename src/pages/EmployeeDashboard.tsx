@@ -351,7 +351,7 @@ export default function EmployeeDashboard({
                   <AlertTriangle size={18} color="#F59E0B" />
                   <span>Your <strong>{first.skill}</strong> badge was earned {first.months} months ago{old.length > 1 ? ` (and ${old.length - 1} other${old.length > 2 ? 's' : ''} are ageing)` : ''}. Re-assess to keep your profile current.</span>
                 </div>
-                <button onClick={() => navigate('/employee/zenassess')} style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', color: '#F59E0B', fontWeight: 800, fontSize: 12, padding: '8px 14px', borderRadius: 9, cursor: 'pointer', flexShrink: 0 }}>Re-assess</button>
+                <button onClick={() => navigate('/employee/assessment')} style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', color: '#F59E0B', fontWeight: 800, fontSize: 12, padding: '8px 14px', borderRadius: 9, cursor: 'pointer', flexShrink: 0 }}>Re-assess</button>
               </div>
             );
           })()}
@@ -362,7 +362,7 @@ export default function EmployeeDashboard({
                { label: 'ZenScan',              path: '/employee/resume-upload', icon: <Upload size={20}/>,        color: '#3B82F6', desc: 'AI reads your resume and maps every skill, cert and project — instantly.' },
                // { label: 'ZenMatrix', path: '/employee/skills', icon: <PenTool size={20}/>, color: '#8B5CF6', desc: 'Rate yourself. Let your manager confirm. Own your skill profile.' }, // temporarily hidden
                { label: 'QI SL ZenMatrix',        path: '/employee/qisl-skills',    icon: <PenTool size={20}/>,       color: '#EC4899', desc: 'Rate your proficiency across every job family in the QI SL skill taxonomy.', hideInPopup: true },
-               { label: 'ZenAssess',             path: '/employee/zenassess',      icon: <ClipboardCheck size={20}/>, color: '#10B981', desc: 'Validate your skills. Earn verified badges.' },
+               { label: 'ZenAssess',             path: '/employee/assessment',      icon: <ClipboardCheck size={20}/>, color: '#10B981', desc: 'Validate your skills. Earn verified badges.' },
                { label: 'ZenAlign',              path: '/employee/resume-builder', icon: <FileText size={20}/>,      color: '#ec4899', desc: 'Convert your resume to Zensar standard instantly.', hideInPopup: true },
                { label: 'ZenAICoach',            path: '/employee/ai',             icon: <Bot size={20}/>,           color: '#c084fc', desc: 'Career intelligence', hideInPopup: true },
                { label: 'ZenCode — GitHub Analysis', path: '/employee/github-intelligence', icon: <Github size={20}/>, color: '#3B82F6', desc: 'Discover & verify skills from your public GitHub repositories.' },
@@ -448,7 +448,7 @@ export default function EmployeeDashboard({
                   <strong>{openRoleMatches}</strong> open project{openRoleMatches !== 1 ? 's' : ''} match your verified skills.
                 </div>
               )}
-              <button onClick={() => navigate('/employee/zenassess')} style={{ padding: '10px 18px', borderRadius: 10, background: '#3B82F6', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Start Assessment</button>
+              <button onClick={() => navigate('/employee/assessment')} style={{ padding: '10px 18px', borderRadius: 10, background: '#3B82F6', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Start Assessment</button>
             </div>
 
             {/* Career Momentum */}
