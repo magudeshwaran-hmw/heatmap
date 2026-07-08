@@ -3476,52 +3476,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                 </div>
               </div>
 
-              {/* Section D: QI SL Skill Map — full 166-skill taxonomy as a table (QISL mode, last) */}
-              {skillSource === 'qisl' && qislLanding && (
-                <div style={{ marginTop: 8 }}>
-                  <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6' }} />
-                    QI SL Skill Map <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>· 166-skill taxonomy</span>
-                  </h3>
-                  <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
-                    <div style={{ overflowX: 'auto' }}>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', textAlign: 'left' }}>
-                            {['Skill Category (Family)', 'Group', 'Skill', 'Level', 'Priority'].map(h => (
-                              <th key={h} style={{ padding: '11px 14px', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: T.sub, whiteSpace: 'nowrap' }}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {qislLanding.flatMap(fam => fam.groups.flatMap(g => g.skills.map(s => {
-                            const isP = s.name === v7Taxonomy?.primary?.skill;
-                            const isS = s.name === v7Taxonomy?.secondary?.skill;
-                            const isT = s.name === v7Taxonomy?.tertiary?.skill;
-                            const priority = isP ? 'PRIMARY' : isS ? 'SECONDARY' : isT ? 'TERTIARY' : null;
-                            const pcolor = isP ? '#3B82F6' : isS ? '#8B5CF6' : isT ? '#10B981' : T.muted;
-                            const lvl = s.level >= 3 ? 'Expert' : s.level === 2 ? 'Intermediate' : 'Beginner';
-                            const earned = v7SkillBadges[s.name];
-                            return (
-                              <tr key={fam.family + '|' + g.group + '|' + s.name} style={{ borderTop: `1px solid ${T.bdr}` }}>
-                                <td style={{ padding: '10px 14px', color: T.sub, fontWeight: 600, whiteSpace: 'nowrap' }}>{fam.family}</td>
-                                <td style={{ padding: '10px 14px', color: T.sub }}>{g.group}</td>
-                                <td style={{ padding: '10px 14px', color: T.text, fontWeight: priority ? 800 : 600 }}>{s.name}{earned && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: '#10B981' }}>✓ {earned}</span>}</td>
-                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{lvl}</td>
-                                <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
-                                  {priority
-                                    ? <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', color: pcolor, background: `${pcolor}1f`, padding: '3px 9px', borderRadius: 999 }}>{priority}</span>
-                                    : <span style={{ color: T.muted }}>—</span>}
-                                </td>
-                              </tr>
-                            );
-                          })))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
+              {/* QI SL Skill Map table removed per request. */}
               </>
               )}
             </div>
