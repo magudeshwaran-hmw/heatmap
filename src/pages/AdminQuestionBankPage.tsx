@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { toast } from '@/lib/ToastContext';
@@ -209,7 +209,9 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
   const [uploadText, setUploadText] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<QBUploadResult | null>(null);
-  const [showHow, setShowHow] = useState(true);
+  const [showHow, setShowHow] = useState(false);
+  const [openFamily, setOpenFamily] = useState<string | null>(null);
+  const [addFor, setAddFor] = useState<{ skill: string } | null>(null);
 
   const parse = (): any | null => { try { return JSON.parse(uploadText); } catch { toast.error('That is not valid JSON.'); return null; } };
   const onValidate = async () => { const b = parse(); if (!b) return; setBusy(true); try { setResult(await apiQBValidate(b)); } catch (e: any) { toast.error(e?.message || 'Validate failed'); } finally { setBusy(false); } };
@@ -250,7 +252,7 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
       {/* Upload */}
       <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 22, marginBottom: 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Upload questions</h3>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Bulk upload <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>— optional, whole skill at once (JSON)</span></h3>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={downloadTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileJson size={15} /> Template</button>
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
@@ -274,36 +276,171 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
         )}
       </div>
 
-      {/* Coverage */}
-      <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>Coverage</h3>
-      <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', textAlign: 'left' }}>
-                <th style={{ padding: '11px 16px', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', color: T.sub, fontWeight: 800 }}>Skill</th>
-                {types.map(t => <th key={t.key} style={{ padding: '11px 16px', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', color: T.sub, fontWeight: 800, whiteSpace: 'nowrap' }}>{t.label} / {t.target}</th>)}
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {families.map(([family, skills]: [string, string[]]) => (
-                <Fragment key={family}>
-                  <tr><td colSpan={types.length + 2} style={{ padding: '9px 16px', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em', color: '#8B5CF6', background: dark ? 'rgba(139,92,246,0.06)' : 'rgba(139,92,246,0.04)' }}>{family}</td></tr>
-                  {skills.map(skill => (
-                    <tr key={family + skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
-                      <td style={{ padding: '9px 16px', color: T.text, fontWeight: 600 }}>{skill}</td>
-                      {types.map(t => { const n = coverage[skill]?.[t.key] || 0; return <td key={t.key} style={{ padding: '9px 16px' }}><span style={cellStyle(n, t.target)}>{n}</span></td>; })}
-                      <td style={{ padding: '9px 16px', textAlign: 'right' }}><button onClick={() => onPreview(skill)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 11px', borderRadius: 8, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}><Eye size={13} /> View</button></td>
+      {/* Coverage — pick a family → then a skill, add questions manually */}
+      <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>{openFamily ? openFamily : 'Add questions — pick a family'}</h3>
+      {!openFamily ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>
+          {families.map(([family, skills]: [string, string[]]) => {
+            const started = skills.filter(s => types.some((t: TypeInfo) => (coverage[s]?.[t.key] || 0) > 0)).length;
+            const ready = skills.filter(s => types.every((t: TypeInfo) => (coverage[s]?.[t.key] || 0) >= t.target)).length;
+            return (
+              <button key={family} onClick={() => setOpenFamily(family)}
+                style={{ textAlign: 'left', background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 14, padding: 18, cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{family}</span>
+                  <ChevronRight size={18} color={T.muted} />
+                </div>
+                <div style={{ fontSize: 12.5, color: T.sub }}>{skills.length} skills · <b style={{ color: '#10B981' }}>{ready} ready</b> · {started} started</div>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <>
+          <button onClick={() => setOpenFamily(null)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'transparent', border: 'none', color: T.sub, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', marginBottom: 10 }}><ArrowLeft size={14} /> All families</button>
+          <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', textAlign: 'left' }}>
+                    <th style={{ padding: '11px 16px', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', color: T.sub, fontWeight: 800 }}>Skill</th>
+                    {types.map((t: TypeInfo) => <th key={t.key} style={{ padding: '11px 16px', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', color: T.sub, fontWeight: 800, whiteSpace: 'nowrap' }}>{t.label} / {t.target}</th>)}
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(families.find(([f]: any) => f === openFamily)?.[1] || []).map((skill: string) => (
+                    <tr key={skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
+                      <td style={{ padding: '10px 16px', color: T.text, fontWeight: 600 }}>{skill}</td>
+                      {types.map((t: TypeInfo) => { const n = coverage[skill]?.[t.key] || 0; return <td key={t.key} style={{ padding: '10px 16px' }}><span style={cellStyle(n, t.target)}>{n}</span></td>; })}
+                      <td style={{ padding: '10px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button onClick={() => setAddFor({ skill })} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, background: `${meta.color}1a`, border: 'none', color: meta.color, fontWeight: 800, fontSize: 11.5, cursor: 'pointer', marginRight: 6 }}>+ Add</button>
+                        <button onClick={() => onPreview(skill)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 11px', borderRadius: 8, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}><Eye size={13} /> View</button>
+                      </td>
                     </tr>
                   ))}
-                </Fragment>
-              ))}
-            </tbody>
-          </table>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {addFor && (
+        <AddQuestionModal T={T} dark={dark} level={level} skill={addFor.skill} types={types}
+          onClose={() => setAddFor(null)}
+          onSaved={() => { setAddFor(null); onUploaded(); }} />
+      )}
+    </>
+  );
+}
+
+// ── Manual add-a-single-question popup (per skill × type) ─────────────────────
+function AddQuestionModal({ T, dark, level, skill, types, onClose, onSaved }: any) {
+  const [qtype, setQtype] = useState<string>(types[0]?.key || 'mcq');
+  const [saving, setSaving] = useState(false);
+  // shared/typed fields
+  const [f, setF] = useState<any>({ question: '', options: ['', '', '', ''], correct: 'A', explanation: '', difficulty: 'MEDIUM', description: '', correctAnswer: '', keywords: '', task: '', expectedKeywords: '', minLength: 30, title: '', testCases: '[\n  { "input": "", "expectedOutput": "", "hidden": false }\n]', timeLimit: 30, minWords: 60, scoringKeywords: '' });
+  const set = (k: string, v: any) => setF((p: any) => ({ ...p, [k]: v }));
+  const csv = (s: string) => s.split(',').map((x: string) => x.trim()).filter(Boolean);
+
+  const buildItem = (): any | string => {
+    if (qtype === 'mcq') {
+      const opts = f.options.map((o: string) => o.trim()).filter(Boolean);
+      if (!f.question.trim()) return 'Enter the question.';
+      if (opts.length < 2) return 'Enter at least 2 options.';
+      return { question: f.question, options: opts, correct: f.correct, explanation: f.explanation, difficulty: f.difficulty };
+    }
+    if (qtype === 'toolId') {
+      if (!f.description.trim() || !f.correctAnswer.trim()) return 'Enter a description and the correct tool name.';
+      return { description: f.description, correctAnswer: f.correctAnswer, keywords: csv(f.keywords || f.correctAnswer) };
+    }
+    if (qtype === 'practical') {
+      if (!f.task.trim()) return 'Enter the task.';
+      return { task: f.task, expectedKeywords: csv(f.expectedKeywords), minLength: Number(f.minLength) || 30 };
+    }
+    if (qtype === 'coding') {
+      if (!f.title.trim() && !f.description.trim()) return 'Enter a title/description.';
+      let tc: any; try { tc = JSON.parse(f.testCases); } catch { return 'Test cases must be valid JSON.'; }
+      if (!Array.isArray(tc) || tc.length < 1) return 'Add at least one test case.';
+      return { title: f.title, description: f.description, testCases: tc, timeLimit: Number(f.timeLimit) || 30 };
+    }
+    // scenarios / framework
+    if (!f.question.trim()) return 'Enter the question.';
+    return { question: f.question, minWords: Number(f.minWords) || 0, scoringKeywords: csv(f.scoringKeywords) };
+  };
+
+  const save = async () => {
+    const item = buildItem();
+    if (typeof item === 'string') { toast.error(item); return; }
+    setSaving(true);
+    try {
+      await apiQBUpload({ skill, level, mode: 'append', [qtype]: [item] });
+      toast.success(`Added a ${qtype} question to ${skill} ✓`);
+      onSaved();
+    } catch (e: any) { toast.error(e?.message || 'Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const inp = { width: '100%', padding: '10px 12px', borderRadius: 9, border: `1px solid ${T.inputBdr}`, background: T.input, color: T.text, fontSize: 13.5, boxSizing: 'border-box' as const };
+  const lbl = { fontSize: 12, fontWeight: 800, color: T.sub, display: 'block', marginBottom: 5, marginTop: 12 };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 120, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflowY: 'auto' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 'min(600px, 100%)', background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <h3 style={{ margin: 0, fontSize: 17, fontWeight: 900 }}>Add a question</h3>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: T.sub, cursor: 'pointer' }}><X size={20} /></button>
+        </div>
+        <p style={{ margin: '0 0 8px', fontSize: 12.5, color: T.sub }}><b style={{ color: T.text }}>{skill}</b> · <span style={{ textTransform: 'capitalize' }}>{level}</span></p>
+
+        <label style={lbl}>Question type</label>
+        <select value={qtype} onChange={e => setQtype(e.target.value)} style={inp}>
+          {types.map((t: TypeInfo) => <option key={t.key} value={t.key}>{t.label}</option>)}
+        </select>
+
+        {qtype === 'mcq' && (<>
+          <label style={lbl}>Question</label><textarea value={f.question} onChange={e => set('question', e.target.value)} style={{ ...inp, minHeight: 60, resize: 'vertical' }} />
+          {['A', 'B', 'C', 'D'].map((L, i) => (
+            <div key={L}><label style={lbl}>Option {L}</label><input value={f.options[i]} onChange={e => setF((p: any) => { const o = [...p.options]; o[i] = e.target.value; return { ...p, options: o }; })} style={inp} /></div>
+          ))}
+          <label style={lbl}>Correct option</label>
+          <select value={f.correct} onChange={e => set('correct', e.target.value)} style={inp}>{['A', 'B', 'C', 'D'].map(L => <option key={L} value={L}>{L}</option>)}</select>
+          <label style={lbl}>Explanation (optional)</label><input value={f.explanation} onChange={e => set('explanation', e.target.value)} style={inp} />
+        </>)}
+
+        {qtype === 'toolId' && (<>
+          <label style={lbl}>Description (what the tool does)</label><textarea value={f.description} onChange={e => set('description', e.target.value)} style={{ ...inp, minHeight: 60, resize: 'vertical' }} />
+          <label style={lbl}>Correct tool name</label><input value={f.correctAnswer} onChange={e => set('correctAnswer', e.target.value)} style={inp} />
+          <label style={lbl}>Accepted keywords (comma-separated)</label><input value={f.keywords} onChange={e => set('keywords', e.target.value)} placeholder="e.g. tensorboard, tensor board" style={inp} />
+        </>)}
+
+        {qtype === 'practical' && (<>
+          <label style={lbl}>Task</label><textarea value={f.task} onChange={e => set('task', e.target.value)} style={{ ...inp, minHeight: 70, resize: 'vertical' }} />
+          <label style={lbl}>Expected keywords (comma-separated)</label><input value={f.expectedKeywords} onChange={e => set('expectedKeywords', e.target.value)} style={inp} />
+          <label style={lbl}>Minimum length (chars)</label><input type="number" value={f.minLength} onChange={e => set('minLength', e.target.value)} style={inp} />
+        </>)}
+
+        {qtype === 'coding' && (<>
+          <label style={lbl}>Title</label><input value={f.title} onChange={e => set('title', e.target.value)} style={inp} />
+          <label style={lbl}>Description</label><textarea value={f.description} onChange={e => set('description', e.target.value)} style={{ ...inp, minHeight: 70, resize: 'vertical' }} />
+          <label style={lbl}>Test cases (JSON: input → expectedOutput, hidden)</label>
+          <textarea value={f.testCases} onChange={e => set('testCases', e.target.value)} style={{ ...inp, minHeight: 100, resize: 'vertical', fontFamily: 'ui-monospace, monospace', fontSize: 12 }} />
+          <label style={lbl}>Time limit (seconds)</label><input type="number" value={f.timeLimit} onChange={e => set('timeLimit', e.target.value)} style={inp} />
+        </>)}
+
+        {(qtype === 'scenarios' || qtype === 'framework') && (<>
+          <label style={lbl}>Question / prompt</label><textarea value={f.question} onChange={e => set('question', e.target.value)} style={{ ...inp, minHeight: 70, resize: 'vertical' }} />
+          <label style={lbl}>Minimum words</label><input type="number" value={f.minWords} onChange={e => set('minWords', e.target.value)} style={inp} />
+          <label style={lbl}>Scoring keywords (comma-separated)</label><input value={f.scoringKeywords} onChange={e => set('scoringKeywords', e.target.value)} style={inp} />
+        </>)}
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+          <button onClick={save} disabled={saving} style={{ padding: '11px 22px', borderRadius: 9, background: '#10B981', border: 'none', color: '#fff', fontWeight: 800, fontSize: 13.5, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1 }}>{saving ? 'Saving…' : 'Add question'}</button>
+          <button onClick={onClose} disabled={saving} style={{ padding: '11px 22px', borderRadius: 9, background: 'transparent', border: `1px solid ${T.bdr}`, color: T.sub, fontWeight: 700, fontSize: 13.5, cursor: 'pointer' }}>Cancel</button>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
