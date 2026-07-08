@@ -3393,8 +3393,8 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                               <span>Choose a skill…</span><span style={{ color: T.sub }}>▾</span>
                             </button>
                             {ownOpen && (
-                              <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6, background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 12, boxShadow: '0 12px 34px rgba(0,0,0,0.25)', maxHeight: 300, overflowY: 'auto', zIndex: 30 }}>
-                                <input autoFocus value={ownSearch} onChange={e => setOwnSearch(e.target.value)} placeholder="Search skills…" style={{ width: '100%', padding: '11px 12px', border: 'none', borderBottom: `1px solid ${T.bdr}`, background: 'transparent', color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', position: 'sticky', top: 0 }} />
+                              <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6, background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 12, boxShadow: '0 12px 34px rgba(0,0,0,0.35)', maxHeight: 300, overflowY: 'auto', zIndex: 30 }}>
+                                <input autoFocus value={ownSearch} onChange={e => setOwnSearch(e.target.value)} placeholder="Search skills…" style={{ width: '100%', padding: '11px 12px', border: 'none', borderBottom: `1px solid ${T.bdr}`, background: T.cardSolid, color: T.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', position: 'sticky', top: 0 }} />
                                 {qislLanding.map(fam => {
                                   const matches = fam.groups.flatMap(g => g.skills).filter(s => s.name.toLowerCase().includes(ownSearch.toLowerCase()));
                                   if (matches.length === 0) return null;
@@ -3483,7 +3483,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6' }} />
                     QI SL Skill Map <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>· 166-skill taxonomy</span>
                   </h3>
-                  <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
+                  <div style={{ background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, overflow: 'hidden' }}>
                     <div style={{ overflowX: 'auto' }}>
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
