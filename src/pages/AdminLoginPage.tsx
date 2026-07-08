@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/lib/authContext';
+import { apiLogin } from '@/lib/api';
 import { toast } from '@/lib/ToastContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { Lock, User, ArrowRight, ShieldCheck } from 'lucide-react';
@@ -8,19 +9,33 @@ import { Lock, User, ArrowRight, ShieldCheck } from 'lucide-react';
 export default function AdminLoginPage() {
   const [adminId, setAdminId] = useState('');
   const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
   const { dark } = useDark();
   const T = mkTheme(dark);
 
-  const handleLogin = (e: React.FormEvent) => {
+  // Authenticate against the backend so the admin receives a real JWT (role=admin).
+  // Without this, admin write actions (bulk import, create/delete, skill saves) are
+  // unauthenticated and now correctly rejected by the server's auth/ownership checks.
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (adminId === 'admin' && password === 'admin') {
-      login('admin', 'admin-id', 'Admin User');
+    if (busy) return;
+    if (!adminId.trim() || !password) { toast.error('Enter your admin ID and password'); return; }
+    setBusy(true);
+    try {
+      const emp: any = await apiLogin(adminId.trim(), password);   // stores the JWT
+      if (emp?.role !== 'admin') {
+        toast.error('These credentials are not an admin account');
+        return;
+      }
+      login(emp);   // role=admin session
       toast.success('Admin authorized');
       navigate('/admin');
-    } else {
-      toast.error('Invalid credentials');
+    } catch (err: any) {
+      toast.error(err?.message || 'Invalid credentials');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -51,8 +66,8 @@ export default function AdminLoginPage() {
               </div>
             </div>
 
-            <button type="submit" style={{ width:'100%', padding:'16px', borderRadius:13, marginTop:10, background:'linear-gradient(135deg,#3B82F6,#8B5CF6)', border:'none', color:'#fff', fontWeight:800, fontSize:15, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:10, boxShadow:'0 10px 25px rgba(59,130,246,0.35)', transition:'all 0.2s' }}>
-              Authenticate <ArrowRight size={18} />
+            <button type="submit" disabled={busy} style={{ width:'100%', padding:'16px', borderRadius:13, marginTop:10, background:'linear-gradient(135deg,#3B82F6,#8B5CF6)', border:'none', color:'#fff', fontWeight:800, fontSize:15, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1, display:'flex', alignItems:'center', justifyContent:'center', gap:10, boxShadow:'0 10px 25px rgba(59,130,246,0.35)', transition:'all 0.2s' }}>
+              {busy ? 'Authenticating…' : 'Authenticate'} <ArrowRight size={18} />
             </button>
           </form>
         </div>
