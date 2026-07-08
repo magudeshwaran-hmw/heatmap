@@ -268,6 +268,17 @@ export interface TaxonomySkillPayload {
   priority?: 'primary' | 'secondary' | 'tertiary' | null;
 }
 
+/**
+ * Badge-gated manual reassignment of primary/secondary/tertiary. The server rejects
+ * any skill the employee has not earned a verified badge for (403 with `notEarned`).
+ */
+export async function apiSetPrioritySkills(
+  employeeId: string,
+  payload: { primary?: string; secondary?: string; tertiary?: string }
+): Promise<{ success: boolean; primary: string; secondary: string; tertiary: string }> {
+  return req('POST', `/employees/${encodeURIComponent(employeeId)}/priority-skills`, payload);
+}
+
 export async function apiSaveTaxonomySkills(
   employeeId: string,
   payload: {

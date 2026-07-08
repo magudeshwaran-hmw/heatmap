@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useDark, mkTheme } from '../lib/themeContext';
 import { useAuth } from '../lib/authContext';
-import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee, apiGetQislSkills } from '../lib/api';
+import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee, apiGetQislSkills, apiSetPrioritySkills } from '../lib/api';
 import { toast } from '../lib/ToastContext';
 import { getPdfjs } from '../lib/resumeExtraction';
 import {
@@ -576,6 +576,9 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
   // skill, and holds the admin-style family/group landing data. Empty in legacy mode.
   const qislBankMapRef = useRef<Record<string, string>>({});
   const [qislLanding, setQislLanding] = useState<QislLandingFamily[] | null>(null);
+  // Badge-gated P/S/T editor (QISL mode): open state + the in-flight selection + saving.
+  const [pstEdit, setPstEdit] = useState<{ primary: string; secondary: string; tertiary: string } | null>(null);
+  const [pstSaving, setPstSaving] = useState(false);
   // Dynamic question state
   const [v7DynamicQuestions, setV7DynamicQuestions] = useState<any[]>([]);
   const [v7DynamicScenarios, setV7DynamicScenarios] = useState<any[]>([]);
@@ -831,8 +834,10 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
               pushByName(primarySkill); pushByName(secondarySkill); pushByName(tertiarySkill);
               for (const d of sorted) { if (picked.length >= 3) break; if (!picked.includes(d)) picked.push(d); }
               const top3 = picked.slice(0, 3);
+              // Map EVERY evidenced skill (not just the top-3) so the employee can also
+              // pick and test one of their other skills to earn its badge.
               const map: Record<string, string> = {};
-              top3.forEach((d: any) => { map[nameOf(d)] = resolveBankSkillForQisl(nameOf(d), d.family); });
+              details.forEach((d: any) => { map[nameOf(d)] = resolveBankSkillForQisl(nameOf(d), d.family); });
               qislBankMapRef.current = map;
               const mk = (d: any) => ({ skill: nameOf(d), score: Math.round(((d.level || 0) / 3) * 100), projectScore: 0, certScore: 0, expScore: 0, keywordScore: 0, projectCount: 0, technologies: [], selfClaimed: 0 } as any);
               const tax: any = {
@@ -917,6 +922,28 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
       setV7SkillBadges(badges);
       setV7SelfClaimedLevels(selfLevels);
     } catch { /* badges/self-claimed levels remain unchanged — safe fallback */ }
+  };
+
+  // Badge-gated manual P/S/T save. The server re-verifies every chosen skill has an
+  // earned verified badge, so an unearned skill is rejected (403) even if picked.
+  const saveManualPriority = async () => {
+    if (!pstEdit || !employeeId) return;
+    setPstSaving(true);
+    try {
+      const r = await apiSetPrioritySkills(employeeId, pstEdit);
+      setV7Taxonomy(prev => prev ? ({
+        ...prev,
+        primary: { ...(prev as any).primary, skill: r.primary || (prev as any).primary.skill },
+        secondary: { ...(prev as any).secondary, skill: r.secondary || (prev as any).secondary.skill },
+        tertiary: { ...(prev as any).tertiary, skill: r.tertiary || (prev as any).tertiary.skill },
+      } as any) : prev);
+      toast.success('Your primary / secondary / tertiary skills were updated ✓');
+      setPstEdit(null);
+    } catch (e: any) {
+      toast.error(e?.message || 'Could not update priority skills — you can only pick skills you have a verified badge for.');
+    } finally {
+      setPstSaving(false);
+    }
   };
 
   // ── Load assessment history (for Re-check Profile cooldown) & verified badges ──
@@ -3247,12 +3274,24 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                                 const badge = isP ? 'PRIMARY' : isS ? 'SECONDARY' : isT ? 'TERTIARY' : null;
                                 const bcolor = isP ? '#3B82F6' : isS ? '#8B5CF6' : isT ? '#10B981' : T.muted;
                                 const lvl = s.level >= 3 ? 'Expert' : s.level === 2 ? 'Intermediate' : 'Beginner';
+                                const earned = v7SkillBadges[s.name];
                                 return (
                                   <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 8, background: badge ? `${bcolor}12` : 'transparent', border: badge ? `1px solid ${bcolor}44` : `1px solid ${T.bdr}` }}>
                                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: bcolor, flexShrink: 0 }} />
                                     <span style={{ fontSize: 13.5, fontWeight: badge ? 800 : 600, color: T.text }}>{s.name}</span>
-                                    <span style={{ marginLeft: 'auto', fontSize: 11, color: T.sub }}>{lvl}</span>
                                     {badge && <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', color: bcolor, background: `${bcolor}1f`, padding: '2px 8px', borderRadius: 999 }}>{badge}</span>}
+                                    <span style={{ marginLeft: 'auto', fontSize: 11, color: T.sub, flexShrink: 0 }}>{lvl}</span>
+                                    {earned
+                                      ? <span style={{ fontSize: 10, fontWeight: 800, color: '#10B981', background: 'rgba(16,185,129,0.15)', padding: '3px 9px', borderRadius: 999, flexShrink: 0 }}>✓ Badge: {earned}</span>
+                                      : <button
+                                          onClick={() => {
+                                            proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + s.name.replace(/\s+/g, '_');
+                                            setActiveSkillIdx(0);
+                                            setPendingTestStart({ skill: s.name, level: assessmentPath, idx: 0 });
+                                            setShowPermissionScreen(true);
+                                          }}
+                                          style={{ fontSize: 11, fontWeight: 700, color: '#3B82F6', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.3)', padding: '4px 10px', borderRadius: 8, cursor: 'pointer', flexShrink: 0 }}
+                                        >Take test →</button>}
                                   </div>
                                 );
                               })}
@@ -3264,6 +3303,49 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                   </div>
                 </div>
               )}
+
+              {/* Section A3: Badge-gated Primary/Secondary/Tertiary change (QISL mode only) */}
+              {skillSource === 'qisl' && v7Taxonomy && (() => {
+                const earnedList = Object.keys(v7SkillBadges);
+                return (
+                  <div style={{ marginBottom: 4 }}>
+                    <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 20 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                        <div>
+                          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: T.text }}>Your Primary / Secondary / Tertiary</h3>
+                          <p style={{ margin: '4px 0 0', fontSize: 12.5, color: T.sub }}>Change these only to skills you have <b>earned a verified badge</b> for — pass its ZenAssess test above to unlock it.</p>
+                        </div>
+                        {!pstEdit && (
+                          <button onClick={() => setPstEdit({ primary: v7Taxonomy.primary?.skill || '', secondary: v7Taxonomy.secondary?.skill || '', tertiary: v7Taxonomy.tertiary?.skill || '' })}
+                            disabled={earnedList.length === 0}
+                            style={{ padding: '8px 16px', borderRadius: 9, background: earnedList.length ? '#3B82F6' : 'rgba(148,163,184,0.3)', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: earnedList.length ? 'pointer' : 'not-allowed', flexShrink: 0 }}>Change</button>
+                        )}
+                      </div>
+                      {earnedList.length === 0 && (
+                        <p style={{ margin: '12px 0 0', fontSize: 12.5, color: '#F59E0B', fontWeight: 600 }}>Earn at least one badge (complete a test above) to unlock changing your priority skills.</p>
+                      )}
+                      {pstEdit && (
+                        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                          {([['primary', 'Primary', '#3B82F6'], ['secondary', 'Secondary', '#8B5CF6'], ['tertiary', 'Tertiary', '#10B981']] as const).map(([key, label, color]) => (
+                            <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                              <span style={{ width: 84, fontSize: 12, fontWeight: 800, color, flexShrink: 0 }}>{label}</span>
+                              <select value={(pstEdit as any)[key]} onChange={e => setPstEdit(p => p ? { ...p, [key]: e.target.value } : p)}
+                                style={{ flex: 1, padding: '10px 12px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontSize: 13, fontWeight: 600 }}>
+                                <option value="">— none —</option>
+                                {earnedList.map(sk => <option key={sk} value={sk}>{sk} (badge: {v7SkillBadges[sk]})</option>)}
+                              </select>
+                            </div>
+                          ))}
+                          <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+                            <button onClick={saveManualPriority} disabled={pstSaving} style={{ padding: '10px 20px', borderRadius: 9, background: '#10B981', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: pstSaving ? 'not-allowed' : 'pointer', opacity: pstSaving ? 0.7 : 1 }}>{pstSaving ? 'Saving…' : 'Save changes'}</button>
+                            <button onClick={() => setPstEdit(null)} disabled={pstSaving} style={{ padding: '10px 20px', borderRadius: 9, background: 'transparent', color: T.sub, border: `1px solid ${T.bdr}`, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Section B: Top 3 Skills Panel */}
               <div style={{ marginBottom: 4 }}>

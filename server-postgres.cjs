@@ -617,6 +617,11 @@ async function ensurePhase2Tables() {
       try { await pool.query(col); } catch (_) {}
     }
 
+    // Badge-gated primary/secondary/tertiary: 'ai' = derived by the QISL chain (default,
+    // overwritable on re-sync); 'manual' = the employee chose it after earning the skill's
+    // verified badge, so the AI re-sync must NOT overwrite it.
+    try { await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS priority_source VARCHAR(20) DEFAULT 'ai'`); } catch (_) {}
+
     // Extend bfsi_assignments
     const assignCols = [
       `ALTER TABLE bfsi_assignments ADD COLUMN IF NOT EXISTS allocation_readiness INTEGER DEFAULT 0`,
@@ -7613,11 +7618,12 @@ app.post('/api/employees/:id/taxonomy-skills', requireOwnershipStrict('id'), asy
     const sec = body.secondarySkill || null;
     const ter = body.tertiarySkill || null;
     if (prim || sec || ter) {
+      // Never overwrite a badge-gated MANUAL choice with an AI re-sync.
       await client.query(
         `UPDATE employees SET
-           primary_skill   = COALESCE($1, primary_skill),
-           secondary_skill = COALESCE($2, secondary_skill),
-           tertiary_skill  = COALESCE($3, tertiary_skill),
+           primary_skill   = CASE WHEN priority_source = 'manual' THEN primary_skill   ELSE COALESCE($1, primary_skill)   END,
+           secondary_skill = CASE WHEN priority_source = 'manual' THEN secondary_skill ELSE COALESCE($2, secondary_skill) END,
+           tertiary_skill  = CASE WHEN priority_source = 'manual' THEN tertiary_skill  ELSE COALESCE($3, tertiary_skill)  END,
            updated_at = CURRENT_TIMESTAMP
          WHERE id = $4 OR zensar_id = $4`,
         [prim, sec, ter, empId]
@@ -7631,6 +7637,60 @@ app.post('/api/employees/:id/taxonomy-skills', requireOwnershipStrict('id'), asy
     res.status(500).json({ error: error.message });
   } finally {
     client.release();
+  }
+});
+
+// POST /api/employees/:id/priority-skills — BADGE-GATED manual reassignment of
+// primary/secondary/tertiary. An employee may only set a skill they have EARNED a
+// verified ZenAssess badge for (skills.verified_badge_level IS NOT NULL). The server
+// re-verifies every chosen skill so the client picker can never be bypassed, marks
+// priority_source='manual' (AI re-sync then won't overwrite it), and audit-logs it.
+app.post('/api/employees/:id/priority-skills', requireOwnershipStrict('id'), async (req, res) => {
+  try {
+    const paramId = String(req.params.id);
+    const empRow = await query('SELECT id, zensar_id FROM employees WHERE id = $1 OR zensar_id = $1 LIMIT 1', [paramId]);
+    if (empRow.rows.length === 0) return res.status(404).json({ error: 'Employee not found' });
+    const empId = empRow.rows[0].id;
+
+    const clean = (v) => (v == null ? '' : String(v).trim());
+    const primary = clean(req.body.primary);
+    const secondary = clean(req.body.secondary);
+    const tertiary = clean(req.body.tertiary);
+    const chosen = [primary, secondary, tertiary].filter(Boolean);
+    if (chosen.length === 0) return res.status(400).json({ error: 'Provide at least a primary skill.' });
+    if (new Set(chosen.map(s => s.toLowerCase())).size !== chosen.length) {
+      return res.status(400).json({ error: 'Primary, secondary and tertiary must be different skills.' });
+    }
+
+    // The set of skills this employee has actually earned a verified badge for.
+    const badges = await query(
+      `SELECT skill_name, verified_badge_level FROM skills
+        WHERE employee_id = $1 AND verified_badge_level IS NOT NULL`,
+      [empId]
+    );
+    const earned = new Map(badges.rows.map(r => [String(r.skill_name).toLowerCase(), r.verified_badge_level]));
+    const notEarned = chosen.filter(s => !earned.has(s.toLowerCase()));
+    if (notEarned.length > 0) {
+      return res.status(403).json({
+        error: `You can only set a skill you have earned a verified badge for. Complete the ZenAssess test for: ${notEarned.join(', ')}.`,
+        notEarned,
+      });
+    }
+
+    await query(
+      `UPDATE employees SET
+         primary_skill = $1, secondary_skill = $2, tertiary_skill = $3,
+         priority_source = 'manual', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [primary || null, secondary || null, tertiary || null, empId]
+    );
+    await auditLog({
+      employeeId: empId, role: req.user?.role || 'employee', action: 'SET_PRIORITY_SKILLS',
+      resource: 'employees', resourceId: empId, newValue: { primary, secondary, tertiary }, req,
+    });
+    res.json({ success: true, primary, secondary, tertiary, priority_source: 'manual' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
