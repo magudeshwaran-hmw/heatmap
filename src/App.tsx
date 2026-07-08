@@ -16,6 +16,7 @@ import AppHeader from '@/components/AppHeader';
 import LandingPage from "@/pages/LandingPage";
 import AdminLoginPage from "@/pages/AdminLoginPage";
 import AdminDashboard from "@/pages/AdminDashboard";
+import AdminQuestionBankPage from "@/pages/AdminQuestionBankPage";
 import EmployeeDetailPage from "@/pages/EmployeeDetailPage";
 import NotFound from "@/pages/NotFound";
 import AuthPage from "@/pages/AuthPage";
@@ -92,6 +93,7 @@ function AppRoutes() {
         {/* Admin routes, fallback to specific Admin login */}
         <Route path="/admin"              element={isLoggedIn && role === 'admin' ? <AdminDashboard />   : <AdminLoginPage />} />
         <Route path="/admin/bfsi"         element={isLoggedIn && role === 'admin' ? <BFSIDashboard />    : <Navigate to="/admin" />} />
+        <Route path="/admin/question-bank" element={isLoggedIn && role === 'admin' ? <AdminQuestionBankPage /> : <Navigate to="/admin" />} />
         <Route path="/admin/employee/:id" element={isLoggedIn && role === 'admin' ? <EmployeeDetailPage /> : <Navigate to="/admin" />} />
         <Route path="/setup"              element={isLoggedIn && role === 'admin' ? <SetupGuidePage /> : <Navigate to="/admin" />} />
 

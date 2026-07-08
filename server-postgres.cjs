@@ -13,9 +13,11 @@ const fallbackQuestions = require('./fallbackQuestions.cjs');
 // chain-lock endpoint validate/enrich resume-extracted skills against the same 166
 // skills the frontend uses, so a stored rating always resolves to a real family.
 let QE_TAX_BY_ID = new Map();
+let QE_NAME_SET = new Set();
 try {
   const _tax = require('./src/data/qeTaxonomy.generated.json');
   QE_TAX_BY_ID = new Map((_tax.skills || []).map(s => [s.id, s]));
+  QE_NAME_SET = new Set((_tax.skills || []).map(s => String(s.name).toLowerCase()));
   console.log(`✅ Loaded QE taxonomy: ${QE_TAX_BY_ID.size} skills`);
 } catch (e) {
   console.warn('⚠️  QE taxonomy JSON missing (run: npm run gen:taxonomy). Chain endpoint will trust client-supplied skill metadata.');
@@ -457,6 +459,29 @@ async function ensurePhase2Tables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_skill ON question_bank(skill_name)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_band ON question_bank(band)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_active ON question_bank(active)`);
+    // Admin Question Bank manager: hold EVERY question type, not just MCQ. qtype is the
+    // section (mcq/toolId/practical/coding/scenarios/framework); payload holds that
+    // type's full shape (options, testCases, keywords, …). MCQ still fills the legacy
+    // columns too for the existing reader.
+    await pool.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS qtype VARCHAR(24) DEFAULT 'mcq'`).catch(() => {});
+    await pool.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS payload JSONB`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qb_qtype ON question_bank(qtype)`).catch(() => {});
+    // Expert level is engine-generated from a compact per-skill blueprint (6 fields);
+    // this table stores admin-authored overrides that the expert engine reads.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS skill_blueprints (
+        skill        VARCHAR(255) PRIMARY KEY,
+        noun         VARCHAR(255),
+        unit         VARCHAR(255),
+        role         VARCHAR(255),
+        qualities    JSONB,
+        failure_modes JSONB,
+        stakeholders JSONB,
+        capstone     JSONB,
+        updated_by   VARCHAR(50),
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS assessment_analytics (
@@ -6032,6 +6057,190 @@ app.get('/api/zenassess/questions', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================
+// ADMIN QUESTION BANK MANAGER — build/manage ZenAssess questions per level & type
+// ============================================================
+const QB_LEVELS = ['beginner', 'intermediate', 'expert'];
+const QB_TYPES_BY_LEVEL = {
+  beginner: ['mcq', 'toolId', 'practical'],
+  intermediate: ['mcq', 'coding', 'scenarios', 'framework'],
+  expert: [], // Expert is engine-generated from a blueprint — authored via /blueprint, not uploaded.
+};
+// Accept correct answer as letter (A-D) or 1-based number; store 0-based index.
+function qbCorrectIndex(c) {
+  if (c == null || c === '') return null;
+  if (typeof c === 'number') return c >= 1 && c <= 4 ? c - 1 : c;
+  const m = { A: 0, B: 1, C: 2, D: 3 }[String(c).trim().toUpperCase()];
+  if (m != null) return m;
+  const n = parseInt(c, 10);
+  return Number.isFinite(n) ? n - 1 : null;
+}
+// Validate + normalise one item of a qtype into a question_bank row, or return {error}.
+function qbNormalize(skill, level, qtype, item, idx) {
+  const err = (msg) => ({ error: `${qtype}[${idx}]: ${msg}` });
+  if (!item || typeof item !== 'object') return err('not an object');
+  const rawDiff = String(item.difficulty || 'MEDIUM').toUpperCase();
+  const difficulty = ['EASY', 'MEDIUM', 'HARD', 'SCENARIO'].includes(rawDiff) ? rawDiff : 'MEDIUM';
+  const base = {
+    skill_name: skill, band: level, qtype,
+    difficulty, topic: item.topic || null,
+    points: Number(item.points) || 1, time_seconds: Number(item.time || item.time_seconds) || 60,
+    explanation: item.explanation || null,
+  };
+  if (qtype === 'mcq') {
+    const opts = Array.isArray(item.options) ? item.options : [];
+    if (!item.question) return err('missing "question"');
+    if (opts.length < 2) return err('need at least 2 options');
+    const ci = qbCorrectIndex(item.correct);
+    if (ci == null || ci < 0 || ci >= opts.length) return err('invalid "correct" answer');
+    return { row: { ...base, question_text: item.question, options: JSON.stringify(opts), correct_option: ci, payload: { question: item.question, options: opts, correct: ci, explanation: item.explanation || '' } } };
+  }
+  if (qtype === 'toolId') {
+    if (!item.description) return err('missing "description"');
+    if (!item.correctAnswer) return err('missing "correctAnswer"');
+    return { row: { ...base, question_text: item.description, options: '[]', correct_option: 0, payload: { description: item.description, correctAnswer: item.correctAnswer, keywords: Array.isArray(item.keywords) ? item.keywords : [] } } };
+  }
+  if (qtype === 'practical') {
+    if (!item.task) return err('missing "task"');
+    return { row: { ...base, question_text: item.task, options: '[]', correct_option: 0, payload: { task: item.task, expectedKeywords: item.expectedKeywords || [], alternativeKeywords: item.alternativeKeywords || [], minLength: Number(item.minLength) || 30, sampleSolution: item.sampleSolution || '' } } };
+  }
+  if (qtype === 'coding') {
+    if (!item.title && !item.description) return err('missing "title"/"description"');
+    const tc = Array.isArray(item.testCases) ? item.testCases : [];
+    if (tc.length < 1) return err('need at least 1 testCase');
+    return { row: { ...base, question_text: item.description || item.title, options: '[]', correct_option: 0, payload: { title: item.title || '', description: item.description || '', examples: item.examples || [], testCases: tc, starterCode: item.starterCode || {}, timeLimit: Number(item.timeLimit) || 30 } } };
+  }
+  if (qtype === 'scenarios' || qtype === 'framework') {
+    if (!item.question) return err('missing "question"');
+    const opts = Array.isArray(item.options) && item.options.length ? item.options : null;
+    const ci = opts ? qbCorrectIndex(item.correct) : null;
+    return { row: { ...base, question_text: item.question, options: opts ? JSON.stringify(opts) : '[]', correct_option: ci != null ? ci : 0, payload: { question: item.question, minWords: Number(item.minWords) || 0, scoringKeywords: item.scoringKeywords || [], options: opts || undefined, correct: ci } } };
+  }
+  return err('unknown question type');
+}
+// Parse a whole upload body into rows + errors + a per-type summary.
+function qbParseFile(body) {
+  const skill = String(body.skill || '').trim();
+  const level = String(body.level || '').toLowerCase();
+  const errors = []; const rows = []; const summary = {};
+  if (!skill) errors.push('missing "skill"');
+  else if (QE_NAME_SET.size > 0 && !QE_NAME_SET.has(skill.toLowerCase())) errors.push(`unknown skill "${skill}" (not in the 166 taxonomy)`);
+  if (!QB_LEVELS.includes(level)) errors.push('invalid "level" (beginner/intermediate/expert)');
+  const types = QB_TYPES_BY_LEVEL[level] || [];
+  for (const qt of types) {
+    const arr = Array.isArray(body[qt]) ? body[qt] : [];
+    if (arr.length === 0) continue;
+    summary[qt] = { total: arr.length, valid: 0 };
+    arr.forEach((item, i) => {
+      const out = qbNormalize(skill, level, qt, item, i);
+      if (out.error) errors.push(out.error);
+      else { rows.push(out.row); summary[qt].valid++; }
+    });
+  }
+  return { skill, level, rows, errors, summary };
+}
+
+// GET coverage — per skill × qtype counts (optionally for one level) for the matrix.
+app.get('/api/admin/question-bank/coverage', requireAdminStrict, async (req, res) => {
+  try {
+    const level = String(req.query.level || '').toLowerCase();
+    const params = []; let where = 'active = true';
+    if (QB_LEVELS.includes(level)) { where += ' AND band = $1'; params.push(level); }
+    const r = await query(`SELECT skill_name, band, COALESCE(qtype,'mcq') qtype, COUNT(*)::int n FROM question_bank WHERE ${where} GROUP BY skill_name, band, qtype`, params);
+    res.json({ success: true, rows: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET items — all questions for a skill × level (preview drawer).
+app.get('/api/admin/question-bank/items', requireAdminStrict, async (req, res) => {
+  try {
+    const skill = String(req.query.skill || ''); const level = String(req.query.level || '').toLowerCase();
+    const r = await query(
+      `SELECT id, skill_name, band, COALESCE(qtype,'mcq') qtype, question_text, options, correct_option, explanation, topic, points, time_seconds, active, payload
+         FROM question_bank WHERE LOWER(skill_name) = LOWER($1) AND band = $2 ORDER BY qtype, id`,
+      [skill, level]
+    );
+    res.json({ success: true, items: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST validate — dry-run: parse + validate, no write.
+app.post('/api/admin/question-bank/validate', requireAdminStrict, async (req, res) => {
+  try {
+    const { skill, level, rows, errors, summary } = qbParseFile(req.body || {});
+    res.json({ success: errors.length === 0, skill, level, willInsert: rows.length, summary, errors });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST upload — commit valid rows. mode 'replace' clears that skill/level/qtype first.
+app.post('/api/admin/question-bank/upload', requireAdminStrict, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const mode = req.body?.mode === 'replace' ? 'replace' : 'append';
+    const { skill, level, rows, errors, summary } = qbParseFile(req.body || {});
+    if (rows.length === 0) { client.release(); return res.status(400).json({ error: 'Nothing valid to upload.', errors, summary }); }
+    await client.query('BEGIN');
+    if (mode === 'replace') {
+      const qtypes = [...new Set(rows.map(r => r.qtype))];
+      for (const qt of qtypes) {
+        await client.query('DELETE FROM question_bank WHERE LOWER(skill_name)=LOWER($1) AND band=$2 AND qtype=$3', [skill, level, qt]);
+      }
+    }
+    let inserted = 0;
+    for (const r of rows) {
+      await client.query(
+        `INSERT INTO question_bank (skill_name, band, difficulty, question_text, options, correct_option, explanation, topic, points, time_seconds, qtype, payload, active, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,$13)`,
+        [r.skill_name, r.band, r.difficulty, r.question_text, r.options, r.correct_option, r.explanation, r.topic, r.points, r.time_seconds, r.qtype, JSON.stringify(r.payload), req.user?.employeeId || 'admin']
+      );
+      inserted++;
+    }
+    await client.query('COMMIT');
+    await auditLog({ employeeId: req.user?.employeeId || 'admin', role: 'admin', action: 'QB_UPLOAD', resource: 'question_bank', details: { skill, level, mode, inserted }, req });
+    res.json({ success: true, skill, level, mode, inserted, skipped: errors.length, summary, errors });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+// POST toggle active / DELETE a question.
+app.post('/api/admin/question-bank/:id/toggle', requireAdminStrict, async (req, res) => {
+  try {
+    const r = await query('UPDATE question_bank SET active = NOT active, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING id, active', [parseInt(req.params.id, 10)]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Question not found' });
+    res.json({ success: true, id: r.rows[0].id, active: r.rows[0].active });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/admin/question-bank/:id', requireAdminStrict, async (req, res) => {
+  try {
+    await query('DELETE FROM question_bank WHERE id = $1', [parseInt(req.params.id, 10)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Expert blueprint (authored override the expert engine reads).
+app.get('/api/admin/blueprint/:skill', requireAdminStrict, async (req, res) => {
+  try {
+    const r = await query('SELECT * FROM skill_blueprints WHERE LOWER(skill) = LOWER($1) LIMIT 1', [String(req.params.skill)]);
+    res.json({ success: true, blueprint: r.rows[0] || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/admin/blueprint/:skill', requireAdminStrict, async (req, res) => {
+  try {
+    const skill = String(req.params.skill);
+    const b = req.body || {};
+    const arr = (v) => JSON.stringify(Array.isArray(v) ? v : String(v || '').split(',').map(s => s.trim()).filter(Boolean));
+    await query(
+      `INSERT INTO skill_blueprints (skill, noun, unit, role, qualities, failure_modes, stakeholders, capstone, updated_by, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,CURRENT_TIMESTAMP)
+       ON CONFLICT (skill) DO UPDATE SET noun=$2, unit=$3, role=$4, qualities=$5, failure_modes=$6, stakeholders=$7, capstone=$8, updated_by=$9, updated_at=CURRENT_TIMESTAMP`,
+      [skill, b.noun || null, b.unit || null, b.role || null, arr(b.qualities), arr(b.failureModes), arr(b.stakeholders), b.capstone ? JSON.stringify(b.capstone) : null, req.user?.employeeId || 'admin']
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/zenassess/history/:employeeId — retrieve historical assessment sessions

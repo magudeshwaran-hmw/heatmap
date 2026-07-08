@@ -291,3 +291,37 @@ export async function apiSaveTaxonomySkills(
 ): Promise<{ success: boolean; written: number }> {
   return req('POST', `/employees/${encodeURIComponent(employeeId)}/taxonomy-skills`, payload);
 }
+
+// ─── Admin Question Bank manager ──────────────────────────────────────────────
+export interface QBCoverageRow { skill_name: string; band: string; qtype: string; n: number }
+export interface QBItem {
+  id: number; skill_name: string; band: string; qtype: string; question_text: string;
+  options: any; correct_option: number; explanation: string | null; topic: string | null;
+  points: number; time_seconds: number; active: boolean; payload: any;
+}
+export interface QBUploadResult { success: boolean; skill: string; level: string; inserted?: number; skipped?: number; willInsert?: number; summary: Record<string, { total: number; valid: number }>; errors: string[] }
+
+export async function apiQBCoverage(level?: string): Promise<{ rows: QBCoverageRow[] }> {
+  return req('GET', `/admin/question-bank/coverage${level ? `?level=${encodeURIComponent(level)}` : ''}`);
+}
+export async function apiQBItems(skill: string, level: string): Promise<{ items: QBItem[] }> {
+  return req('GET', `/admin/question-bank/items?skill=${encodeURIComponent(skill)}&level=${encodeURIComponent(level)}`);
+}
+export async function apiQBValidate(body: any): Promise<QBUploadResult> {
+  return req('POST', `/admin/question-bank/validate`, body);
+}
+export async function apiQBUpload(body: any): Promise<QBUploadResult> {
+  return req('POST', `/admin/question-bank/upload`, body);
+}
+export async function apiQBToggle(id: number): Promise<{ success: boolean; active: boolean }> {
+  return req('POST', `/admin/question-bank/${id}/toggle`);
+}
+export async function apiQBDelete(id: number): Promise<{ success: boolean }> {
+  return req('DELETE', `/admin/question-bank/${id}`);
+}
+export async function apiGetBlueprint(skill: string): Promise<{ blueprint: any | null }> {
+  return req('GET', `/admin/blueprint/${encodeURIComponent(skill)}`);
+}
+export async function apiSaveBlueprint(skill: string, body: any): Promise<{ success: boolean }> {
+  return req('PUT', `/admin/blueprint/${encodeURIComponent(skill)}`, body);
+}
