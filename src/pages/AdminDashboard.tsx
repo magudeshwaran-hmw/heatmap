@@ -16,7 +16,7 @@ import { toast } from '@/lib/ToastContext';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { computeCompletion, exportAllToExcel } from '@/lib/localDB';
-import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills } from '@/lib/api';
+import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills, apiRefreshToken } from '@/lib/api';
 import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
@@ -952,6 +952,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     if (!files || files.length === 0) return;
     const list = Array.from(files).filter(f => /\.(pdf|docx)$/i.test(f.name)).slice(0, 100);
     if (list.length === 0) { toast.error('Please select PDF or Word (.docx) resume files'); return; }
+    // Pre-flight: bulk import writes require an admin login token. Fail fast with a
+    // clear message instead of letting all 100 resumes error out one by one.
+    if (!localStorage.getItem('zn_access_token')) {
+      toast.error('Your admin session has expired. Please log out and log in again, then retry the import.');
+      return;
+    }
+    // Start the batch with a freshly refreshed token — a 100-resume run can easily
+    // outlast the 15-minute access token, so we also refresh periodically below.
+    try { await apiRefreshToken(); } catch { /* best effort */ }
     const batchPassword = (bulkPassword || '').trim() || '1234567890';
     setBulkImporting(true);
     setBulkResult(null);
@@ -962,6 +971,9 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     const pushLog = (e: BulkLogEntry) => setBulkLog(prev => [e, ...prev]);
     for (let i = 0; i < list.length; i++) {
       setBulkProgress({ current: i + 1, total: list.length });
+      // Keep the access token fresh across a long batch so neither create-employee nor
+      // the QI SL chain write starts failing partway through once the 15-min token lapses.
+      if (i > 0 && i % 8 === 0) { try { await apiRefreshToken(); } catch { /* best effort */ } }
       const fileLabel = list[i].name.replace(/\.(pdf|docx)$/i, '');
       try {
         let text = '';
@@ -1014,6 +1026,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           const createdEmp = await res.json().catch(() => ({} as any));
           empId = String(createdEmp?.id || createdEmp?.zensar_id || detectedZid || '');
           created++;
+        } else if (res.status === 401 || res.status === 403) {
+          // Auth problem, not a bad resume — refresh once and if it still fails, stop the
+          // whole batch with a clear message rather than failing every remaining resume.
+          const refreshed = await apiRefreshToken().catch(() => false);
+          toast.error(refreshed
+            ? 'Admin session refreshed — please retry the import.'
+            : 'Admin access was rejected. Log out and log in again as admin, then retry.');
+          break;
         } else {
           const errBody = await res.json().catch(() => ({} as any));
           const isDuplicate = /exist|duplicate|already/i.test(String(errBody?.error || ''));

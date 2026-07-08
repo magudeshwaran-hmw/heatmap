@@ -83,6 +83,14 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
+// Public wrapper so long-running batches (e.g. bulk import of 100 resumes, which can
+// outlast the 15-minute access token) can proactively refresh before/inside the loop.
+// Returns true if a token is available afterwards. No-op-safe when already fresh.
+export async function apiRefreshToken(): Promise<boolean> {
+  if (!tokenStore.getRefresh()) return !!tokenStore.getAccess();
+  return tryRefreshToken();
+}
+
 async function tryRefreshToken(): Promise<boolean> {
   const refresh = tokenStore.getRefresh();
   if (!refresh) return false;
