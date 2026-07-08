@@ -1688,7 +1688,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
           {/* Question Bank manager — separate page (build/manage ZenAssess questions) */}
           <button
-            onClick={() => navigate('/admin/question-bank')}
+            onClick={() => navigate('/bank')}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 20 }}
           >
             <FileSpreadsheet size={15} /> Question Bank — upload &amp; manage questions
