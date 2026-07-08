@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { toast } from '@/lib/ToastContext';
 import { QE_ALL_SKILLS } from '@/lib/qeSkillTaxonomy';
+import { QUESTION_BANK } from '@/data/questionBank/index';
 import {
-  apiQBCoverage, apiQBItems, apiQBValidate, apiQBUpload, apiQBToggle, apiQBDelete,
+  apiQBCoverage, apiQBItems, apiQBValidate, apiQBUpload, apiQBToggle, apiQBDelete, apiQBSeed,
   apiGetBlueprint, apiSaveBlueprint, type QBItem, type QBUploadResult,
 } from '@/lib/api';
 import { ArrowLeft, Upload, CheckCircle2, X, FileJson, Trash2, Eye, ChevronRight } from 'lucide-react';
@@ -108,11 +109,30 @@ export default function AdminQuestionBankPage() {
     catch (e: any) { toast.error(e?.message || 'Delete failed'); }
   };
 
+  // One-click migrate the built-in static question bank (Python, SQL, Selenium, API
+  // Testing, …) into the DB so it shows here and becomes the source of truth. De-duped.
+  const [importing, setImporting] = useState(false);
+  const importExisting = async () => {
+    setImporting(true);
+    try {
+      const batches: any[] = [];
+      for (const [skill, bank] of Object.entries(QUESTION_BANK as any)) {
+        const b: any = bank;
+        if (b?.beginner) batches.push({ skill, level: 'Beginner', mcq: b.beginner.mcq || [], toolId: b.beginner.toolId || [], practical: b.beginner.practical || [] });
+        if (b?.intermediate) batches.push({ skill, level: 'Intermediate', mcq: b.intermediate.mcq || [], coding: b.intermediate.coding || [], scenarios: b.intermediate.scenarios || [], framework: b.intermediate.framework || [] });
+      }
+      const r = await apiQBSeed(batches);
+      toast.success(`Imported ${r.inserted} existing questions${r.skipped ? ` · ${r.skipped} already present` : ''} ✓`);
+      loadCoverage('beginner'); loadCoverage('intermediate');
+    } catch (e: any) { toast.error(e?.message || 'Import failed'); }
+    finally { setImporting(false); }
+  };
+
   return (
     <div style={{ minHeight: '100vh', background: T.bg, color: T.text, padding: '30px 6vw 90px' }}>
       <div style={{ maxWidth: 1080, margin: '0 auto' }}>
         {view === 'hub' ? (
-          <Hub T={T} navigate={navigate} startedSkills={startedSkills} onOpen={setView} />
+          <Hub T={T} navigate={navigate} startedSkills={startedSkills} onOpen={setView} onImport={importExisting} importing={importing} />
         ) : view === 'expert' ? (
           <ExpertPage T={T} onBack={() => setView('hub')} />
         ) : (
@@ -168,7 +188,7 @@ export default function AdminQuestionBankPage() {
 }
 
 // ── HUB: pick a level ─────────────────────────────────────────────────────────
-function Hub({ T, navigate, startedSkills, onOpen }: any) {
+function Hub({ T, navigate, startedSkills, onOpen, onImport, importing }: any) {
   const total = QE_ALL_SKILLS.length;
   const card = (level: Level) => {
     const m = LEVEL_META[level];
@@ -194,7 +214,11 @@ function Hub({ T, navigate, startedSkills, onOpen }: any) {
     <>
       <button onClick={() => navigate('/admin')} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'transparent', border: 'none', color: T.sub, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 16 }}><ArrowLeft size={16} /> Back to Admin</button>
       <h1 style={{ margin: '0 0 8px', fontSize: 28, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 10 }}>📚 Question Bank</h1>
-      <p style={{ margin: '0 0 28px', color: T.sub, fontSize: 15, maxWidth: 640 }}>Build the ZenAssess questions for all {total} skills. Pick a level to work on — each opens its own focused page.</p>
+      <p style={{ margin: '0 0 18px', color: T.sub, fontSize: 15, maxWidth: 640 }}>Build the ZenAssess questions for all {total} skills. Pick a level to work on — each opens its own focused page.</p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 28, padding: 14, borderRadius: 12, background: T.card, border: `1px solid ${T.bdr}` }}>
+        <span style={{ fontSize: 13, color: T.sub, flex: 1, minWidth: 220 }}>Already have built-in questions (Python, SQL, Selenium, API Testing…)? Import them into the database so they show &amp; save here.</span>
+        <button onClick={onImport} disabled={importing} style={{ padding: '9px 18px', borderRadius: 10, background: importing ? T.input : '#3B82F6', color: importing ? T.sub : '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: importing ? 'not-allowed' : 'pointer', flexShrink: 0 }}>{importing ? 'Importing…' : 'Import existing questions → DB'}</button>
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>
         {(['beginner', 'intermediate', 'expert'] as Level[]).map(card)}
       </div>
@@ -206,6 +230,11 @@ function Hub({ T, navigate, startedSkills, onOpen }: any) {
 function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onPreview }: any) {
   const meta = LEVEL_META[level as Level];
   const types: TypeInfo[] = meta.types;
+  // Surface any skills that have questions in the DB but aren't in the 166 taxonomy
+  // (the imported built-in bank: Python, SQL, Selenium, API Testing, …).
+  const knownNames = useMemo(() => new Set(QE_ALL_SKILLS.map(s => s.name)), []);
+  const extraSkills = Object.keys(coverage || {}).filter((s: string) => !knownNames.has(s)).sort();
+  const allFamilies: [string, string[]][] = extraSkills.length ? [...families, ['Core skills (existing bank)', extraSkills]] : families;
   const [uploadText, setUploadText] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<QBUploadResult | null>(null);
@@ -280,7 +309,7 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
       <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>{openFamily ? openFamily : 'Add questions — pick a family'}</h3>
       {!openFamily ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>
-          {families.map(([family, skills]: [string, string[]]) => {
+          {allFamilies.map(([family, skills]: [string, string[]]) => {
             const started = skills.filter(s => types.some((t: TypeInfo) => (coverage[s]?.[t.key] || 0) > 0)).length;
             const ready = skills.filter(s => types.every((t: TypeInfo) => (coverage[s]?.[t.key] || 0) >= t.target)).length;
             return (
@@ -309,7 +338,7 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
                   </tr>
                 </thead>
                 <tbody>
-                  {(families.find(([f]: any) => f === openFamily)?.[1] || []).map((skill: string) => (
+                  {(allFamilies.find(([f]: any) => f === openFamily)?.[1] || []).map((skill: string) => (
                     <tr key={skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
                       <td style={{ padding: '10px 16px', color: T.text, fontWeight: 600 }}>{skill}</td>
                       {types.map((t: TypeInfo) => { const n = coverage[skill]?.[t.key] || 0; return <td key={t.key} style={{ padding: '10px 16px' }}><span style={cellStyle(n, t.target)}>{n}</span></td>; })}

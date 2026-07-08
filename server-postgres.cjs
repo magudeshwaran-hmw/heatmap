@@ -6206,6 +6206,49 @@ app.post('/api/admin/question-bank/upload', requireAdminStrict, async (req, res)
   } finally { client.release(); }
 });
 
+// POST seed — import many skills/levels at once (e.g. the built-in static bank).
+// Unlike /upload this does NOT require the skill to be in the 166 taxonomy (the
+// existing bank uses the legacy canonical skill names), and it de-dupes by question
+// text so it is safe to run repeatedly.
+app.post('/api/admin/question-bank/seed', requireAdminStrict, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const batches = Array.isArray(req.body?.batches) ? req.body.batches : [];
+    let inserted = 0, skipped = 0;
+    await client.query('BEGIN');
+    for (const b of batches) {
+      const skill = String(b.skill || '').trim();
+      const level = String(b.level || '').toLowerCase();
+      if (!skill || !QB_LEVELS.includes(level)) continue;
+      for (const qt of (QB_TYPES_BY_LEVEL[level] || [])) {
+        const arr = Array.isArray(b[qt]) ? b[qt] : [];
+        for (let i = 0; i < arr.length; i++) {
+          const out = qbNormalize(skill, level, qt, arr[i], i); // no taxonomy check here
+          if (out.error) { skipped++; continue; }
+          const r = out.row;
+          const dup = await client.query(
+            `SELECT 1 FROM question_bank WHERE LOWER(skill_name)=LOWER($1) AND band=$2 AND COALESCE(qtype,'mcq')=$3 AND question_text=$4 LIMIT 1`,
+            [r.skill_name, r.band, r.qtype, r.question_text]
+          );
+          if (dup.rows.length) { skipped++; continue; }
+          await client.query(
+            `INSERT INTO question_bank (skill_name, band, difficulty, question_text, options, correct_option, explanation, topic, points, time_seconds, qtype, payload, active, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,'seed')`,
+            [r.skill_name, r.band, r.difficulty, r.question_text, r.options, r.correct_option, r.explanation, r.topic, r.points, r.time_seconds, r.qtype, JSON.stringify(r.payload)]
+          );
+          inserted++;
+        }
+      }
+    }
+    await client.query('COMMIT');
+    await auditLog({ employeeId: req.user?.employeeId || 'admin', role: 'admin', action: 'QB_SEED', resource: 'question_bank', details: { batches: batches.length, inserted, skipped }, req });
+    res.json({ success: true, inserted, skipped });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
 // POST toggle active / DELETE a question.
 app.post('/api/admin/question-bank/:id/toggle', requireAdminStrict, async (req, res) => {
   try {

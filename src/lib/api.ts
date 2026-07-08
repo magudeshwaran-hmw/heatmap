@@ -313,6 +313,9 @@ export async function apiQBValidate(body: any): Promise<QBUploadResult> {
 export async function apiQBUpload(body: any): Promise<QBUploadResult> {
   return req('POST', `/admin/question-bank/upload`, body);
 }
+export async function apiQBSeed(batches: any[]): Promise<{ success: boolean; inserted: number; skipped: number }> {
+  return req('POST', `/admin/question-bank/seed`, { batches });
+}
 export async function apiQBToggle(id: number): Promise<{ success: boolean; active: boolean }> {
   return req('POST', `/admin/question-bank/${id}/toggle`);
 }
