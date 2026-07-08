@@ -9,18 +9,33 @@
 import { callResumeLLM } from './llm';
 import { QE_ALL_SKILLS, findQESkillById, findQESkillByName, QE_SKILL_COUNT, QE_FAMILIES } from './qeSkillTaxonomy';
 import { textIncludesTech } from './zenTaxonomy';
+import * as pdfjsDist from 'pdfjs-dist';
+// SECURITY: bundle the PDF.js worker with the app (Vite `?url`) instead of fetching
+// it from a remote CDN at runtime — this removes the remote-code-execution vector the
+// audit flagged and keeps the worker version locked to the library version.
+// @ts-ignore — Vite resolves `?url` to the hashed local asset path.
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+
+// ─── Self-hosted PDF.js accessor ──────────────────────────────────────────────
+// Single source of truth used by every PDF call site (this module + the pages), so
+// no screen ever reaches out to cdnjs. Sets the bundled worker once, then reuses it.
+let _pdfjsWorkerSet = false;
+export async function getPdfjs(): Promise<any> {
+  if (!_pdfjsWorkerSet) {
+    try { (pdfjsDist as any).GlobalWorkerOptions.workerSrc = pdfWorkerUrl; } catch (_) {}
+    _pdfjsWorkerSet = true;
+  }
+  return pdfjsDist;
+}
 
 // ─── PDF Text Extraction ──────────────────────────────────────────────────────
 export async function extractTextFromPDF(file: File): Promise<string> {
   try {
-    const pdfjsLib = (window as any).pdfjsLib;
+    const pdfjsLib = await getPdfjs();
     if (!pdfjsLib) {
       console.warn('⚠️ PDF.js not loaded, using fallback');
       return await file.text();
     }
-
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
 
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;

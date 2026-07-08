@@ -16,7 +16,7 @@ import { toast } from '@/lib/ToastContext';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { computeCompletion, exportAllToExcel } from '@/lib/localDB';
-import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag } from '@/lib/api';
+import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills } from '@/lib/api';
 import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
@@ -32,7 +32,7 @@ import ResumeBuilderPage from './ResumeBuilderPage';
 import GitHubIntelligencePage from './GitHubIntelligencePage';
 import Modal from '@/components/Modal';
 import { callResumeLLM } from '@/lib/llm';
-import { extractTextFromFile, accurateExtractFromResume, extractZensarIdFromText } from '@/lib/resumeExtraction';
+import { extractTextFromFile, accurateExtractFromResume, extractZensarIdFromText, extractTaxonomySkillsFromResume } from '@/lib/resumeExtraction';
 import {
   resolveQEAssignment, setQEOverride, clearQEOverride,
   QE_FAMILIES, groupsForFamily, essentialSkillsFor,
@@ -554,10 +554,8 @@ export default function AdminDashboard() {
       if (nm.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
         return await extractTextFromFile(file); // Word → mammoth
       }
-      const pdfjsLib = (window as any).pdfjsLib;
+      const pdfjsLib = await getPdfjs();
       if (pdfjsLib) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
         const buf = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
         let fullText = '';
@@ -938,7 +936,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   // ── Bulk resume import (client-side: reuses ZenScan extraction + create-employee) ──
   const [bulkImporting, setBulkImporting] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
-  const [bulkResult, setBulkResult] = useState<{ created: number; failed: number; skills: number } | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ created: number; updated: number; failed: number; skills: number } | null>(null);
+  // Live per-resume feed — each entry is appended the instant that resume finishes,
+  // so the admin sees results stream in one-by-one instead of waiting for the whole
+  // batch. Newest first. `skills` is the accurate QI SL taxonomy match count.
+  type BulkLogEntry = { name: string; zid: string; ok: boolean; skills: number; note: string };
+  const [bulkLog, setBulkLog] = useState<BulkLogEntry[]>([]);
   // Login password applied to every profile created in a bulk import batch. Editable
   // per batch; defaults to 1234567890. If a resume already carries its own credentials
   // those are kept (handled below), otherwise this password is used.
@@ -952,16 +955,20 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
     const batchPassword = (bulkPassword || '').trim() || '1234567890';
     setBulkImporting(true);
     setBulkResult(null);
+    setBulkLog([]);
     setBulkProgress({ current: 0, total: list.length });
-    let created = 0, failed = 0, skillsTotal = 0;
+    let created = 0, updated = 0, failed = 0, skillsTotal = 0;
+    // Push one entry into the live feed the moment a resume is done (newest first).
+    const pushLog = (e: BulkLogEntry) => setBulkLog(prev => [e, ...prev]);
     for (let i = 0; i < list.length; i++) {
       setBulkProgress({ current: i + 1, total: list.length });
+      const fileLabel = list[i].name.replace(/\.(pdf|docx)$/i, '');
       try {
         let text = '';
-        try { text = await extractTextFromFile(list[i]); } catch { failed++; continue; }
-        if (!text || !text.trim()) { failed++; continue; }
+        try { text = await extractTextFromFile(list[i]); } catch { failed++; pushLog({ name: fileLabel, zid: '', ok: false, skills: 0, note: 'Could not read file' }); continue; }
+        if (!text || !text.trim()) { failed++; pushLog({ name: fileLabel, zid: '', ok: false, skills: 0, note: 'Empty / unreadable resume' }); continue; }
         let data: any;
-        try { data = await accurateExtractFromResume(text); } catch { failed++; continue; }
+        try { data = await accurateExtractFromResume(text); } catch { failed++; pushLog({ name: fileLabel, zid: '', ok: false, skills: 0, note: 'Extraction failed' }); continue; }
         const p = data.profile || {};
         const skillsArr = Object.entries(data.skills || {})
           .filter(([, v]) => (v as number) > 0)
@@ -996,14 +1003,75 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             skills: skillsArr, projects, certificates, education,
           }),
         });
-        if (res.ok) { created++; skillsTotal += skillsArr.length; } else { failed++; }
-      } catch { failed++; }
+        // Resolve the target employee id. A brand-new profile comes back from
+        // create-employee; if that employee ALREADY exists (duplicate Zensar ID / email)
+        // we still want to refresh their QI SL skills from this resume rather than skip
+        // them — so we fall back to the detected Zensar ID (the chain endpoint resolves
+        // by id OR zensar_id).
+        let empId = '';
+        let existed = false;
+        if (res.ok) {
+          const createdEmp = await res.json().catch(() => ({} as any));
+          empId = String(createdEmp?.id || createdEmp?.zensar_id || detectedZid || '');
+          created++;
+        } else {
+          const errBody = await res.json().catch(() => ({} as any));
+          const isDuplicate = /exist|duplicate|already/i.test(String(errBody?.error || ''));
+          if (isDuplicate && detectedZid) {
+            empId = detectedZid;   // existing employee → refresh their skills below
+            existed = true;
+          } else {
+            failed++;
+            pushLog({ name: p.name || fileLabel, zid: detectedZid, ok: false, skills: 0, note: errBody?.error || 'Could not create profile' });
+          }
+        }
+
+        if (empId) {
+          // CHAIN-LOCK: map this resume to the full 166-skill QE taxonomy and populate
+          // the employee's QI SL ZenMatrix (family + priority + primary/secondary/
+          // tertiary), EXACTLY like the single-resume ZenScan flow. Without this the bulk
+          // import creates the profile but the QISL / admin taxonomy views stay empty.
+          // A source='ai' write REPLACES the previous AI-detected set server-side, so a
+          // re-upload cleanly refreshes skills instead of piling on stale rows.
+          // The count shown is this accurate taxonomy match count — NOT the wider legacy
+          // skill list. Guarded + non-fatal: a taxonomy failure never fails the import.
+          let taxoCount = 0;
+          try {
+            if (text) {
+              const taxo = await extractTaxonomySkillsFromResume(text, Number(p.yearsIT) || 0);
+              const chainSkills = [
+                ...taxo.skills.map(s => ({ id: s.id, name: s.name, family: s.family, group: s.group, proficiency: s.proficiency, priority: s.priority })),
+                ...taxo.others.map(o => ({ name: o.name, family: o.family, proficiency: o.proficiency, priority: null })),
+              ];
+              if (chainSkills.length > 0) {
+                await apiSaveTaxonomySkills(empId, {
+                  source: 'ai',
+                  primarySkill: taxo.primarySkill,
+                  secondarySkill: taxo.secondarySkill,
+                  tertiarySkill: taxo.tertiarySkill,
+                  skills: chainSkills,
+                });
+              }
+              taxoCount = taxo.matchedCount || taxo.skills.length;
+            }
+          } catch (e) {
+            console.warn('[Bulk Import] Taxonomy chain-link failed for', list[i].name, e);
+          }
+          if (existed) updated++;
+          skillsTotal += taxoCount;
+          // Stream this profile into the live feed the instant it is done + stored.
+          const mapped = taxoCount ? `${taxoCount} QI SL skill${taxoCount !== 1 ? 's' : ''} mapped` : 'Profile saved';
+          pushLog({ name: p.name || fileLabel, zid: empId, ok: true, skills: taxoCount, note: (existed ? 'Updated · ' : '') + mapped });
+        }
+      } catch { failed++; pushLog({ name: fileLabel, zid: '', ok: false, skills: 0, note: 'Unexpected error' }); }
     }
-    setBulkResult({ created, failed, skills: skillsTotal });
+    setBulkResult({ created, updated, failed, skills: skillsTotal });
     setBulkImporting(false);
     if (bulkInputRef.current) bulkInputRef.current.value = '';
+    // One refresh at the end (not per-resume) so the main table catches up without
+    // hammering the API 100× — the live feed already gave instant per-resume feedback.
     await loadAllData();
-    toast.success(`Bulk import complete: ${created} created · ${failed} failed`);
+    toast.success(`Bulk import complete: ${created} created${updated ? ` · ${updated} updated` : ''} · ${failed} failed`);
   };
 
   // ── Set the real Zensar ID for an auto-assigned (imported) employee ──
@@ -1782,14 +1850,43 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   <span style={{ fontSize: 11, color: T.muted }}>Applied to every profile in this batch (default 1234567890). Zensar IDs are read from each resume; missing ones are auto-numbered from 100001.</span>
                 </div>
                 {bulkImporting && (
-                  <div style={{ marginTop: 14, height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
-                    <div style={{ height: '100%', width: `${bulkProgress.total ? Math.round(bulkProgress.current / bulkProgress.total * 100) : 0}%`, background: 'linear-gradient(90deg,#3B82F6,#8B5CF6)', transition: 'width 0.3s ease' }} />
-                  </div>
+                  <>
+                    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, fontWeight: 700, color: T.sub, marginBottom: 6 }}>
+                      <span>Processing resume {bulkProgress.current} of {bulkProgress.total} — results appear below as each one finishes</span>
+                      <span style={{ color: T.text }}>{bulkProgress.total ? Math.round(bulkProgress.current / bulkProgress.total * 100) : 0}%</span>
+                    </div>
+                    <div style={{ height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${bulkProgress.total ? Math.round(bulkProgress.current / bulkProgress.total * 100) : 0}%`, background: 'linear-gradient(90deg,#3B82F6,#8B5CF6)', transition: 'width 0.3s ease' }} />
+                    </div>
+                  </>
                 )}
                 {bulkResult && !bulkImporting && (
                   <div style={{ marginTop: 14, padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, fontSize: 13 }}>
-                    <div style={{ color: '#10B981', fontWeight: 800, marginBottom: bulkResult.failed > 0 ? 6 : 0 }}>✓ {bulkResult.created} profiles created · {bulkResult.skills} skills extracted</div>
+                    <div style={{ color: '#10B981', fontWeight: 800, marginBottom: bulkResult.failed > 0 ? 6 : 0 }}>✓ {bulkResult.created} profiles created{bulkResult.updated > 0 ? ` · ${bulkResult.updated} updated` : ''} · {bulkResult.skills} QI SL skills mapped</div>
                     {bulkResult.failed > 0 && <div style={{ color: '#EF4444' }}>✗ {bulkResult.failed} resume{bulkResult.failed !== 1 ? 's' : ''} could not be parsed</div>}
+                  </div>
+                )}
+                {/* Live per-resume feed — streams in one row per resume the instant it is
+                    stored, so a 100-resume import shows progress continuously instead of a
+                    single dump at the very end. */}
+                {bulkLog.length > 0 && (
+                  <div style={{ marginTop: 14, border: `1px solid ${T.bdr}`, borderRadius: 10, overflow: 'hidden' }}>
+                    <div style={{ padding: '8px 12px', fontSize: 12, fontWeight: 800, color: T.sub, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Live results</span>
+                      <span>{bulkLog.filter(l => l.ok).length} done · {bulkLog.filter(l => !l.ok).length} failed</span>
+                    </div>
+                    <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                      {bulkLog.map((l, idx) => (
+                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderBottom: idx < bulkLog.length - 1 ? `1px solid ${T.bdr}` : 'none', fontSize: 12.5, animation: 'fadeIn 0.3s ease' }}>
+                          {l.ok
+                            ? <CheckCircle2 size={15} color="#10B981" style={{ flexShrink: 0 }} />
+                            : <X size={15} color="#EF4444" style={{ flexShrink: 0 }} />}
+                          <span style={{ fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>{l.name}</span>
+                          {l.zid && <span style={{ color: T.muted, fontSize: 11 }}>#{l.zid}</span>}
+                          <span style={{ marginLeft: 'auto', color: l.ok ? T.sub : '#EF4444', flexShrink: 0 }}>{l.note}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -5463,10 +5560,10 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                             </div>
 
                             <div style={{ gridColumn: window.innerWidth < 600 ? '1' : 'span 2' }}>
-                               <label style={{ fontSize: 11, fontWeight: 800, color: '#EF4444', textTransform:'uppercase' }}>Password</label>
+                               <label style={{ fontSize: 11, fontWeight: 800, color: '#EF4444', textTransform:'uppercase' }}>Password <span style={{ fontWeight: 600, textTransform:'none', color: T.muted }}>— leave blank to keep current</span></label>
                                <div style={{ position:'relative', marginTop:6 }}>
                                   <Lock size={16} style={{ position:'absolute', left:14, top:16, color:'#EF4444' }} />
-                                  <input type="text" value={editForm.password} onChange={e=>setEditForm({...editForm, password:e.target.value})} style={{ width:'100%', background: dark ? 'rgba(239,68,68,0.05)' : '#FEF2F2', border:'1px solid rgba(239,68,68,0.2)', padding:'14px 14px 14px 42px', borderRadius:10, color:T.text, fontSize:14, boxSizing:'border-box' as const }} />
+                                  <input type="text" value={editForm.password} onChange={e=>setEditForm({...editForm, password:e.target.value})} placeholder="Enter a new password to reset it" style={{ width:'100%', background: dark ? 'rgba(239,68,68,0.05)' : '#FEF2F2', border:'1px solid rgba(239,68,68,0.2)', padding:'14px 14px 14px 42px', borderRadius:10, color:T.text, fontSize:14, boxSizing:'border-box' as const }} />
                                </div>
                             </div>
 

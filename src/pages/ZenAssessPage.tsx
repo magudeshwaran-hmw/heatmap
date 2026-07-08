@@ -16,6 +16,7 @@ import { useDark, mkTheme } from '../lib/themeContext';
 import { useAuth } from '../lib/authContext';
 import { API_BASE, req, apiGetEmployee, apiGetSkills, apiUpdateEmployee } from '../lib/api';
 import { toast } from '../lib/ToastContext';
+import { getPdfjs } from '../lib/resumeExtraction';
 import {
   computeAssessmentFlow,
   getGradePath,
@@ -260,10 +261,8 @@ function groupByTopic(qs: Q[]): { topic: string; questions: Q[] }[] {
 // ── Extract text from PDF (with proper visual line detection) ──
 const extractPDFText = async (file: File): Promise<string> => {
   try {
-    const pdfjsLib = (window as any).pdfjsLib;
+    const pdfjsLib = await getPdfjs();
     if (pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
       const buf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       let fullText = '';

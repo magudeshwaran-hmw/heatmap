@@ -24,8 +24,8 @@
 
   <body>
     <div id="root"></div>
-    <!-- pdf.js for resume text extraction (ResumeUploadPage.tsx) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <!-- pdf.js is now bundled locally (src/lib/resumeExtraction.ts → getPdfjs) instead
+         of a remote CDN, removing the remote-code-execution vector. -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

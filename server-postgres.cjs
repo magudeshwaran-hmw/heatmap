@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const path = require('path');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
 const fallbackQuestions = require('./fallbackQuestions.cjs');
 
@@ -79,7 +80,24 @@ const SKILL_NAMES = [
   'ChatGPT/Prompt Engineering', 'AI Test Automation'
 ];
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'zensar_secret_key_32_chars_long!!'; // Must be 32 chars
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// SECURITY: secrets must come from the environment in production. In production a
+// missing secret is fatal (fail fast) rather than silently falling back to a
+// well-known constant that anyone could forge tokens / decrypt data with. In dev
+// we keep a stable fallback but warn loudly so it is never mistaken for secure.
+function requireSecret(envName, devFallback) {
+  const v = process.env[envName];
+  if (v && v.length >= 16) return v;
+  if (IS_PROD) {
+    console.error(`❌ FATAL: ${envName} is not set (or too short). Refusing to start in production with an insecure default.`);
+    process.exit(1);
+  }
+  console.warn(`⚠️  ${envName} not set — using an INSECURE dev fallback. Set ${envName} in .env before deploying.`);
+  return devFallback;
+}
+
+const ENCRYPTION_KEY = requireSecret('ENCRYPTION_KEY', 'zensar_secret_key_32_chars_long!!'); // Must be 32 chars
 const IV_LENGTH = 16;
 
 function encryptPw(text) {
@@ -103,6 +121,32 @@ function decryptPw(text) {
   return decrypted.toString();
 }
 
+// ── Password hashing (bcrypt, one-way) ────────────────────────────────────────
+// SECURITY: new/updated passwords are stored as bcrypt hashes (irreversible).
+// verifyPassword stays backward compatible with the two legacy storage formats
+// so no existing account is locked out: bcrypt `$2…` → legacy AES `iv:cipher`
+// → legacy plaintext. On a successful legacy match the caller re-hashes to bcrypt.
+const BCRYPT_ROUNDS = 10;
+function isBcryptHash(stored) {
+  return typeof stored === 'string' && /^\$2[aby]\$/.test(stored);
+}
+function hashPassword(plain) {
+  if (plain == null || plain === '') return null;
+  return bcrypt.hashSync(String(plain), BCRYPT_ROUNDS);
+}
+function verifyPassword(plain, stored) {
+  if (stored == null || stored === '') return false;
+  const s = String(stored);
+  const p = String(plain == null ? '' : plain);
+  if (isBcryptHash(s)) {
+    try { return bcrypt.compareSync(p, s); } catch (_) { return false; }
+  }
+  // Legacy AES (iv:cipher) — decryptPw returns the value unchanged when there is
+  // no ':' separator, so a legacy plaintext value is also handled here.
+  try { if (decryptPw(s) === p) return true; } catch (_) {}
+  return s === p; // last-resort legacy plaintext compare
+}
+
 /**
  * withTimeout
  * Wraps a promise in a timeout to prevent hanging.
@@ -119,8 +163,14 @@ function withTimeout(promise, ms) {
 // PHASE 1 — JWT + SECURITY HELPERS
 // ============================================================
 
-// JWT secret — falls back to env var, then a hardcoded dev secret
-const JWT_SECRET = process.env.JWT_SECRET || 'zensar_jwt_dev_secret_change_in_production_2026';
+// JWT secret — required from env in production (fail fast); stable dev fallback with a warning.
+const JWT_SECRET = requireSecret('JWT_SECRET', 'zensar_jwt_dev_secret_change_in_production_2026');
+
+// In production the admin password must be provided via env; never ship the default.
+if (IS_PROD && !process.env.ADMIN_PASSWORD) {
+  console.error('❌ FATAL: ADMIN_PASSWORD is not set. Refusing to start in production with the default admin password.');
+  process.exit(1);
+}
 const JWT_EXPIRES_IN = '15m';
 const REFRESH_EXPIRES_DAYS = 7;
 
@@ -196,6 +246,83 @@ function requireOwnership(paramName = 'id') {
       ) return next();
       return res.status(403).json({ error: 'Access denied' });
     });
+  };
+}
+
+// ============================================================
+// STRICT AUTH — enforced on sensitive WRITE endpoints (P4 security)
+// ============================================================
+// ENFORCE_WRITE_AUTH (default ON) makes writes require a valid login token, closing
+// the anonymous-write / IDOR holes the audit flagged. Set ENFORCE_WRITE_AUTH=false in
+// .env as an escape hatch if a screen turns out not to send its token — even then,
+// ownership is still enforced whenever a token IS present, so a logged-in user can
+// never write to someone else's records.
+const ENFORCE_WRITE_AUTH = String(process.env.ENFORCE_WRITE_AUTH || 'true').toLowerCase() !== 'false';
+
+// Parse the Bearer token. Returns { ok, user, expired }. Never throws.
+function authenticateStrict(req) {
+  const h = req.headers['authorization'];
+  if (!h || !h.startsWith('Bearer ')) return { ok: false, expired: false };
+  try {
+    return { ok: true, user: jwt.verify(h.slice(7), JWT_SECRET) };
+  } catch (e) {
+    return { ok: false, expired: !!(e && e.name === 'TokenExpiredError') };
+  }
+}
+
+// 401 helper — emits code:'TOKEN_EXPIRED' on expiry so the client auto-refreshes & retries.
+function denyAuth(res, expired) {
+  return res.status(401).json(
+    expired ? { code: 'TOKEN_EXPIRED', error: 'Token expired' } : { error: 'Authentication required' }
+  );
+}
+
+// Resolve an id-or-zensar_id to the canonical employees.id (so a self-write is never
+// falsely blocked when the URL uses one form and the token carries the other).
+async function resolveEmpDbId(idOrZid) {
+  try {
+    const r = await pool.query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1 LIMIT 1', [String(idOrZid)]);
+    return r.rows[0] ? String(r.rows[0].id) : null;
+  } catch (_) { return null; }
+}
+
+/** Require a valid JWT (writes). Falls back to lenient when ENFORCE_WRITE_AUTH=false. */
+function requireAuthStrict(req, res, next) {
+  const auth = authenticateStrict(req);
+  if (auth.ok) { req.user = auth.user; return next(); }
+  if (!ENFORCE_WRITE_AUTH && !auth.expired) return next(); // escape hatch: allow anon
+  return denyAuth(res, auth.expired);
+}
+
+/** Require admin role (writes). */
+function requireAdminStrict(req, res, next) {
+  const auth = authenticateStrict(req);
+  if (auth.ok) {
+    req.user = auth.user;
+    if (req.user.role === 'admin') return next();
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  if (!ENFORCE_WRITE_AUTH && !auth.expired) return next();
+  return denyAuth(res, auth.expired);
+}
+
+/** Require ownership of :paramName (or admin) for writes. Closes IDOR. */
+function requireOwnershipStrict(paramName = 'id') {
+  return async (req, res, next) => {
+    const auth = authenticateStrict(req);
+    if (!auth.ok) {
+      if (!ENFORCE_WRITE_AUTH && !auth.expired) return next(); // escape hatch
+      return denyAuth(res, auth.expired);
+    }
+    req.user = auth.user;
+    if (req.user.role === 'admin') return next();
+    const resourceId = String(Reflect.get(req.params, paramName) || '');
+    const uid = String(req.user.employeeId || '');
+    if (resourceId && uid && resourceId.toLowerCase() === uid.toLowerCase()) return next();
+    // Fall back to a DB resolve so id-vs-zensar_id mismatch doesn't block a real owner.
+    const [targetDbId, userDbId] = await Promise.all([resolveEmpDbId(resourceId), resolveEmpDbId(uid)]);
+    if (targetDbId && userDbId && targetDbId === userDbId) return next();
+    return res.status(403).json({ error: 'Access denied' });
   };
 }
 
@@ -1559,7 +1686,9 @@ async function syncDatabaseSchema() {
     // Seed default admin if missing
     const hasAdmin = await query("SELECT * FROM app_settings WHERE key = 'admin_id'");
     if (hasAdmin.rowCount === 0) {
-      await query("INSERT INTO app_settings (key, value) VALUES ('admin_id', 'admin'), ('admin_password', 'admin123')");
+      const seedAdminId = process.env.ADMIN_ID || 'admin';
+      const seedAdminPw = hashPassword(process.env.ADMIN_PASSWORD || 'admin123');
+      await query("INSERT INTO app_settings (key, value) VALUES ('admin_id', $1), ('admin_password', $2)", [seedAdminId, seedAdminPw]);
     }
 
     // CLEANUP: Remove any projects with empty/placeholder names
@@ -1959,10 +2088,12 @@ app.get('/api/employees', async (req, res) => {
     const employeesResult = await query('SELECT * FROM employees ORDER BY created_at DESC');
     const skillsResult = await query('SELECT * FROM skills ORDER BY employee_id, skill_name');
 
-    const employees = employeesResult.rows.map(e => ({
-      ...e,
-      password: decryptPw(e.password)
-    }));
+    // SECURITY: never return password material over the API (was leaking the
+    // decrypted password to any caller). Strip it from every row.
+    const employees = employeesResult.rows.map(e => {
+      const { password, ...safe } = e;
+      return safe;
+    });
     res.json({
       employees,
       skills: skillsResult.rows
@@ -2092,7 +2223,8 @@ app.get('/api/employees/:id', async (req, res) => {
       return res.status(404).json({ error: 'Employee not found' });
     }
     const emp = result.rows[0];
-    emp.password = decryptPw(emp.password);
+    // SECURITY: never expose password material over the API.
+    delete emp.password;
 
     // Grade must never be blank — derive from years_it and persist when missing
     if (!emp.grade) {
@@ -2121,7 +2253,7 @@ app.post('/api/employees', requireAuth, async (req, res) => {
     const yearsIT = parseInt(body.yearsIT || body.YearsIT || 0) || 0;
     const yearsZen = parseInt(body.yearsZensar || body.YearsZensar || 0) || 0;
     const rawPw = body.password || body.Password || '';
-    const encPw = rawPw ? encryptPw(rawPw) : encryptPw('zensar123');
+    const encPw = hashPassword(rawPw || 'zensar123');
 
     // Check for duplicates with specific field validation
     const existingZensarId = await query(
@@ -2281,7 +2413,7 @@ app.post('/api/register', async (req, res) => {
       INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain, grade)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *
-    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation, department, location, yearsIT || 0, yearsZensar || 0, encryptPw(password), primarySkill, secondarySkill, tertiarySkill, primaryDomain, grade || null]);
+    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation, department, location, yearsIT || 0, yearsZensar || 0, hashPassword(password), primarySkill, secondarySkill, tertiarySkill, primaryDomain, grade || null]);
 
     await auditLog({ employeeId: zid, role: 'employee', action: 'REGISTER', resource: 'employees', req });
     res.json({ success: true, employee: { ...result.rows[0], id: result.rows[0].zensar_id || result.rows[0].id } });
@@ -2309,12 +2441,19 @@ app.post('/api/login', async (req, res) => {
     }
 
     // ── Admin check ─────────────────────────────────────────────────────────
+    // Precedence for the admin password: ADMIN_PASSWORD env (recommended) →
+    // app_settings value → the legacy 'admin123' default (dev only, warned at boot).
+    // Verified with verifyPassword so a hashed OR legacy stored value both work.
     const adminIdData = await query("SELECT value FROM app_settings WHERE key = 'admin_id'");
     const adminPwData = await query("SELECT value FROM app_settings WHERE key = 'admin_password'");
-    const dbAdminId = adminIdData.rows[0]?.value || 'admin';
-    const dbAdminPw = adminPwData.rows[0]?.value || 'admin123';
+    const dbAdminId = adminIdData.rows[0]?.value || process.env.ADMIN_ID || 'admin';
+    const dbAdminPw = process.env.ADMIN_PASSWORD || adminPwData.rows[0]?.value || 'admin123';
 
-    if (loginId === dbAdminId.toLowerCase() && password === dbAdminPw) {
+    if (loginId === dbAdminId.toLowerCase() && verifyPassword(password, dbAdminPw)) {
+      // Upgrade a legacy plaintext admin password in app_settings to bcrypt on login.
+      if (!process.env.ADMIN_PASSWORD && adminPwData.rows[0]?.value && !isBcryptHash(adminPwData.rows[0].value)) {
+        try { await query("UPDATE app_settings SET value = $1 WHERE key = 'admin_password'", [hashPassword(password)]); } catch (_) {}
+      }
       const payload = { employeeId: 'admin', role: 'admin', name: 'Master Admin' };
       const accessToken = generateAccessToken(payload);
       const rawRefresh = crypto.randomBytes(40).toString('hex');
@@ -2349,10 +2488,15 @@ app.post('/api/login', async (req, res) => {
 
     const emp = result.rows[0];
     const storedPw = String(emp.password || '').trim();
-    if (decryptPw(storedPw) !== password && storedPw !== password) {
+    if (!verifyPassword(password, storedPw)) {
       await logLoginAttempt({ employeeId: emp.id, loginId, success: false, failureReason: 'wrong_password', req });
       await auditLog({ employeeId: emp.id, action: 'LOGIN_FAILED', resource: 'auth', details: { reason: 'wrong_password' }, req, status: 'failure' });
       return res.status(401).json({ error: 'Incorrect password' });
+    }
+    // SECURITY: transparently upgrade any legacy (reversible AES / plaintext)
+    // password to a one-way bcrypt hash on the next successful login.
+    if (!isBcryptHash(storedPw)) {
+      try { await pool.query('UPDATE employees SET password = $1 WHERE id = $2', [hashPassword(password), emp.id]); } catch (_) {}
     }
 
     const empId = emp.zensar_id || emp.id;
@@ -2709,7 +2853,7 @@ app.post('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
     const { admin_id, admin_password } = req.body;
     if (admin_id) await query("UPDATE app_settings SET value = $1 WHERE key = 'admin_id'", [admin_id]);
-    if (admin_password) await query("UPDATE app_settings SET value = $1 WHERE key = 'admin_password'", [admin_password]);
+    if (admin_password) await query("UPDATE app_settings SET value = $1 WHERE key = 'admin_password'", [hashPassword(admin_password)]);
     res.json({ success: true, message: 'Admin settings updated' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2751,7 +2895,7 @@ app.post('/api/admin/employees/add', requireAdmin, async (req, res) => {
     }
 
     const id = zensar_id || `EMP_${Date.now()}`;
-    const encrypted = password ? encryptPw(password) : encryptPw('zensar123'); // Default password
+    const encrypted = hashPassword(password || 'zensar123'); // Default password (bcrypt)
 
     await query(`
       INSERT INTO employees (id, zensar_id, name, email, phone, password, designation, department, location, years_it, years_zensar, primary_skill, primary_domain)
@@ -2852,7 +2996,7 @@ app.post('/api/admin/create-employee', requireAdmin, async (req, res) => {
       INSERT INTO employees (id, zensar_id, name, email, phone, designation, department, location, years_it, years_zensar, password, primary_skill, secondary_skill, tertiary_skill, primary_domain, zensar_id_auto)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *
-    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, encryptPw(password), finalPrimarySkill, finalSecondarySkill, finalTertiarySkill, finalPrimaryDomain, zensarIdAuto]);
+    `, [zid, zid, name, emailTrimmed, phoneTrimmed, designation || '', department || '', location || '', yearsIT || 0, yearsZensar || 0, hashPassword(password), finalPrimarySkill, finalSecondarySkill, finalTertiarySkill, finalPrimaryDomain, zensarIdAuto]);
 
 
     // Save skills if provided
@@ -3036,7 +3180,7 @@ app.post('/api/admin/employees/update', async (req, res) => {
 
         let encrypted = null;
         if (password) {
-          encrypted = encryptPw(password);
+          encrypted = hashPassword(password);
         }
 
         // Use camelCase values as fallback for snake_case
@@ -3481,7 +3625,7 @@ app.get('/api/employees/:id/skills', async (req, res) => {
 
 // Update employee skills
 // BACKWARD COMPATIBLE: Works with both JWT and session-based auth during transition
-app.put('/api/employees/:id/skills', async (req, res) => {
+app.put('/api/employees/:id/skills', requireOwnershipStrict('id'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -3539,7 +3683,7 @@ app.put('/api/employees/:id/skills', async (req, res) => {
 });
 
 // Admin itemized skill delete
-app.delete('/api/skills/:employeeId/:skillId', requireAdmin, async (req, res) => {
+app.delete('/api/skills/:employeeId/:skillId', requireAdminStrict, async (req, res) => {
   try {
     // Resolve employee db id from zensar_id or id
     let resolvedEmpId = req.params.employeeId;
@@ -3559,7 +3703,7 @@ app.delete('/api/skills/:employeeId/:skillId', requireAdmin, async (req, res) =>
 });
 
 // Approve a hidden skill
-app.post('/api/skills/approve-hidden', requireAuth, async (req, res) => {
+app.post('/api/skills/approve-hidden', requireAuthStrict, async (req, res) => {
   const { employeeId, skillName } = req.body;
   if (!employeeId || !skillName) return res.status(400).json({ error: 'Missing employeeId or skillName' });
   try {
@@ -3582,7 +3726,7 @@ app.post('/api/skills/approve-hidden', requireAuth, async (req, res) => {
 });
 
 // Admin batch skill add
-app.post('/api/skills', requireAuth, async (req, res) => {
+app.post('/api/skills', requireAuthStrict, async (req, res) => {
   // Accept both dbEmployeeId (resolved DB id) and employeeId (zensar id)
   const empId = req.body.dbEmployeeId || req.body.employeeId;
   const skills = req.body.skills;
@@ -4200,7 +4344,17 @@ app.post('/api/llm', async (req, res) => {
 
 const XLSX = require('xlsx');
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage() });
+// SECURITY: cap upload size (was unbounded → memory-exhaustion DoS risk) and accept
+// only spreadsheet MIME types. 10 MB is ample for the BFSI workbooks.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(xlsx|xls|csv)$/i.test(file.originalname || '') ||
+      /spreadsheet|excel|csv/i.test(file.mimetype || '');
+    cb(ok ? null : new Error('Only .xlsx/.xls/.csv files are allowed'), ok);
+  },
+});
 
 // BFSI Skills Taxonomy
 const BFSI_SKILLS = {
@@ -4816,7 +4970,7 @@ function parseExcelDate(dateValue) {
 }
 
 // Upload Excel and populate BFSI data - Multi-sheet processing
-app.post('/api/bfsi/upload', upload.single('file'), requireAdmin, async (req, res) => {
+app.post('/api/bfsi/upload', requireAdminStrict, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -5693,7 +5847,7 @@ app.post('/api/bfsi/reskill', requireAdmin, async (req, res) => {
 });
 
 // Debug: Inspect actual column names from uploaded Excel
-app.post('/api/bfsi/debug-columns', upload.single('file'), async (req, res) => {
+app.post('/api/bfsi/debug-columns', requireAdminStrict, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -7352,7 +7506,7 @@ app.get('/api/qisl-skills', async (req, res) => {
 });
 
 // POST /api/qisl-skills/:employeeId — upsert the whole ratings map (0 = delete)
-app.post('/api/qisl-skills/:employeeId', async (req, res) => {
+app.post('/api/qisl-skills/:employeeId', requireOwnershipStrict('employeeId'), async (req, res) => {
   const client = await pool.connect();
   try {
     const empId = String(req.params.employeeId);
@@ -7404,7 +7558,7 @@ app.post('/api/qisl-skills/:employeeId', async (req, res) => {
 // fan-out point that makes one upload reflect across QISL + admin + employee views.
 // Body: { employeeName?, source?: 'ai'|'self', primarySkill?, secondarySkill?,
 //         tertiarySkill?, skills: [{ id?, name?, family?, group?, proficiency|level, priority? }] }
-app.post('/api/employees/:id/taxonomy-skills', async (req, res) => {
+app.post('/api/employees/:id/taxonomy-skills', requireOwnershipStrict('id'), async (req, res) => {
   const client = await pool.connect();
   try {
     const paramId = String(req.params.id);
