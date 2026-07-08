@@ -1,13 +1,14 @@
 /**
- * api.ts — frontend client for the Skill Navigator backend (port 3001)
- * Falls back to localStorage if the server is not running.
+ * api.ts — frontend client for the Skill Navigator backend
+ * Always uses relative /api when running through the single-port gateway or tunnel.
  */
 
 import { shouldUseGatewayProxies } from './tunnelHosts';
 
 /** Ensure API base always ends with /api (VITE_API_URL may be set with or without it). */
 function resolveApiBase(): string {
-  // Tunnel / single gateway: relative /api (same host as the public URL)
+  // Single gateway mode OR tunnel: always use relative /api (same host:port as frontend)
+  // This is the correct behaviour for forwarded/tunnel URLs — never hardcode a port.
   if (shouldUseGatewayProxies()) return '/api';
 
   const raw = import.meta.env.VITE_API_URL?.trim();
@@ -15,9 +16,7 @@ function resolveApiBase(): string {
     const trimmed = raw.replace(/\/+$/, '');
     return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
   }
-  if (import.meta.env.DEV && typeof window !== 'undefined') {
-    return `http://${window.location.hostname}:3001/api`;
-  }
+  // Fallback: relative /api works in all cases since Vite proxies /api → backend
   return '/api';
 }
 
@@ -211,10 +210,65 @@ export async function apiResetCompletionFlag(flag: 'aiForQe' | 'qeForAi' | 'test
 }
 
 // ─── QISL ZenMatrix — employee self-ratings for QE-taxonomy skills ────────────
-export async function apiGetQislSkills(employeeId: string): Promise<{ ratings: Record<string, number> }> {
+export interface QislSkillDetail {
+  skillName: string;
+  level: number;
+  taxonomyId: number | null;   // null = a custom "Others" skill (not one of the 166)
+  family: string | null;
+  group: string | null;
+  priority: 'primary' | 'secondary' | 'tertiary' | null;
+  source: 'ai' | 'self';
+}
+
+/** Per-skill metadata sent alongside the ratings map so custom skills keep their family. */
+export interface QislSkillMeta {
+  taxonomyId?: number | null;
+  family?: string | null;
+  group?: string | null;
+  priority?: 'primary' | 'secondary' | 'tertiary' | null;
+}
+
+export async function apiGetQislSkills(
+  employeeId: string
+): Promise<{ ratings: Record<string, number>; details?: QislSkillDetail[] }> {
   return req('GET', `/qisl-skills/${encodeURIComponent(employeeId)}`);
 }
 
-export async function apiSaveQislSkills(employeeId: string, ratings: Record<string, number>): Promise<void> {
-  await req('POST', `/qisl-skills/${encodeURIComponent(employeeId)}`, { ratings });
+/** Bulk QISL ratings for the admin QI SL Heatmap: { byEmployee: { [id]: QislSkillDetail[] } }. */
+export async function apiGetAllQislSkills(): Promise<{ byEmployee: Record<string, QislSkillDetail[]> }> {
+  return req('GET', `/qisl-skills`);
+}
+
+export async function apiSaveQislSkills(
+  employeeId: string,
+  ratings: Record<string, number>,
+  meta?: Record<string, QislSkillMeta>
+): Promise<void> {
+  await req('POST', `/qisl-skills/${encodeURIComponent(employeeId)}`, { ratings, meta });
+}
+
+// ─── Chain-lock: persist resume-extracted QE-taxonomy skills ──────────────────
+// One call fans out to qisl_skill_ratings (with family/group/priority/provenance)
+// and refreshes the employee's primary/secondary/tertiary skill, without clobbering
+// any skill the employee already self-rated. Used by the resume-upload flow.
+export interface TaxonomySkillPayload {
+  id?: number;
+  name: string;
+  family?: string;
+  group?: string;
+  proficiency: number;                                   // 0-3
+  priority?: 'primary' | 'secondary' | 'tertiary' | null;
+}
+
+export async function apiSaveTaxonomySkills(
+  employeeId: string,
+  payload: {
+    source?: 'ai' | 'self';
+    primarySkill?: string;
+    secondarySkill?: string;
+    tertiarySkill?: string;
+    skills: TaxonomySkillPayload[];
+  }
+): Promise<{ success: boolean; written: number }> {
+  return req('POST', `/employees/${encodeURIComponent(employeeId)}/taxonomy-skills`, payload);
 }

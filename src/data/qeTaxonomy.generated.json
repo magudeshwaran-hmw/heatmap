@@ -1,0 +1,1659 @@
+{
+  "count": 166,
+  "families": [
+    "Test Automation Engineering - SDET",
+    "Non-Functional Testing",
+    "AI Driven Quality Engineering",
+    "AI/ML & Gen AI-Augmented Quality Engineering",
+    "Data Quality Engineering",
+    "Digital, Mobile & Channel Testing",
+    "Service Integration Quality Engineering",
+    "Functional & Domain Quality Engineering",
+    "Packaged & Enterprise Applications Testing",
+    "Continuous Testing & Release Quality Engineering",
+    "Test Data Management",
+    "Learning & Enablement",
+    "Test Delivery, Governance & Pre-Sales support",
+    "QI Pre-Sales & Governance"
+  ],
+  "skills": [
+    {
+      "id": 1,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Java-Selenium",
+      "keywords": [
+        "selenium",
+        "java-selenium",
+        "webdriver"
+      ]
+    },
+    {
+      "id": 2,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "TestNG",
+      "keywords": [
+        "testng"
+      ]
+    },
+    {
+      "id": 3,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Appium",
+      "keywords": [
+        "appium"
+      ]
+    },
+    {
+      "id": 4,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Cypress",
+      "keywords": [
+        "cypress"
+      ]
+    },
+    {
+      "id": 5,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Tosca/UFT/AccelQ",
+      "keywords": [
+        "tosca",
+        "uft",
+        "accelq",
+        "qtp"
+      ]
+    },
+    {
+      "id": 6,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Cloud Mobile Platforms (TestMu, Saucelabs, Headspin, BrowserStack, pCloudy, etc)",
+      "keywords": [
+        "saucelabs",
+        "sauce labs",
+        "browserstack",
+        "headspin",
+        "pcloudy",
+        "lambdatest",
+        "testmu"
+      ]
+    },
+    {
+      "id": 7,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Maven",
+      "keywords": [
+        "maven"
+      ]
+    },
+    {
+      "id": 8,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "GitHub Actions",
+      "keywords": [
+        "github actions"
+      ]
+    },
+    {
+      "id": 9,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "WebDriver IO",
+      "keywords": [
+        "webdriverio",
+        "webdriver io",
+        "wdio"
+      ]
+    },
+    {
+      "id": 10,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Playwright",
+      "keywords": [
+        "playwright"
+      ]
+    },
+    {
+      "id": 11,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "RestAssured Framework",
+      "keywords": [
+        "rest assured",
+        "restassured"
+      ]
+    },
+    {
+      "id": 12,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "TestComplete",
+      "keywords": [
+        "testcomplete",
+        "test complete"
+      ]
+    },
+    {
+      "id": 13,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Full Stack Automation",
+      "name": "Karate",
+      "keywords": [
+        "karate"
+      ]
+    },
+    {
+      "id": 14,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Test Framework Development",
+      "keywords": [
+        "framework development",
+        "automation framework"
+      ]
+    },
+    {
+      "id": 15,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Continuous Automation",
+      "keywords": [
+        "continuous automation"
+      ]
+    },
+    {
+      "id": 16,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Self Healing",
+      "keywords": [
+        "self healing",
+        "self-healing"
+      ]
+    },
+    {
+      "id": 17,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "AI Driven Automation",
+      "keywords": [
+        "ai driven automation",
+        "ai-driven automation",
+        "ai test automation"
+      ]
+    },
+    {
+      "id": 18,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "UI Automation",
+      "keywords": [
+        "ui automation"
+      ]
+    },
+    {
+      "id": 19,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Mobile Automation",
+      "keywords": [
+        "mobile automation",
+        "mobile testing"
+      ]
+    },
+    {
+      "id": 20,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "API Automation",
+      "keywords": [
+        "api automation",
+        "api testing"
+      ]
+    },
+    {
+      "id": 21,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "BDD/TDD",
+      "keywords": [
+        "bdd",
+        "tdd",
+        "cucumber",
+        "behave",
+        "specflow"
+      ]
+    },
+    {
+      "id": 22,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Low-Code Automation",
+      "keywords": [
+        "low-code",
+        "low code",
+        "no-code"
+      ]
+    },
+    {
+      "id": 23,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Parallel/Hyper Execution",
+      "keywords": [
+        "parallel execution",
+        "hyper execution",
+        "selenium grid"
+      ]
+    },
+    {
+      "id": 24,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Docker",
+      "keywords": [
+        "docker",
+        "kubernetes",
+        "container"
+      ]
+    },
+    {
+      "id": 25,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "SonarQube",
+      "keywords": [
+        "sonarqube",
+        "sonar"
+      ]
+    },
+    {
+      "id": 26,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Azure DevOps",
+      "keywords": [
+        "azure devops"
+      ]
+    },
+    {
+      "id": 27,
+      "family": "Test Automation Engineering - SDET",
+      "group": "Automation Engineering",
+      "name": "Github/GitLab",
+      "keywords": [
+        "github",
+        "gitlab",
+        "bitbucket"
+      ]
+    },
+    {
+      "id": 28,
+      "family": "Non-Functional Testing",
+      "group": "Performance & Reliability Engineering",
+      "name": "NeoLoad",
+      "keywords": [
+        "neoload"
+      ]
+    },
+    {
+      "id": 29,
+      "family": "Non-Functional Testing",
+      "group": "Performance & Reliability Engineering",
+      "name": "LoadRunner",
+      "keywords": [
+        "loadrunner",
+        "load runner"
+      ]
+    },
+    {
+      "id": 30,
+      "family": "Non-Functional Testing",
+      "group": "Performance & Reliability Engineering",
+      "name": "Silk Performer",
+      "keywords": [
+        "silk performer",
+        "silkperformer"
+      ]
+    },
+    {
+      "id": 31,
+      "family": "Non-Functional Testing",
+      "group": "Performance & Reliability Engineering",
+      "name": "Apache JMeter",
+      "keywords": [
+        "jmeter",
+        "performance testing",
+        "load testing",
+        "stress testing",
+        "gatling",
+        "k6",
+        "locust",
+        "performance engineer"
+      ]
+    },
+    {
+      "id": 32,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Compatibility Testing",
+      "keywords": [
+        "compatibility testing",
+        "cross browser",
+        "cross-browser"
+      ]
+    },
+    {
+      "id": 33,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Accessibility Testing",
+      "keywords": [
+        "accessibility",
+        "a11y",
+        "wcag",
+        "section 508"
+      ]
+    },
+    {
+      "id": 34,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Security Testing (SAST, DAST, VA & PT)",
+      "keywords": [
+        "security testing",
+        "sast",
+        "dast",
+        "penetration testing",
+        "vapt",
+        "owasp",
+        "burp"
+      ]
+    },
+    {
+      "id": 35,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Infrastructure Testing",
+      "keywords": [
+        "infrastructure testing"
+      ]
+    },
+    {
+      "id": 36,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Network Testing",
+      "keywords": [
+        "network testing"
+      ]
+    },
+    {
+      "id": 37,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Semi-conductor Testing",
+      "keywords": [
+        "semiconductor",
+        "semi-conductor"
+      ]
+    },
+    {
+      "id": 38,
+      "family": "Non-Functional Testing",
+      "group": "Specialised NFT",
+      "name": "Gaming Testing",
+      "keywords": [
+        "gaming testing",
+        "game testing"
+      ]
+    },
+    {
+      "id": 39,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "LLMs & Gen AI architecture",
+      "keywords": [
+        "llm",
+        "large language model",
+        "gen ai",
+        "generative ai",
+        "genai"
+      ]
+    },
+    {
+      "id": 40,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Agentic AI",
+      "keywords": [
+        "agentic",
+        "ai agent",
+        "agentic ai"
+      ]
+    },
+    {
+      "id": 41,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "RAG Engineering",
+      "keywords": [
+        "rag engineering",
+        "retrieval augmented"
+      ]
+    },
+    {
+      "id": 42,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Prompt Engineering",
+      "keywords": [
+        "prompt engineering"
+      ]
+    },
+    {
+      "id": 43,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Vector Databases",
+      "keywords": [
+        "vector database",
+        "pinecone",
+        "weaviate",
+        "faiss",
+        "chroma"
+      ]
+    },
+    {
+      "id": 44,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Knowledge Base",
+      "keywords": [
+        "knowledge base"
+      ]
+    },
+    {
+      "id": 45,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Model Evaluation",
+      "keywords": [
+        "model evaluation"
+      ]
+    },
+    {
+      "id": 46,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "LLM Ops & QI Deployment",
+      "keywords": [
+        "llmops",
+        "llm ops",
+        "mlops"
+      ]
+    },
+    {
+      "id": 47,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "AI Security",
+      "keywords": [
+        "ai security"
+      ]
+    },
+    {
+      "id": 48,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "AI Compliance",
+      "keywords": [
+        "ai compliance"
+      ]
+    },
+    {
+      "id": 49,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Guard Rails",
+      "keywords": [
+        "guardrail",
+        "guard rail"
+      ]
+    },
+    {
+      "id": 50,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "AI adoption strategy",
+      "keywords": [
+        "ai adoption"
+      ]
+    },
+    {
+      "id": 51,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "AI Test Generation",
+      "keywords": [
+        "ai test generation"
+      ]
+    },
+    {
+      "id": 52,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "AI Test Optimization",
+      "keywords": [
+        "ai test optimization",
+        "ai test optimisation"
+      ]
+    },
+    {
+      "id": 53,
+      "family": "AI Driven Quality Engineering",
+      "group": "AI Driven Quality Engineering Architecture",
+      "name": "Autonomous Test Automation",
+      "keywords": [
+        "autonomous test",
+        "autonomous automation"
+      ]
+    },
+    {
+      "id": 54,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "AI/ML Testing",
+      "keywords": [
+        "ai/ml testing",
+        "ml testing",
+        "machine learning testing",
+        "model testing"
+      ]
+    },
+    {
+      "id": 55,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Deep Learning",
+      "keywords": [
+        "deep learning",
+        "neural network",
+        "tensorflow",
+        "pytorch",
+        "keras"
+      ]
+    },
+    {
+      "id": 56,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "AI Test Generation",
+      "keywords": [
+        "ai test generation"
+      ]
+    },
+    {
+      "id": 57,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "AI Test Optimization",
+      "keywords": [
+        "ai test optimization"
+      ]
+    },
+    {
+      "id": 58,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Autonomous Test Automation",
+      "keywords": [
+        "autonomous test"
+      ]
+    },
+    {
+      "id": 59,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Prompt Engineering",
+      "keywords": [
+        "prompt engineering"
+      ]
+    },
+    {
+      "id": 60,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Synthetic Test Design",
+      "keywords": [
+        "synthetic test",
+        "synthetic data"
+      ]
+    },
+    {
+      "id": 61,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Defect Prediction",
+      "keywords": [
+        "defect prediction"
+      ]
+    },
+    {
+      "id": 62,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "AI/ML Quality Engineering",
+      "name": "Self-Healing Automation",
+      "keywords": [
+        "self-healing automation",
+        "self healing automation"
+      ]
+    },
+    {
+      "id": 63,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "LLM Testing",
+      "keywords": [
+        "llm testing"
+      ]
+    },
+    {
+      "id": 64,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "RAG Validation",
+      "keywords": [
+        "rag validation"
+      ]
+    },
+    {
+      "id": 65,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "Prompt Validation",
+      "keywords": [
+        "prompt validation"
+      ]
+    },
+    {
+      "id": 66,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "Hallucination Detection",
+      "keywords": [
+        "hallucination"
+      ]
+    },
+    {
+      "id": 67,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "AI Safety Testing",
+      "keywords": [
+        "ai safety"
+      ]
+    },
+    {
+      "id": 68,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "Bias & Fairness Testing",
+      "keywords": [
+        "bias testing",
+        "fairness"
+      ]
+    },
+    {
+      "id": 69,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "Explainability Assessment",
+      "keywords": [
+        "explainability",
+        "xai"
+      ]
+    },
+    {
+      "id": 70,
+      "family": "AI/ML & Gen AI-Augmented Quality Engineering",
+      "group": "Gen AI Quality Engineering",
+      "name": "Responsible AI",
+      "keywords": [
+        "responsible ai"
+      ]
+    },
+    {
+      "id": 71,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Database Testing",
+      "keywords": [
+        "database testing",
+        "db testing"
+      ]
+    },
+    {
+      "id": 72,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "ETL Testing",
+      "keywords": [
+        "etl testing",
+        "etl"
+      ]
+    },
+    {
+      "id": 73,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Data Reconciliation",
+      "keywords": [
+        "data reconciliation",
+        "reconciliation"
+      ]
+    },
+    {
+      "id": 74,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Data Migration Testing",
+      "keywords": [
+        "data migration"
+      ]
+    },
+    {
+      "id": 75,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Data Validation",
+      "keywords": [
+        "data validation"
+      ]
+    },
+    {
+      "id": 76,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Data Profiling",
+      "keywords": [
+        "data profiling"
+      ]
+    },
+    {
+      "id": 77,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "SMAC Testing",
+      "keywords": [
+        "smac"
+      ]
+    },
+    {
+      "id": 78,
+      "family": "Data Quality Engineering",
+      "group": "Data",
+      "name": "Data Governance",
+      "keywords": [
+        "data governance"
+      ]
+    },
+    {
+      "id": 79,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Mobile & Digital Testing",
+      "name": "Mobile Testing",
+      "keywords": [
+        "mobile testing",
+        "android testing",
+        "ios testing"
+      ]
+    },
+    {
+      "id": 80,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Mobile & Digital Testing",
+      "name": "Digital Testing",
+      "keywords": [
+        "digital testing"
+      ]
+    },
+    {
+      "id": 81,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Mobile & Digital Testing",
+      "name": "Device Testing",
+      "keywords": [
+        "device testing"
+      ]
+    },
+    {
+      "id": 82,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Experience Testing",
+      "name": "CX Testing",
+      "keywords": [
+        "cx testing",
+        "customer experience"
+      ]
+    },
+    {
+      "id": 83,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Experience Testing",
+      "name": "UX Testing",
+      "keywords": [
+        "ux testing",
+        "usability"
+      ]
+    },
+    {
+      "id": 84,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Experience Testing",
+      "name": "A/B Testing",
+      "keywords": [
+        "a/b testing",
+        "ab testing"
+      ]
+    },
+    {
+      "id": 85,
+      "family": "Digital, Mobile & Channel Testing",
+      "group": "Experience Testing",
+      "name": "Localization Testing",
+      "keywords": [
+        "localization",
+        "localisation",
+        "l10n"
+      ]
+    },
+    {
+      "id": 86,
+      "family": "Service Integration Quality Engineering",
+      "group": "API & Microservices",
+      "name": "API Testing (SOAP / REST)",
+      "keywords": [
+        "api testing",
+        "rest api",
+        "soap",
+        "postman",
+        "rest assured"
+      ]
+    },
+    {
+      "id": 87,
+      "family": "Service Integration Quality Engineering",
+      "group": "API & Microservices",
+      "name": "Contract Testing",
+      "keywords": [
+        "contract testing",
+        "pact"
+      ]
+    },
+    {
+      "id": 88,
+      "family": "Service Integration Quality Engineering",
+      "group": "API & Microservices",
+      "name": "Event Testing",
+      "keywords": [
+        "event testing",
+        "event driven"
+      ]
+    },
+    {
+      "id": 89,
+      "family": "Service Integration Quality Engineering",
+      "group": "API & Microservices",
+      "name": "Service Virtualization",
+      "keywords": [
+        "service virtualization",
+        "service virtualisation"
+      ]
+    },
+    {
+      "id": 90,
+      "family": "Service Integration Quality Engineering",
+      "group": "API & Microservices",
+      "name": "Microservices Validation",
+      "keywords": [
+        "microservices"
+      ]
+    },
+    {
+      "id": 91,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "3rd Party Integration Testing",
+      "keywords": [
+        "3rd party",
+        "third party integration"
+      ]
+    },
+    {
+      "id": 92,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "Web Services / SOA Testing",
+      "keywords": [
+        "soa",
+        "web services"
+      ]
+    },
+    {
+      "id": 93,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "Mocking & Stubbing",
+      "keywords": [
+        "mocking",
+        "stubbing",
+        "wiremock"
+      ]
+    },
+    {
+      "id": 94,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "Schema & Payload validation",
+      "keywords": [
+        "schema validation",
+        "payload validation"
+      ]
+    },
+    {
+      "id": 95,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "Message Queue (Kafka RabbitMQ)",
+      "keywords": [
+        "kafka",
+        "rabbitmq",
+        "message queue"
+      ]
+    },
+    {
+      "id": 96,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "API Integration",
+      "keywords": [
+        "api integration"
+      ]
+    },
+    {
+      "id": 97,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "Middleware Integration",
+      "keywords": [
+        "middleware"
+      ]
+    },
+    {
+      "id": 98,
+      "family": "Service Integration Quality Engineering",
+      "group": "Enterprise Integration",
+      "name": "E2E Service Testing",
+      "keywords": [
+        "e2e service",
+        "end to end service"
+      ]
+    },
+    {
+      "id": 99,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "BFSI Domain",
+      "name": "Banking, Financial Services & Insurance",
+      "keywords": [
+        "banking",
+        "bfsi",
+        "financial services",
+        "insurance",
+        "fintech"
+      ]
+    },
+    {
+      "id": 100,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "MCS Domain",
+      "name": "Manufacturing & Consumer Services",
+      "keywords": [
+        "manufacturing",
+        "consumer services"
+      ]
+    },
+    {
+      "id": 101,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "TMT Domain",
+      "name": "Telecom, Media & Technology",
+      "keywords": [
+        "telecom",
+        "telco",
+        "media",
+        "5g"
+      ]
+    },
+    {
+      "id": 102,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "HLS Domain",
+      "name": "Health & Life Sciences",
+      "keywords": [
+        "healthcare",
+        "life sciences",
+        "clinical",
+        "pharma",
+        "hl7",
+        "fhir"
+      ]
+    },
+    {
+      "id": 103,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "Functional Testing",
+      "name": "Exploratory Testing",
+      "keywords": [
+        "exploratory testing"
+      ]
+    },
+    {
+      "id": 104,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "Functional Testing",
+      "name": "Document Mgmt Testing",
+      "keywords": [
+        "document management",
+        "dms"
+      ]
+    },
+    {
+      "id": 105,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "Functional Testing",
+      "name": "Business Rules Validation",
+      "keywords": [
+        "business rules"
+      ]
+    },
+    {
+      "id": 106,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "Functional Testing",
+      "name": "Risk-Based Testing",
+      "keywords": [
+        "risk-based testing",
+        "risk based testing"
+      ]
+    },
+    {
+      "id": 107,
+      "family": "Functional & Domain Quality Engineering",
+      "group": "Functional Testing",
+      "name": "UAT",
+      "keywords": [
+        "uat",
+        "user acceptance"
+      ]
+    },
+    {
+      "id": 108,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "D365 ERP Online",
+      "keywords": [
+        "d365",
+        "dynamics 365",
+        "dynamics"
+      ]
+    },
+    {
+      "id": 109,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "D365 Functional Associate",
+      "keywords": [
+        "d365 functional"
+      ]
+    },
+    {
+      "id": 110,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "D365 Solution Design – Functional (Requirements Analysis)",
+      "keywords": [
+        "d365 solution design"
+      ]
+    },
+    {
+      "id": 111,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "D365 Solution Design – Functional Design",
+      "keywords": [
+        "d365 functional design"
+      ]
+    },
+    {
+      "id": 112,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "Dynamics 365 Customer Engagement Fundamentals",
+      "keywords": [
+        "customer engagement"
+      ]
+    },
+    {
+      "id": 113,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Microsoft Dynamics (D365)",
+      "name": "Dynamics 365 ERP Fundamentals",
+      "keywords": [
+        "dynamics erp"
+      ]
+    },
+    {
+      "id": 114,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle Cloud",
+      "name": "Oracle CPQ",
+      "keywords": [
+        "oracle cpq",
+        "cpq"
+      ]
+    },
+    {
+      "id": 115,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle Cloud",
+      "name": "Oracle Recruiting Cloud",
+      "keywords": [
+        "oracle recruiting"
+      ]
+    },
+    {
+      "id": 116,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – Finance",
+      "name": "General Ledger",
+      "keywords": [
+        "general ledger"
+      ]
+    },
+    {
+      "id": 117,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – Finance",
+      "name": "Payables",
+      "keywords": [
+        "payables",
+        "accounts payable"
+      ]
+    },
+    {
+      "id": 118,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – Finance",
+      "name": "Receivables",
+      "keywords": [
+        "receivables",
+        "accounts receivable"
+      ]
+    },
+    {
+      "id": 119,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – Finance",
+      "name": "Accounting Hub",
+      "keywords": [
+        "accounting hub"
+      ]
+    },
+    {
+      "id": 120,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – Finance",
+      "name": "Cash Management",
+      "keywords": [
+        "cash management"
+      ]
+    },
+    {
+      "id": 121,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – HCM",
+      "name": "HRMS",
+      "keywords": [
+        "hrms"
+      ]
+    },
+    {
+      "id": 122,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – HCM",
+      "name": "Payroll",
+      "keywords": [
+        "payroll"
+      ]
+    },
+    {
+      "id": 123,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – HCM",
+      "name": "Absence Management",
+      "keywords": [
+        "absence management"
+      ]
+    },
+    {
+      "id": 124,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Oracle EBS – HCM",
+      "name": "Benefits / Compensation",
+      "keywords": [
+        "benefits",
+        "compensation"
+      ]
+    },
+    {
+      "id": 125,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Salesforce Core",
+      "name": "Salesforce Sales Cloud",
+      "keywords": [
+        "salesforce",
+        "sales cloud"
+      ]
+    },
+    {
+      "id": 126,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Salesforce Core",
+      "name": "Salesforce Marketing Cloud",
+      "keywords": [
+        "marketing cloud"
+      ]
+    },
+    {
+      "id": 127,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Salesforce Core",
+      "name": "Salesforce Service Cloud",
+      "keywords": [
+        "service cloud"
+      ]
+    },
+    {
+      "id": 128,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "SAP Core",
+      "name": "SAP FICO",
+      "keywords": [
+        "sap fico",
+        "fico"
+      ]
+    },
+    {
+      "id": 129,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "SAP Core",
+      "name": "SAP MM",
+      "keywords": [
+        "sap mm"
+      ]
+    },
+    {
+      "id": 130,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "SAP Core",
+      "name": "SAP SD",
+      "keywords": [
+        "sap sd"
+      ]
+    },
+    {
+      "id": 131,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Other Platforms",
+      "name": "ServiceMax",
+      "keywords": [
+        "servicemax"
+      ]
+    },
+    {
+      "id": 132,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Other Platforms",
+      "name": "E&U Cloud CLM",
+      "keywords": [
+        "e&u cloud",
+        "clm"
+      ]
+    },
+    {
+      "id": 133,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "PEGA",
+      "name": "Pega Testing",
+      "keywords": [
+        "pega"
+      ]
+    },
+    {
+      "id": 134,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Application & ERP Testing",
+      "name": "Manhattan Testing",
+      "keywords": [
+        "manhattan"
+      ]
+    },
+    {
+      "id": 135,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Application & ERP Testing",
+      "name": "JD Edwards Testing",
+      "keywords": [
+        "jd edwards",
+        "jde"
+      ]
+    },
+    {
+      "id": 136,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Application & ERP Testing",
+      "name": "ERP Testing",
+      "keywords": [
+        "erp testing"
+      ]
+    },
+    {
+      "id": 137,
+      "family": "Packaged & Enterprise Applications Testing",
+      "group": "Application & ERP Testing",
+      "name": "Retail & Supply Chain Testing",
+      "keywords": [
+        "supply chain testing",
+        "retail & supply chain"
+      ]
+    },
+    {
+      "id": 138,
+      "family": "Continuous Testing & Release Quality Engineering",
+      "group": "DevOps & Continuous Quality",
+      "name": "CI/CD",
+      "keywords": [
+        "ci/cd",
+        "jenkins",
+        "continuous integration"
+      ]
+    },
+    {
+      "id": 139,
+      "family": "Continuous Testing & Release Quality Engineering",
+      "group": "DevOps & Continuous Quality",
+      "name": "Continuous Testing / Quality Gates",
+      "keywords": [
+        "continuous testing",
+        "quality gates"
+      ]
+    },
+    {
+      "id": 140,
+      "family": "Continuous Testing & Release Quality Engineering",
+      "group": "DevOps & Continuous Quality",
+      "name": "Release Validation",
+      "keywords": [
+        "release validation"
+      ]
+    },
+    {
+      "id": 141,
+      "family": "Continuous Testing & Release Quality Engineering",
+      "group": "DevOps & Continuous Quality",
+      "name": "Test Orchestration",
+      "keywords": [
+        "test orchestration"
+      ]
+    },
+    {
+      "id": 142,
+      "family": "Continuous Testing & Release Quality Engineering",
+      "group": "DevOps & Continuous Quality",
+      "name": "Shift Left/Right",
+      "keywords": [
+        "shift left",
+        "shift right"
+      ]
+    },
+    {
+      "id": 143,
+      "family": "Test Data Management",
+      "group": "Data Provisioning & Test Data Engineering",
+      "name": "TDM",
+      "keywords": [
+        "tdm",
+        "test data management"
+      ]
+    },
+    {
+      "id": 144,
+      "family": "Test Data Management",
+      "group": "Data Provisioning & Test Data Engineering",
+      "name": "Synthetic Data",
+      "keywords": [
+        "synthetic data"
+      ]
+    },
+    {
+      "id": 145,
+      "family": "Test Data Management",
+      "group": "Data Provisioning & Test Data Engineering",
+      "name": "Environment Provisioning",
+      "keywords": [
+        "environment provisioning"
+      ]
+    },
+    {
+      "id": 146,
+      "family": "Test Data Management",
+      "group": "Data Provisioning & Test Data Engineering",
+      "name": "Data Masking (Tools like GenRocket, etc)",
+      "keywords": [
+        "data masking",
+        "genrocket"
+      ]
+    },
+    {
+      "id": 147,
+      "family": "Test Data Management",
+      "group": "Data Provisioning & Test Data Engineering",
+      "name": "Digital Twins",
+      "keywords": [
+        "digital twin"
+      ]
+    },
+    {
+      "id": 148,
+      "family": "Learning & Enablement",
+      "group": "Upskilling Initiatives & Capability Building",
+      "name": "Panel Enablement",
+      "keywords": [
+        "panel enablement"
+      ]
+    },
+    {
+      "id": 149,
+      "family": "Learning & Enablement",
+      "group": "Upskilling Initiatives & Capability Building",
+      "name": "Certification Enablement",
+      "keywords": [
+        "certification enablement"
+      ]
+    },
+    {
+      "id": 150,
+      "family": "Learning & Enablement",
+      "group": "Upskilling Initiatives & Capability Building",
+      "name": "Continuous Upskilling Programs",
+      "keywords": [
+        "upskilling"
+      ]
+    },
+    {
+      "id": 151,
+      "family": "Learning & Enablement",
+      "group": "Upskilling Initiatives & Capability Building",
+      "name": "Curriculum Development",
+      "keywords": [
+        "curriculum"
+      ]
+    },
+    {
+      "id": 152,
+      "family": "Learning & Enablement",
+      "group": "Upskilling Initiatives & Capability Building",
+      "name": "Bootcamps",
+      "keywords": [
+        "bootcamp"
+      ]
+    },
+    {
+      "id": 153,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "QI Transformation",
+      "keywords": [
+        "qi transformation",
+        "quality transformation"
+      ]
+    },
+    {
+      "id": 154,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "Operating Model Design",
+      "keywords": [
+        "operating model"
+      ]
+    },
+    {
+      "id": 155,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "Quality Governance",
+      "keywords": [
+        "quality governance"
+      ]
+    },
+    {
+      "id": 156,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "Quality Maturity Assessment",
+      "keywords": [
+        "quality maturity",
+        "maturity assessment"
+      ]
+    },
+    {
+      "id": 157,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "Advisory Consulting",
+      "keywords": [
+        "advisory consulting"
+      ]
+    },
+    {
+      "id": 158,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "KPI Frameworks",
+      "keywords": [
+        "kpi framework"
+      ]
+    },
+    {
+      "id": 159,
+      "family": "Test Delivery, Governance & Pre-Sales support",
+      "group": "QI Transformation & Delivery",
+      "name": "Business Value Realization",
+      "keywords": [
+        "business value"
+      ]
+    },
+    {
+      "id": 160,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "RFP/RFI",
+      "keywords": [
+        "rfp",
+        "rfi"
+      ]
+    },
+    {
+      "id": 161,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Program Governance",
+      "keywords": [
+        "program governance"
+      ]
+    },
+    {
+      "id": 162,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Estimation",
+      "keywords": [
+        "estimation"
+      ]
+    },
+    {
+      "id": 163,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Resource Planning",
+      "keywords": [
+        "resource planning"
+      ]
+    },
+    {
+      "id": 164,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Solutioning",
+      "keywords": [
+        "solutioning"
+      ]
+    },
+    {
+      "id": 165,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Client Consulting",
+      "keywords": [
+        "client consulting"
+      ]
+    },
+    {
+      "id": 166,
+      "family": "QI Pre-Sales & Governance",
+      "group": "QI Business Enablement",
+      "name": "Value Engineering",
+      "keywords": [
+        "value engineering"
+      ]
+    }
+  ]
+}

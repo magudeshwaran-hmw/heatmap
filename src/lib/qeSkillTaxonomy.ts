@@ -465,6 +465,84 @@ export function essentialSkillsFor(family: string, group: string): string[] {
   return g ? g.skills.map(sk => sk.name) : [];
 }
 
+// ─── Flat skill index (stable IDs) ────────────────────────────────────────────
+// The chain-lock (resume extraction → qisl_skill_ratings → legacy skills → admin
+// / employee views) needs a STABLE key per essential skill. A bare skill NAME is
+// not enough: a few names (e.g. "Prompt Engineering", "AI Test Generation") appear
+// under two families, so a name-only key would collapse them. QE_ALL_SKILLS gives
+// every essential-skill ROW a stable numeric id that encodes its (family, group,
+// name) position, and the resolvers below let callers snap an extracted skill back
+// to exactly one row. This is purely additive — nothing above is changed.
+export interface QEFlatSkill {
+  /** stable 1-based index across the whole taxonomy (this is taxonomy_skill_id in the DB) */
+  id: number;
+  family: string;
+  group: string;
+  name: string;
+  keywords: string[];
+}
+
+export const QE_ALL_SKILLS: QEFlatSkill[] = (() => {
+  const out: QEFlatSkill[] = [];
+  let id = 1;
+  for (const grp of QE_TAXONOMY) {
+    for (const sk of grp.skills) {
+      out.push({ id: id++, family: grp.family, group: grp.group, name: sk.name, keywords: sk.keywords });
+    }
+  }
+  return out;
+})();
+
+/** Total number of essential-skill rows in the taxonomy (currently 166). */
+export const QE_SKILL_COUNT = QE_ALL_SKILLS.length;
+
+/** All DISTINCT essential-skill names (a handful repeat across families). */
+export const QE_SKILL_NAMES: string[] = Array.from(new Set(QE_ALL_SKILLS.map(s => s.name)));
+
+// name(lowercased) → every flat row with that name (length > 1 for cross-family duplicates)
+const QE_NAME_INDEX: Map<string, QEFlatSkill[]> = (() => {
+  const m = new Map<string, QEFlatSkill[]>();
+  for (const s of QE_ALL_SKILLS) {
+    const key = s.name.toLowerCase();
+    const arr = m.get(key) || [];
+    arr.push(s);
+    m.set(key, arr);
+  }
+  return m;
+})();
+
+export function findQESkillById(id: number): QEFlatSkill | null {
+  return QE_ALL_SKILLS.find(s => s.id === id) || null;
+}
+
+/**
+ * Resolve an extracted skill NAME back to exactly one taxonomy row.
+ * Pass `family` to disambiguate the cross-family duplicate names; without it the
+ * first matching row wins. Match is exact, case-insensitive.
+ */
+export function findQESkillByName(name: string, family?: string): QEFlatSkill | null {
+  if (!name) return null;
+  const rows = QE_NAME_INDEX.get(String(name).toLowerCase());
+  if (!rows || rows.length === 0) return null;
+  if (family) {
+    const hit = rows.find(r => r.family === family);
+    if (hit) return hit;
+  }
+  return rows[0];
+}
+
+/** A family's distinct essential-skill rows (deduped by name across its groups). */
+export function skillsForFamily(family: string): QEFlatSkill[] {
+  const seen = new Set<string>();
+  const out: QEFlatSkill[] = [];
+  for (const s of QE_ALL_SKILLS) {
+    if (s.family !== family || seen.has(s.name)) continue;
+    seen.add(s.name);
+    out.push(s);
+  }
+  return out;
+}
+
 // ─── Auto-derive ─────────────────────────────────────────────────────────────
 export interface QEAssignment {
   family: string;

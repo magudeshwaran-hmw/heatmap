@@ -57,9 +57,10 @@ export default function AppHeader() {
 
   // PRIMARY items (direct top-level links on desktop)
   const empPrimary: NavItem[] = [
-    { label: 'ZenRadar',  path: '/employee/dashboard', icon: Radar },
-    { label: 'ZenMatrix', path: '/employee/skills',    icon: Grid3x3 },
-    { label: 'ZenAssess', path: '/employee/zenassess', icon: ClipboardCheck },
+    { label: 'ZenRadar',        path: '/employee/dashboard',  icon: Radar },
+    // { label: 'ZenMatrix', path: '/employee/skills', icon: Grid3x3 }, // temporarily hidden
+    { label: 'QI SL ZenMatrix', path: '/employee/qisl-skills', icon: Grid3x3 },
+    { label: 'ZenAssess',       path: '/employee/zenassess',  icon: ClipboardCheck },
   ];
   // MORE items (inside the "More ▾" dropdown on desktop)
   const empMore: NavItem[] = [

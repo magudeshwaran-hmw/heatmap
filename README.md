@@ -59,7 +59,7 @@ Launches the full stack on a single public port via `npm run dev`:
 | Service | Port | Notes |
 |---------|------|-------|
 | Frontend gateway | **7000** | ← open this in your browser |
-| Backend API | 3001 | internal |
+| Backend API | 5001 | internal |
 | Ollama LLM | 11434 | internal, optional (powers AI features) |
 
 Press **Ctrl+C** to stop everything.
@@ -116,7 +116,7 @@ Only `DB_PASSWORD` normally needs changing. Full reference lives in
 | `DB_NAME` | `skillmatrix` | Database name |
 | `DB_USER` / `DB_PASSWORD` | `postgres` / — | PostgreSQL credentials |
 | `GATEWAY_PORT` | `7000` | Public app URL |
-| `PORT` | `3001` | Internal backend API |
+| `PORT` | `5001` | Internal backend API |
 | `LLM_PROVIDER` | `ollama` | `ollama` (local, free) or `gemini` (cloud) |
 | `CLOUD_API_KEY` | — | Google Gemini key (only if `LLM_PROVIDER=gemini`) |
 | `GITHUB_TOKEN` | — | Optional — higher GitHub API limits for ZenCode |

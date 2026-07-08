@@ -7,9 +7,12 @@
 #    1. Verifies Node.js (>=18) and npm are installed
 #    2. Verifies the PostgreSQL client (psql) is installed
 #    3. Installs all npm dependencies
-#    4. Creates a .env file (asks for your Postgres password) if missing
-#    5. Creates the 'skillmatrix' database if it does not exist
-#    6. Pushes the full schema into PostgreSQL (COMPLETE_DATABASE_SETUP.sql)
+#    4. Generates the QE skill-taxonomy JSON the backend reads (166 skills)
+#    5. Creates a .env file (asks for your Postgres password) if missing
+#    6. Creates the 'skillmatrix' database if it does not exist
+#    7. Pushes the full schema into PostgreSQL (COMPLETE_DATABASE_SETUP.sql)
+#       (the QISL chain columns from migration 011 are also auto-applied by the
+#        backend on first start, so no manual migration step is needed)
 #
 #  Run it from the project root:   ./installation.sh
 #  Then start everything with:     ./run.sh
@@ -69,6 +72,12 @@ export PUPPETEER_SKIP_DOWNLOAD=true
 export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 npm install
 ok "Dependencies installed"
+
+# ── 3b. Generate the QE skill-taxonomy JSON ─────────────────────────────────
+# The CommonJS backend can't import the TS taxonomy, so it reads a generated JSON
+# (src/data/qeTaxonomy.generated.json) produced from src/lib/qeSkillTaxonomy.ts.
+node scripts/gen-taxonomy.cjs
+ok "QE skill taxonomy generated (166 skills)"
 
 # ── 4. .env file ────────────────────────────────────────────────────────────
 say ""

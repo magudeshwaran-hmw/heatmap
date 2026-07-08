@@ -66,7 +66,8 @@ function AppRoutes() {
 
         {/* Employee routes */}
         <Route path="/employee/dashboard"      element={isLoggedIn ? <EmployeeDashboard />  : <Navigate to="/login" />} />
-        <Route path="/employee/skills"         element={isLoggedIn ? <SkillMatrixPage />    : <Navigate to="/login" />} />
+        {/* ZenMatrix temporarily hidden — route redirects to dashboard */}
+        <Route path="/employee/skills"         element={<Navigate to="/employee/dashboard" replace />} />
         <Route path="/employee/qisl-skills"    element={isLoggedIn ? <QislZenMatrixPage />  : <Navigate to="/login" />} />
         <Route path="/employee/report"         element={isLoggedIn ? <SkillReportPage />    : <Navigate to="/login" />} />
         <Route path="/employee/ai"             element={isLoggedIn ? <AIIntelligencePage /> : <Navigate to="/login" />} />

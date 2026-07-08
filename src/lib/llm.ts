@@ -69,10 +69,28 @@ export interface LLMResult {
 }
 
 // ─── MAIN LLM CALL ───────────────────────────────────────────
+export interface CallLLMOpts {
+  /** hard cap for a single fetch attempt (ms). Default 60s. */
+  timeoutMs?: number;
+  /** sampling temperature for the local model. Default 0.1 (deterministic extraction). */
+  temperature?: number;
+  /** max output tokens for the local model. Default 8192 — sized for large JSON. */
+  numPredict?: number;
+  /** skip the localStorage prompt cache (use for fresh resume extractions). */
+  noCache?: boolean;
+}
+
 export const callLLM = async (
   prompt: string,
-  modelOverride?: string
+  modelOverride?: string,
+  opts: CallLLMOpts = {}
 ): Promise<LLMResult> => {
+  const {
+    timeoutMs = 60000,
+    temperature = 0.1,
+    numPredict = 8192,
+    noCache = false,
+  } = opts;
 
   const getPromptHash = (str: string) => {
     let hash = 0;
@@ -85,7 +103,7 @@ export const callLLM = async (
   };
 
   const cacheKey = `llmCache_${getPromptHash(prompt)}`;
-  const cached = localStorage.getItem(cacheKey);
+  const cached = noCache ? null : localStorage.getItem(cacheKey);
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
@@ -114,9 +132,12 @@ export const callLLM = async (
                 prompt: prompt,
                 stream: false,
                 format: 'json',
+                // Deterministic extraction + a real output-token budget so large
+                // (160-skill) JSON isn't silently truncated mid-object.
+                options: { temperature, num_predict: numPredict },
               }),
             }),
-            50000 // Give it longer (50s) to run on CPU machines
+            timeoutMs
           ) as Response;
           if (attempt.ok) { 
             localRes = attempt; 
@@ -203,7 +224,9 @@ export const callLLM = async (
     }
 
     // ── SAVE TO CACHE ─────────────────────────────────────────
-    localStorage.setItem(cacheKey, JSON.stringify(parsed));
+    if (!noCache) {
+      try { localStorage.setItem(cacheKey, JSON.stringify(parsed)); } catch { /* quota */ }
+    }
 
     return { data: parsed, fromCache: false };
 
@@ -285,11 +308,17 @@ export const clearLLMCache = () => {
 
 export const getLLMMode = () => AI_MODE;
 
-export const callResumeLLM = async (prompt: string, accuracyMode = false): Promise<LLMResult> => {
+export const callResumeLLM = async (prompt: string, accuracyMode = false, extra: CallLLMOpts = {}): Promise<LLMResult> => {
   let lastResult: LLMResult | null = null;
-  const timeout = accuracyMode ? 0 : 15000; // 0 for unlimited in accuracy mode, 15s for normal
-  
-  console.log(`🤖 [AI Audit] ${accuracyMode ? 'ACCURACY MODE (unlimited timeout)' : 'Normal mode'} - timeout: ${timeout === 0 ? 'unlimited' : timeout/1000 + 's'}`);
+  // Accuracy mode gets a REAL 4-minute per-attempt budget (the old code advertised
+  // "unlimited" but callLLM still hard-capped every fetch at 50s, so large
+  // extractions always timed out and fell through). Normal mode stays snappy at 15s.
+  const timeoutMs = accuracyMode ? 240000 : 15000;
+  // Resume extractions must not serve a stale cached parse for identical text after
+  // the prompt/taxonomy changes — always run fresh.
+  const opts: CallLLMOpts = { timeoutMs, noCache: true, ...extra };
+
+  console.log(`🤖 [AI Audit] ${accuracyMode ? 'ACCURACY MODE' : 'Normal mode'} - per-attempt timeout: ${timeoutMs / 1000}s`);
   
   // First try to check if any models are available
   let availableModels = RESUME_MODELS;
@@ -313,10 +342,9 @@ export const callResumeLLM = async (prompt: string, accuracyMode = false): Promi
     try {
       console.log(`🤖 [AI Audit] Attempting scan with ${model}...`);
       
-      // Apply timeout to all attempts for faster fallback (skip timeout in accuracy mode)
-      const result = timeout === 0 
-        ? await callLLM(prompt, model)
-        : await withTimeout(callLLM(prompt, model), timeout);
+      // callLLM now enforces the per-attempt timeout itself (opts.timeoutMs), so we
+      // no longer need the outer race that used to conflict with the inner 50s cap.
+      const result = await callLLM(prompt, model, opts);
       if (result.data && !result.error) {
         console.log(`✅ [AI Audit] Success with ${model}`);
         return result;

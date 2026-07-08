@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import { ChevronLeft, Save, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
-import { QE_FAMILIES, groupsForFamily, essentialSkillsFor } from '@/lib/qeSkillTaxonomy';
+import { QE_FAMILIES, groupsForFamily, essentialSkillsFor, findQESkillByName } from '@/lib/qeSkillTaxonomy';
 import { apiGetQislSkills, apiSaveQislSkills } from '@/lib/api';
 
 type Level = 0 | 1 | 2 | 3;
@@ -41,6 +41,12 @@ export default function QislZenMatrixPage({ isPopup = false, employeeId: employe
   const LVL_COLOR: Record<number, string> = { 0: dark ? '#D1D5DB' : '#4B5563', 1: '#D97706', 2: '#2563EB', 3: '#059669' };
 
   const [ratings, setRatings] = useState<Record<string, number>>({});
+  // Per-skill chain-lock enrichment (priority tier + provenance) from the resume extraction.
+  const [details, setDetails] = useState<Record<string, { priority: string | null; source: string }>>({});
+  // Custom "Others" skills (outside the 166) → which family they belong under.
+  const [customMeta, setCustomMeta] = useState<Record<string, { family: string }>>({});
+  const [newSkill, setNewSkill] = useState('');
+  const [familyOrder, setFamilyOrder] = useState<number[]>(() => FAMILY_SKILLS.map((_, i) => i));
   const [activeIdx, setActiveIdx] = useState(0);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -52,31 +58,123 @@ export default function QislZenMatrixPage({ isPopup = false, employeeId: employe
       try {
         const res = await apiGetQislSkills(employeeId);
         setRatings(res.ratings || {});
+        const det: Record<string, { priority: string | null; source: string }> = {};
+        const custom: Record<string, { family: string }> = {};
+        (res.details || []).forEach(d => {
+          det[d.skillName] = { priority: d.priority, source: d.source };
+          // A skill belongs in "Others" ONLY if it is genuinely not one of the 166
+          // taxonomy skills. We check the name against the taxonomy rather than trust
+          // taxonomyId — an older server may omit that field, and `undefined == null`
+          // would wrongly bucket every rated skill as a custom "Other".
+          if (d.family && !findQESkillByName(d.skillName)) custom[d.skillName] = { family: d.family };
+        });
+        setDetails(det);
+        setCustomMeta(custom);
+        // Order families strongest-first: the family with the most rated skills leads.
+        const counts = FAMILY_SKILLS.map((f, i) => {
+          const taxRated = f.skills.filter(s => (res.ratings?.[s] || 0) > 0).length;
+          const customRated = Object.entries(custom).filter(([n, m]) => m.family === f.family && (res.ratings?.[n] || 0) > 0).length;
+          return { i, n: taxRated + customRated };
+        });
+        counts.sort((a, b) => b.n - a.n);
+        setFamilyOrder(counts.map(c => c.i));
       } catch { /* keep empty — nothing rated yet */ }
       finally { setLoading(false); }
     })();
   }, [employeeId]);
 
-  const activeFamily = FAMILY_SKILLS[activeIdx];
+  // How many skills were AI-detected from the resume (source='ai') and not yet confirmed.
+  const aiCount = useMemo(() => Object.values(details).filter(d => d.source === 'ai').length, [details]);
+  const PRIO_LABEL: Record<string, string> = { primary: 'P1', secondary: 'P2', tertiary: 'P3' };
+
+  const orderedFamilies = familyOrder.map(i => FAMILY_SKILLS[i]).filter(Boolean);
+  const activeFamily = orderedFamilies[activeIdx] || orderedFamilies[0] || FAMILY_SKILLS[0];
   const totalRated = useMemo(() => ALL_SKILLS.filter(s => (ratings[s] || 0) > 0).length, [ratings]);
   const completion = Math.round((totalRated / ALL_SKILLS.length) * 100);
 
   const famDone = (skills: string[]) => skills.filter(s => (ratings[s] || 0) > 0).length;
 
-  const setLevel = (skill: string, level: Level) =>
+  const setLevel = (skill: string, level: Level) => {
     setRatings(prev => ({ ...prev, [skill]: level }));
+    // A manual edit confirms the skill — drop the "AI-detected" flag locally.
+    setDetails(prev => ({ ...prev, [skill]: { priority: prev[skill]?.priority ?? null, source: 'self' } }));
+  };
+
+  // Add a custom skill under the active family's "Others" bucket.
+  const addCustomSkill = () => {
+    const name = newSkill.trim();
+    if (!name) return;
+    if (findQESkillByName(name)) { toast.info(`"${name}" is already a listed skill — rate it above.`); setNewSkill(''); return; }
+    if (ratings[name] != null || customMeta[name]) { toast.info(`"${name}" is already added.`); setNewSkill(''); return; }
+    setCustomMeta(prev => ({ ...prev, [name]: { family: activeFamily.family } }));
+    setRatings(prev => ({ ...prev, [name]: 1 }));
+    setDetails(prev => ({ ...prev, [name]: { priority: null, source: 'self' } }));
+    setNewSkill('');
+  };
 
   const handleSave = async () => {
     if (!employeeId || employeeId === 'new') { toast.error('Please sign in to save.'); return; }
     setSaving(true);
     try {
-      await apiSaveQislSkills(employeeId, ratings);
+      // Send per-skill metadata so taxonomy skills keep their family/id and custom
+      // "Others" skills persist under the family they were added to.
+      const meta: Record<string, { taxonomyId?: number | null; family?: string | null; group?: string | null }> = {};
+      Object.keys(ratings).forEach(name => {
+        if ((ratings[name] || 0) <= 0) return;
+        const tax = findQESkillByName(name);
+        if (tax) meta[name] = { taxonomyId: tax.id, family: tax.family, group: tax.group };
+        else if (customMeta[name]) meta[name] = { family: customMeta[name].family };
+      });
+      await apiSaveQislSkills(employeeId, ratings, meta);
       toast.success('QI SL ZenMatrix saved to database ✓');
     } catch (e: any) {
       toast.error('Could not save: ' + (e?.message || 'server error'));
     } finally {
       setSaving(false);
     }
+  };
+
+  // Custom "Others" skills that belong to the currently-selected family
+  // (never a real taxonomy skill — that would duplicate the list above).
+  const activeCustoms = Object.keys(customMeta)
+    .filter(n => customMeta[n].family === activeFamily.family && !findQESkillByName(n))
+    .sort((a, b) => (ratings[b] || 0) - (ratings[a] || 0) || a.localeCompare(b));
+
+  const removeCustom = (name: string) => {
+    setRatings(prev => { const n = { ...prev }; delete n[name]; return n; });
+    setCustomMeta(prev => { const n = { ...prev }; delete n[name]; return n; });
+    setDetails(prev => { const n = { ...prev }; delete n[name]; return n; });
+  };
+
+  // One skill row — reused for both taxonomy skills and custom "Others" skills.
+  const renderSkillRow = (skill: string, isCustom = false) => {
+    const lvl = (ratings[skill] || 0) as Level;
+    const rated = lvl > 0;
+    return (
+      <div key={skill} style={{ background: rated ? `${LVL_COLOR[lvl]}0D` : T.card, border: `1px solid ${rated ? `${LVL_COLOR[lvl]}33` : T.bdr}`, borderRadius: 13, padding: '16px 22px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14 }}>
+        <div style={{ flex: '1 1 180px', minWidth: 160, fontSize: 14, fontWeight: 700, color: T.text, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span>{skill}</span>
+          {details[skill]?.priority && (
+            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '.03em', padding: '2px 7px', borderRadius: 6, background: dark ? 'rgba(139,92,246,0.20)' : 'rgba(139,92,246,0.12)', color: dark ? '#C4B5FD' : '#7C3AED' }} title={`${details[skill]?.priority} skill in this family`}>{PRIO_LABEL[details[skill]!.priority!]}</span>
+          )}
+          {details[skill]?.source === 'ai' && (
+            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '.03em', padding: '2px 7px', borderRadius: 6, background: dark ? 'rgba(59,130,246,0.20)' : 'rgba(59,130,246,0.12)', color: dark ? '#93C5FD' : '#2563EB' }} title="Auto-detected from your resume — press Save to confirm">AI</span>
+          )}
+          {isCustom && (
+            <button onClick={() => removeCustom(skill)} title="Remove this skill" style={{ fontSize: 11, lineHeight: 1, padding: '2px 7px', borderRadius: 6, border: `1px solid ${T.bdr}`, background: 'transparent', color: T.muted, cursor: 'pointer' }}>✕</button>
+          )}
+        </div>
+        <div style={{ textAlign: 'right', minWidth: 96 }}>
+          <div style={{ fontSize: 10, color: T.muted }}>MY LEVEL</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: rated ? LVL_COLOR[lvl] : T.muted }}>{LVL_LABEL[lvl]}</div>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {([0, 1, 2, 3] as Level[]).map(l => (
+            <button key={l} onClick={() => setLevel(skill, l)} style={{ width: 42, height: 42, borderRadius: 9, fontWeight: 800, border: `2px solid ${lvl === l ? LVL_COLOR[l] : T.bdr}`, background: lvl === l ? `${LVL_COLOR[l]}28` : T.card, color: lvl === l ? LVL_COLOR[l] : T.muted, cursor: 'pointer' }}>{l}</button>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -115,9 +213,23 @@ export default function QislZenMatrixPage({ isPopup = false, employeeId: employe
           </div>
         </div>
 
+        {/* AI-detected banner — the resume extraction pre-filled these ratings. */}
+        {aiCount > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: dark ? 'rgba(59,130,246,0.10)' : 'rgba(59,130,246,0.07)', border: `1px solid ${dark ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.30)'}`, borderRadius: 14, padding: '14px 18px', marginBottom: 20 }}>
+            <span style={{ fontSize: 20 }}>🧬</span>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>{aiCount} skill{aiCount === 1 ? '' : 's'} auto-detected from your resume</div>
+              <div style={{ fontSize: 12, color: T.sub, marginTop: 2 }}>Review the AI-suggested levels below and press Save to confirm them as your own.</div>
+            </div>
+            <button onClick={handleSave} disabled={saving} style={{ padding: '9px 18px', borderRadius: 9, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', border: 'none', color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving…' : 'Confirm all'}
+            </button>
+          </div>
+        )}
+
         {/* Family selector (top row, like ZenMatrix categories) */}
         <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 8, marginBottom: 24 }}>
-          {FAMILY_SKILLS.map((f, i) => {
+          {orderedFamilies.map((f, i) => {
             const on = i === activeIdx;
             const done = famDone(f.skills);
             const complete = done === f.skills.length && f.skills.length > 0;
@@ -149,32 +261,36 @@ export default function QislZenMatrixPage({ isPopup = false, employeeId: employe
           <div style={{ textAlign: 'center', color: T.sub, padding: 48 }}>Loading your ratings…</div>
         ) : (
           <div style={{ display: 'grid', gap: 10 }}>
-            {activeFamily.skills.map(skill => {
-              const lvl = (ratings[skill] || 0) as Level;
-              const rated = lvl > 0;
-              return (
-                <div key={skill} style={{ background: rated ? `${LVL_COLOR[lvl]}0D` : T.card, border: `1px solid ${rated ? `${LVL_COLOR[lvl]}33` : T.bdr}`, borderRadius: 13, padding: '16px 22px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14 }}>
-                  <div style={{ flex: '1 1 180px', minWidth: 160, fontSize: 14, fontWeight: 700, color: T.text }}>{skill}</div>
-                  <div style={{ textAlign: 'right', minWidth: 96 }}>
-                    <div style={{ fontSize: 10, color: T.muted }}>MY LEVEL</div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: rated ? LVL_COLOR[lvl] : T.muted }}>{LVL_LABEL[lvl]}</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {([0, 1, 2, 3] as Level[]).map(l => (
-                      <button key={l} onClick={() => setLevel(skill, l)} style={{ width: 42, height: 42, borderRadius: 9, fontWeight: 800, border: `2px solid ${lvl === l ? LVL_COLOR[l] : T.bdr}`, background: lvl === l ? `${LVL_COLOR[l]}28` : T.card, color: lvl === l ? LVL_COLOR[l] : T.muted, cursor: 'pointer' }}>{l}</button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+            {activeFamily.skills.map(skill => renderSkillRow(skill))}
+
+            {/* Others — resume skills outside the 166 list, plus anything you add. */}
+            <div style={{ marginTop: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: T.sub }}>Others</span>
+              <span style={{ height: 1, flex: 1, background: T.bdr }} />
+              <span style={{ fontSize: 11, color: T.muted }}>skills not in the list above</span>
+            </div>
+
+            {activeCustoms.map(skill => renderSkillRow(skill, true))}
+
+            {/* Add a custom skill under this family. */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', background: T.card, border: `1px dashed ${T.bdr}`, borderRadius: 13, padding: '12px 16px' }}>
+              <input
+                value={newSkill}
+                onChange={e => setNewSkill(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') addCustomSkill(); }}
+                placeholder={`Add a skill to ${activeFamily.family}…`}
+                style={{ flex: 1, minWidth: 140, background: 'transparent', border: 'none', outline: 'none', color: T.text, fontSize: 13.5, fontWeight: 600 }}
+              />
+              <button onClick={addCustomSkill} disabled={!newSkill.trim()} style={{ padding: '8px 16px', borderRadius: 9, border: 'none', background: newSkill.trim() ? 'linear-gradient(135deg,#3B82F6,#8B5CF6)' : T.bdr, color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: newSkill.trim() ? 'pointer' : 'not-allowed' }}>+ Add</button>
+            </div>
           </div>
         )}
 
         {/* Footer nav */}
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 28 }}>
           <button onClick={() => setActiveIdx(i => Math.max(0, i - 1))} disabled={activeIdx === 0} style={{ padding: '11px 22px', borderRadius: 9, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, cursor: activeIdx === 0 ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: activeIdx === 0 ? 0.5 : 1 }}>Previous</button>
-          {activeIdx < FAMILY_SKILLS.length - 1 ? (
-            <button onClick={() => setActiveIdx(i => Math.min(FAMILY_SKILLS.length - 1, i + 1))} style={{ padding: '11px 22px', borderRadius: 9, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700 }}>Next Family</button>
+          {activeIdx < orderedFamilies.length - 1 ? (
+            <button onClick={() => setActiveIdx(i => Math.min(orderedFamilies.length - 1, i + 1))} style={{ padding: '11px 22px', borderRadius: 9, background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700 }}>Next Family</button>
           ) : (
             <button onClick={handleSave} disabled={saving} style={{ padding: '12px 28px', borderRadius: 10, background: 'linear-gradient(135deg,#10B981,#3B82F6)', border: 'none', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>{saving ? 'Saving…' : 'Save'}</button>
           )}

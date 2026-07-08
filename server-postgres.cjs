@@ -7,8 +7,21 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const fallbackQuestions = require('./fallbackQuestions.cjs');
 
+// Server-authoritative QE taxonomy — generated from src/lib/qeSkillTaxonomy.ts by
+// scripts/gen-taxonomy.cjs (npm run gen:taxonomy, also runs on prebuild). Lets the
+// chain-lock endpoint validate/enrich resume-extracted skills against the same 166
+// skills the frontend uses, so a stored rating always resolves to a real family.
+let QE_TAX_BY_ID = new Map();
+try {
+  const _tax = require('./src/data/qeTaxonomy.generated.json');
+  QE_TAX_BY_ID = new Map((_tax.skills || []).map(s => [s.id, s]));
+  console.log(`✅ Loaded QE taxonomy: ${QE_TAX_BY_ID.size} skills`);
+} catch (e) {
+  console.warn('⚠️  QE taxonomy JSON missing (run: npm run gen:taxonomy). Chain endpoint will trust client-supplied skill metadata.');
+}
+
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 5001;
 
 // PostgreSQL connection with SSL support for cloud databases
 const pool = new Pool({
@@ -1531,6 +1544,17 @@ async function syncDatabaseSchema() {
         PRIMARY KEY (employee_id, skill_name)
       )
     `);
+    // Chain-lock enrichment (migration 011): let a rating carry its taxonomy row,
+    // family/group, priority tier and provenance so one resume extraction can
+    // populate QISL AND drive the admin/employee family-grouped, priority views.
+    // Additive + idempotent — the manual QISL page keeps working unchanged.
+    await query(`ALTER TABLE qisl_skill_ratings ADD COLUMN IF NOT EXISTS taxonomy_skill_id INTEGER`);
+    await query(`ALTER TABLE qisl_skill_ratings ADD COLUMN IF NOT EXISTS skill_family      VARCHAR(120)`);
+    await query(`ALTER TABLE qisl_skill_ratings ADD COLUMN IF NOT EXISTS skill_group       VARCHAR(160)`);
+    await query(`ALTER TABLE qisl_skill_ratings ADD COLUMN IF NOT EXISTS priority          VARCHAR(12)`);   // primary | secondary | tertiary | NULL
+    await query(`ALTER TABLE qisl_skill_ratings ADD COLUMN IF NOT EXISTS source            VARCHAR(20) DEFAULT 'self'`); // 'ai' (resume) | 'self' (manual)
+    await query(`CREATE INDEX IF NOT EXISTS idx_qisl_employee ON qisl_skill_ratings(employee_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_qisl_family   ON qisl_skill_ratings(skill_family)`);
 
     // Seed default admin if missing
     const hasAdmin = await query("SELECT * FROM app_settings WHERE key = 'admin_id'");
@@ -7276,13 +7300,52 @@ app.post('/api/skill-completions/reset-flag', async (req, res) => {
 });
 
 // ─── QISL ZenMatrix — employee self-ratings (0–3) for QE-taxonomy skills ──────
-// GET /api/qisl-skills/:employeeId — { ratings: { [skillName]: level } }
+// GET /api/qisl-skills/:employeeId
+//   { ratings: { [skillName]: level },
+//     details: [{ skillName, level, family, group, priority, source }] }
+// `ratings` is kept for backward compatibility; `details` carries the chain-lock
+// enrichment (family/priority/provenance) the QISL page & dashboards render.
 app.get('/api/qisl-skills/:employeeId', async (req, res) => {
   try {
-    const result = await query('SELECT skill_name, level FROM qisl_skill_ratings WHERE employee_id = $1', [String(req.params.employeeId)]);
+    const result = await query(
+      `SELECT skill_name, level, taxonomy_skill_id, skill_family, skill_group, priority, source
+         FROM qisl_skill_ratings WHERE employee_id = $1`,
+      [String(req.params.employeeId)]
+    );
     const ratings = {};
-    result.rows.forEach(r => { ratings[r.skill_name] = r.level; });
-    res.json({ ratings });
+    const details = result.rows.map(r => {
+      ratings[r.skill_name] = r.level;
+      return {
+        skillName: r.skill_name, level: r.level,
+        taxonomyId: r.taxonomy_skill_id != null ? r.taxonomy_skill_id : null,
+        family: r.skill_family || null, group: r.skill_group || null,
+        priority: r.priority || null, source: r.source || 'self',
+      };
+    });
+    res.json({ ratings, details });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/qisl-skills — bulk, for the admin QI SL Heatmap.
+//   { byEmployee: { [employeeId]: [{ skillName, level, family, group, priority, source }] } }
+// Lets the admin overview aggregate REAL self/AI ratings instead of keyword guesses.
+app.get('/api/qisl-skills', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT employee_id, skill_name, level, skill_family, skill_group, priority, source
+         FROM qisl_skill_ratings`
+    );
+    const byEmployee = {};
+    result.rows.forEach(r => {
+      (byEmployee[r.employee_id] = byEmployee[r.employee_id] || []).push({
+        skillName: r.skill_name, level: r.level,
+        family: r.skill_family || null, group: r.skill_group || null,
+        priority: r.priority || null, source: r.source || 'self',
+      });
+    });
+    res.json({ byEmployee });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -7294,15 +7357,30 @@ app.post('/api/qisl-skills/:employeeId', async (req, res) => {
   try {
     const empId = String(req.params.employeeId);
     const ratings = (req.body && req.body.ratings) || {};
+    // Optional per-skill metadata { [skillName]: { taxonomyId, family, group, priority } }
+    // so custom "Others" skills persist under their family. Taxonomy skills carry it too.
+    const meta = (req.body && req.body.meta) || {};
     await client.query('BEGIN');
     for (const [skill, raw] of Object.entries(ratings)) {
       const level = Math.max(0, Math.min(3, parseInt(raw, 10) || 0));
       if (level > 0) {
+        const m = meta[skill] || {};
+        const taxId = m.taxonomyId != null ? parseInt(m.taxonomyId, 10) : null;
+        const family = m.family || null;
+        const group = m.group || null;
+        const priority = ['primary', 'secondary', 'tertiary'].includes(m.priority) ? m.priority : null;
+        // Manual edits are stamped source='self' so the AI chain-write never clobbers them.
         await client.query(
-          `INSERT INTO qisl_skill_ratings (employee_id, skill_name, level, updated_at)
-           VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-           ON CONFLICT (employee_id, skill_name) DO UPDATE SET level = EXCLUDED.level, updated_at = CURRENT_TIMESTAMP`,
-          [empId, String(skill), level]
+          `INSERT INTO qisl_skill_ratings (employee_id, skill_name, level, taxonomy_skill_id, skill_family, skill_group, priority, source, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'self', CURRENT_TIMESTAMP)
+           ON CONFLICT (employee_id, skill_name) DO UPDATE
+             SET level = EXCLUDED.level,
+                 taxonomy_skill_id = COALESCE(EXCLUDED.taxonomy_skill_id, qisl_skill_ratings.taxonomy_skill_id),
+                 skill_family = COALESCE(EXCLUDED.skill_family, qisl_skill_ratings.skill_family),
+                 skill_group = COALESCE(EXCLUDED.skill_group, qisl_skill_ratings.skill_group),
+                 priority = COALESCE(EXCLUDED.priority, qisl_skill_ratings.priority),
+                 source = 'self', updated_at = CURRENT_TIMESTAMP`,
+          [empId, String(skill), level, taxId, family, group, priority]
         );
       } else {
         await client.query('DELETE FROM qisl_skill_ratings WHERE employee_id = $1 AND skill_name = $2', [empId, String(skill)]);
@@ -7310,6 +7388,90 @@ app.post('/api/qisl-skills/:employeeId', async (req, res) => {
     }
     await client.query('COMMIT');
     res.json({ success: true });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/employees/:id/taxonomy-skills — CHAIN-LOCK entry point.
+// One transactional write turns a resume extraction into: (1) QISL ZenMatrix rows
+// enriched with taxonomy id / family / group / priority / provenance, WITHOUT
+// overwriting any skill the employee already self-rated, and (2) refreshed
+// primary/secondary/tertiary skill labels on the employee. This is the single
+// fan-out point that makes one upload reflect across QISL + admin + employee views.
+// Body: { employeeName?, source?: 'ai'|'self', primarySkill?, secondarySkill?,
+//         tertiarySkill?, skills: [{ id?, name?, family?, group?, proficiency|level, priority? }] }
+app.post('/api/employees/:id/taxonomy-skills', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const paramId = String(req.params.id);
+    const body = req.body || {};
+    const skills = Array.isArray(body.skills) ? body.skills : [];
+    const source = body.source === 'self' ? 'self' : 'ai';
+
+    // Resolve to the employee's db id (accept id or zensar_id).
+    const empRow = await client.query('SELECT id FROM employees WHERE id = $1 OR zensar_id = $1 LIMIT 1', [paramId]);
+    const empId = empRow.rows[0] ? empRow.rows[0].id : paramId;
+
+    await client.query('BEGIN');
+
+    // A fresh AI extraction REPLACES the previous AI-detected set (so skills the new,
+    // stricter extraction no longer supports don't linger), but never removes a skill
+    // the employee manually self-rated (source='self').
+    if (source === 'ai') {
+      await client.query(`DELETE FROM qisl_skill_ratings WHERE employee_id = $1 AND source = 'ai'`, [empId]);
+    }
+
+    let written = 0;
+    for (const raw of skills) {
+      // Prefer the server taxonomy row (canonical name/family/group) when an id is given.
+      const idNum = raw && raw.id != null ? parseInt(raw.id, 10) : NaN;
+      const meta = Number.isFinite(idNum) ? QE_TAX_BY_ID.get(idNum) : null;
+      const name = String((meta && meta.name) || raw.name || '').trim();
+      if (!name) continue;
+      const level = Math.max(0, Math.min(3, parseInt(raw.proficiency != null ? raw.proficiency : raw.level, 10) || 0));
+      if (level <= 0) continue;
+      const family = ((meta && meta.family) || raw.family || null) || null;
+      const group = ((meta && meta.group) || raw.group || null) || null;
+      const taxId = meta ? meta.id : (Number.isFinite(idNum) ? idNum : null);
+      const priority = ['primary', 'secondary', 'tertiary'].includes(raw.priority) ? raw.priority : null;
+
+      // Merge rule: an AI write updates a conflicting row only if it is NOT a manual
+      // self-rating; a manual write (source='self') always wins.
+      await client.query(
+        `INSERT INTO qisl_skill_ratings (employee_id, skill_name, level, taxonomy_skill_id, skill_family, skill_group, priority, source, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CURRENT_TIMESTAMP)
+         ON CONFLICT (employee_id, skill_name) DO UPDATE
+           SET level = EXCLUDED.level, taxonomy_skill_id = EXCLUDED.taxonomy_skill_id,
+               skill_family = EXCLUDED.skill_family, skill_group = EXCLUDED.skill_group,
+               priority = EXCLUDED.priority, source = EXCLUDED.source, updated_at = CURRENT_TIMESTAMP
+           WHERE $8 = 'self' OR qisl_skill_ratings.source IS DISTINCT FROM 'self'`,
+        [empId, name, level, taxId, family, group, priority, source]
+      );
+      written++;
+    }
+
+    // Refresh the employee's priority labels from the extraction (only overwrite when provided).
+    const prim = body.primarySkill || null;
+    const sec = body.secondarySkill || null;
+    const ter = body.tertiarySkill || null;
+    if (prim || sec || ter) {
+      await client.query(
+        `UPDATE employees SET
+           primary_skill   = COALESCE($1, primary_skill),
+           secondary_skill = COALESCE($2, secondary_skill),
+           tertiary_skill  = COALESCE($3, tertiary_skill),
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4 OR zensar_id = $4`,
+        [prim, sec, ter, empId]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ success: true, written });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     res.status(500).json({ error: error.message });

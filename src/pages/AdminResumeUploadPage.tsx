@@ -1,4 +1,4 @@
-import { API_BASE } from '@/lib/api';
+import { API_BASE, apiSaveTaxonomySkills } from '@/lib/api';
 /**
  * AdminResumeUploadPage.tsx — Admin-specific resume upload with side-by-side comparison
  */
@@ -9,7 +9,7 @@ import { SKILLS } from '@/lib/mockData';
 import { toast } from '@/lib/ToastContext';
 import ZensarLoader from '@/components/ZensarLoader';
 import type { ProficiencyLevel, SkillRating } from '@/lib/types';
-import { extractTextFromFile, extractEverythingFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, extractEverythingFromResume, extractTaxonomySkillsFromResume } from '@/lib/resumeExtraction';
 
 interface AdminResumeUploadPageProps {
   employeeId: string;
@@ -49,6 +49,7 @@ export default function AdminResumeUploadPage({
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<'idle' | 'reading' | 'extracting' | 'preview' | 'error'>('idle');
   const [extractedData, setExtractedData] = useState<any>(null);
+  const [resumeText, setResumeText] = useState('');   // retained for the 166-skill taxonomy chain-link on save
   const [errorMsg, setErrorMsg] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -272,6 +273,7 @@ export default function AdminResumeUploadPage({
         setErrorMsg('Could not read text from file. Try a text-based PDF or .docx.');
         return;
       }
+      setResumeText(text); // retained for the 166-skill taxonomy chain-link on save
       setStatus('extracting');
       let data;
       try {
@@ -892,6 +894,32 @@ export default function AdminResumeUploadPage({
 
         localStorage.setItem('candidateProfile', JSON.stringify(candidateProfile));
         localStorage.setItem('zenscan_raw_extraction', JSON.stringify(extractedData));
+      }
+
+      // CHAIN-LOCK: map the resume to the full 166-skill QE taxonomy and populate
+      // the employee's QISL ZenMatrix (family + priority). Guarded + non-fatal.
+      try {
+        if (resumeText) {
+          const taxo = await extractTaxonomySkillsFromResume(resumeText, Number(extractedData?.profile?.yearsIT) || 0);
+          const chainSkills = [
+            ...taxo.skills.map(s => ({ id: s.id, name: s.name, family: s.family, group: s.group, proficiency: s.proficiency, priority: s.priority })),
+            ...taxo.others.map(o => ({ name: o.name, family: o.family, proficiency: o.proficiency, priority: null })),
+          ];
+          if (chainSkills.length > 0) {
+            await apiSaveTaxonomySkills(dbEmployeeId, {
+              source: 'ai',
+              primarySkill: taxo.primarySkill,
+              secondarySkill: taxo.secondarySkill,
+              tertiarySkill: taxo.tertiarySkill,
+              skills: chainSkills,
+            });
+            const extra = taxo.others.length ? ` (+${taxo.others.length} in Others)` : '';
+            toast.success(`Mapped ${taxo.matchedCount} skills into the QI SL ZenMatrix${extra} ✓`);
+          }
+        }
+      } catch (e: any) {
+        console.warn('[AdminResumeUpload] Taxonomy chain-link failed:', e);
+        toast.error('Could not sync to QI SL ZenMatrix: ' + (e?.message || 'server error') + ' — if you just updated the app, restart the backend.');
       }
 
       const msg = [];

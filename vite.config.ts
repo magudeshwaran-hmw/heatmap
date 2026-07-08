@@ -7,7 +7,7 @@ import { componentTagger } from "lovable-tagger";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const gatewayPort = Number(env.GATEWAY_PORT || process.env.GATEWAY_PORT) || 7000;
-  const backendPort = Number(env.PORT || process.env.PORT) || 3001;
+  const backendPort = Number(env.PORT || process.env.PORT) || 5001;
   const backendTarget = `http://127.0.0.1:${backendPort}`;
   const ollamaTarget = env.VITE_OLLAMA_URL || process.env.VITE_OLLAMA_URL || 'http://127.0.0.1:11434';
 

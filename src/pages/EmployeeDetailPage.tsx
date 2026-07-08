@@ -487,8 +487,8 @@ export default function EmployeeDetailPage() {
           })()}
         </div>
 
-        {/* ── Technical Proficiency Matrix ── MOVED TO TOP */}
-        <div style={card}>
+        {/* ── Technical Proficiency Matrix ── temporarily hidden */}
+        {false && <div style={card}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
             <TrendingUp size={18} color="#3B82F6" />
             <h3 style={{ margin:0, fontSize:16, fontWeight:800 }}>Technical Proficiency Matrix</h3>
@@ -613,7 +613,7 @@ export default function EmployeeDetailPage() {
               </div>
             </div>
           )}
-        </div>
+        </div>}
 
         {/* REMOVED: Skill Category Breakdown section */}
 

@@ -7,6 +7,8 @@
  */
 
 import { callResumeLLM } from './llm';
+import { QE_ALL_SKILLS, findQESkillById, findQESkillByName, QE_SKILL_COUNT, QE_FAMILIES } from './qeSkillTaxonomy';
+import { textIncludesTech } from './zenTaxonomy';
 
 // ─── PDF Text Extraction ──────────────────────────────────────────────────────
 export async function extractTextFromPDF(file: File): Promise<string> {
@@ -403,9 +405,289 @@ The JSON must follow this exact structure:
 
     console.log('✅ Precision extraction completed successfully');
     return result.data;
-    
+
   } catch (err: any) {
     console.error('❌ Precision extraction failed:', err);
     throw err;
   }
+}
+
+// ─── QE-Taxonomy Skill Extraction (166 skills, family-grouped, priority) ──────
+// This is the chain-lock extractor. Instead of the legacy 32-skill list, it maps a
+// resume against the FULL qeSkillTaxonomy (166 essential skills / 14 families) and
+// returns a family-grouped, priority-ranked structure whose skill names match the
+// QISL ZenMatrix verbatim — so one extraction can populate qisl_skill_ratings and
+// fan out to the admin/employee views.
+//
+// Strategy (robust for a local model): feed the model a NUMBERED catalog of all 166
+// skills and ask it to return ONLY {id, proficiency} for skills with real textual
+// evidence. Compact output (no 166-key template to truncate or copy), exact matching
+// by id (no name drift), and the id encodes family so the 4 duplicate names are
+// unambiguous. Family + priority are then derived deterministically here.
+export type SkillPriority = 'primary' | 'secondary' | 'tertiary' | null;
+
+export interface TaxonomySkill {
+  id: number;
+  name: string;
+  family: string;
+  group: string;
+  proficiency: number;       // 1-3 (0 skills are dropped)
+  priority: SkillPriority;   // per-family rank of the top skills
+}
+
+/** A resume skill that is NOT one of the 166 taxonomy skills, filed under its best-fit family. */
+export interface OtherSkill {
+  name: string;
+  family: string;
+  proficiency: number;   // 1-3
+}
+
+export interface TaxonomyExtraction {
+  skills: TaxonomySkill[];
+  /** { exact skill name -> level } — ready for apiSaveQislSkills / qisl_skill_ratings */
+  ratingsByName: Record<string, number>;
+  /** grouped by family, strongest family first, each family's skills strongest first */
+  byFamily: { family: string; skills: TaxonomySkill[] }[];
+  /** resume skills outside the 166 list, each placed in a family's "Others" bucket */
+  others: OtherSkill[];
+  primarySkill: string;
+  secondarySkill: string;
+  tertiarySkill: string;
+  matchedCount: number;
+}
+
+const EMPTY_TAXONOMY_EXTRACTION: TaxonomyExtraction = {
+  skills: [], ratingsByName: {}, byFamily: [], others: [],
+  primarySkill: '', secondarySkill: '', tertiarySkill: '', matchedCount: 0,
+};
+
+function buildTaxonomyCatalog(): string {
+  return QE_ALL_SKILLS.map(s => `${s.id}. [${s.family}] ${s.name}`).join('\n');
+}
+
+// Deterministic keyword match against the taxonomy's keyword[] arrays. This is the
+// reliable floor: it needs no LLM, so a resume always populates QISL even when the
+// model is offline / can't handle the 166-skill prompt. Proficiency comes from how
+// much distinct keyword evidence a skill has.
+export function keywordExtractTaxonomy(resumeText: string): Array<{ id: number; proficiency: number }> {
+  const lower = (resumeText || '').toLowerCase();
+  if (!lower) return [];
+  const out: Array<{ id: number; proficiency: number }> = [];
+  for (const s of QE_ALL_SKILLS) {
+    let hits = 0;
+    for (const kw of s.keywords) {
+      if (textIncludesTech(lower, kw)) hits++;
+    }
+    // Beginner-first: a single mention = Beginner (1); 2-3 distinct evidences = a
+    // solid Intermediate (2); 4+ = strong Expert-grade (3, later gated by experience).
+    if (hits > 0) out.push({ id: s.id, proficiency: hits >= 4 ? 3 : hits >= 2 ? 2 : 1 });
+  }
+  return out;
+}
+
+/** Turn a raw LLM {id, proficiency} list into the family-grouped, prioritized result. */
+export function assembleTaxonomyExtraction(raw: Array<{ id: any; proficiency: any }>): TaxonomyExtraction {
+  // 1. Validate ids, coerce proficiency to 0-3, keep the highest per id.
+  const byId = new Map<number, number>();
+  for (const row of raw || []) {
+    const id = parseInt(String(row?.id), 10);
+    if (!Number.isFinite(id)) continue;
+    const meta = findQESkillById(id);
+    if (!meta) continue; // hallucinated id → drop
+    let p = parseInt(String(row?.proficiency), 10);
+    if (!Number.isFinite(p)) p = 0;
+    p = Math.max(0, Math.min(3, p));
+    if (p <= 0) continue; // no evidence → not stored
+    byId.set(id, Math.max(byId.get(id) || 0, p));
+  }
+
+  // 2. Build skill objects.
+  const skills: TaxonomySkill[] = [];
+  for (const [id, proficiency] of byId) {
+    const meta = findQESkillById(id)!;
+    skills.push({ id, name: meta.name, family: meta.family, group: meta.group, proficiency, priority: null });
+  }
+
+  // 3. Group by family; strongest family (sum of proficiencies) first.
+  const famMap = new Map<string, TaxonomySkill[]>();
+  for (const sk of skills) {
+    const arr = famMap.get(sk.family) || [];
+    arr.push(sk);
+    famMap.set(sk.family, arr);
+  }
+  const byFamily = Array.from(famMap.entries())
+    .map(([family, fs]) => {
+      fs.sort((a, b) => b.proficiency - a.proficiency || a.name.localeCompare(b.name));
+      // per-family priority: top three become primary/secondary/tertiary
+      const tiers: SkillPriority[] = ['primary', 'secondary', 'tertiary'];
+      fs.forEach((sk, i) => { sk.priority = i < 3 ? tiers[i] : null; });
+      return { family, skills: fs, strength: fs.reduce((n, s) => n + s.proficiency, 0) };
+    })
+    .sort((a, b) => b.strength - a.strength)
+    .map(({ family, skills: fs }) => ({ family, skills: fs }));
+
+  // 4. Overall primary/secondary/tertiary = the three strongest skills overall.
+  const strongest = [...skills].sort((a, b) => b.proficiency - a.proficiency || a.name.localeCompare(b.name));
+  const ratingsByName: Record<string, number> = {};
+  for (const sk of skills) {
+    // a name can repeat across families (4 cases) — keep the higher level
+    ratingsByName[sk.name] = Math.max(ratingsByName[sk.name] || 0, sk.proficiency);
+  }
+
+  return {
+    skills,
+    ratingsByName,
+    byFamily,
+    others: [],
+    primarySkill: strongest[0]?.name || '',
+    secondarySkill: strongest[1]?.name || '',
+    tertiarySkill: strongest[2]?.name || '',
+    matchedCount: skills.length,
+  };
+}
+
+// Generic quality-engineering words that carry no evidence on their own — an "Other"
+// skill must share a MORE distinctive word with the resume to be trusted.
+const OTHER_GENERIC_WORDS = new Set([
+  'testing', 'test', 'validation', 'quality', 'engineering', 'management', 'analysis',
+  'assessment', 'automation', 'api', 'apis', 'and', 'the', 'of', 'for', 'tools', 'tool',
+  'data', 'integration', 'service', 'services', 'system', 'framework', 'platform',
+]);
+
+/** True if the resume text actually evidences this custom "Other" skill (drops pure inventions). */
+function otherHasEvidence(name: string, resumeLower: string): boolean {
+  const words = name.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !OTHER_GENERIC_WORDS.has(w));
+  if (words.length === 0) return resumeLower.includes(name.toLowerCase());
+  return words.some(w => resumeLower.includes(w));
+}
+
+// Parse + validate the LLM's "others" list: keep only entries whose family is a real
+// QE family and whose name is genuinely NOT one of the 166 taxonomy skills.
+function parseOtherSkills(rawOthers: any[]): OtherSkill[] {
+  if (!Array.isArray(rawOthers)) return [];
+  const famLower = new Map(QE_FAMILIES.map(f => [f.toLowerCase(), f]));
+  const seen = new Set<string>();
+  const out: OtherSkill[] = [];
+  for (const o of rawOthers) {
+    const name = String(o?.name || '').trim();
+    if (!name || findQESkillByName(name)) continue;          // already a taxonomy skill → not an "other"
+    const family = famLower.get(String(o?.family || '').trim().toLowerCase());
+    if (!family) continue;                                    // unknown family → cannot place it
+    const key = `${family}::${name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let p = parseInt(String(o?.proficiency), 10);
+    if (!Number.isFinite(p)) p = 1;
+    out.push({ name, family, proficiency: Math.max(1, Math.min(3, p)) });
+  }
+  return out;
+}
+
+// Experience gate: how high a proficiency an employee can be shown at, given years
+// of IT experience. Applied to the DISPLAYED level only — it never re-orders skills,
+// so the primary/secondary/tertiary derivation is untouched.
+//   < 3 years  → Intermediate max (a fresher isn't an "Expert" on a résumé mention)
+//   >= 3 years → Expert allowed
+function experienceCap(years: number): number {
+  const y = Number(years) || 0;
+  return y >= 3 ? 3 : 2;
+}
+
+export async function extractTaxonomySkillsFromResume(resumeText: string, years = 0): Promise<TaxonomyExtraction> {
+  const text = (resumeText || '').trim();
+  if (text.length < 30) return EMPTY_TAXONOMY_EXTRACTION;
+
+  console.log(`🧬 QE-Taxonomy extraction over ${QE_SKILL_COUNT} skills from ${text.length} chars`);
+
+  const prompt = `You are a precision Quality-Engineering skill extractor for Zensar (an MNC QA org).
+You are given a resume and a NUMBERED CATALOG of ${QE_SKILL_COUNT} quality-engineering skills.
+Your job: decide which catalog skills the resume gives REAL textual evidence for, and rate each 0-3.
+
+STRICT RULES:
+- Only include a skill if the resume text actually evidences it (a tool, framework, activity, or clear synonym). When in doubt, LEAVE IT OUT.
+- Do NOT invent skills or ids. Use ONLY ids from the catalog below.
+
+- CRITICAL — BUILDING IS NOT TESTING. This is a Quality-Engineering catalog: most skills are about TESTING / VALIDATING / assuring QUALITY of something, not building it. Distinguish carefully:
+    • If the resume shows the person BUILT, DEVELOPED, INTEGRATED, or USED a technology (development work), that is NOT proof they TEST it.
+    • Only rate a "…Testing" / "…Validation" / QA skill 2 or 3 if the resume shows actual testing, validation, QA, quality, or assurance activity on it (verbs like test, validate, verify, QA, assert, coverage, defect, quality).
+    • If the evidence is build/use ONLY (no testing verb), either OMIT the QA skill or rate it 1 at most.
+    • Examples of what NOT to do: do NOT credit "API Testing" just because they integrated/built APIs; do NOT credit "Database Testing" just because they used a database; do NOT credit "LLM Testing" just because they built an LLM app.
+- Rate proficiency:
+    3 = primary expertise WITH clear testing/quality evidence, across multiple/recent projects
+    2 = solid working skill with some testing/quality evidence, OR a non-QA foundational skill (language/framework/domain) used in depth
+    1 = basic exposure, build/use-only evidence, mentioned once, or older
+- Omit any skill with no evidence (do NOT output it with 0). Prefer FEWER, well-justified skills over many optimistic ones.
+- A resume typically matches 8-25 skills, not all ${QE_SKILL_COUNT}. Quality over quantity — an honest smaller list is better than an inflated one.
+
+CATALOG (id. [family] skill):
+${buildTaxonomyCatalog()}
+
+ALSO: if the resume clearly shows QA / quality-engineering skills or tools that are NOT in the catalog,
+list them under "others" with the closest matching family name (copy a family name EXACTLY from the catalog's [family] tags).
+Only include genuinely QE-relevant skills; do not include the person's name, companies, or soft skills.
+
+FAMILIES (use these exact names for "others"):
+${QE_FAMILIES.map(f => `- ${f}`).join('\n')}
+
+RESUME TEXT:
+---
+${text}
+---
+
+Respond with ONLY valid JSON, no markdown, in EXACTLY this shape:
+{ "skills": [ { "id": 12, "proficiency": 3 }, { "id": 45, "proficiency": 2 } ],
+  "others": [ { "name": "GraphQL", "family": "Service Integration Quality Engineering", "proficiency": 2 } ] }`;
+
+  const lower = text.toLowerCase();
+  // Reliable floor: keyword matches always available, no LLM required.
+  const keywordRaw = keywordExtractTaxonomy(text);
+  const keywordIds = new Set(keywordRaw.map(k => k.id));
+
+  // Best-effort refinement: ask the model to rate skills; if it's offline or returns
+  // junk we simply keep the keyword matches instead of failing the whole chain.
+  let llmRaw: Array<{ id: any; proficiency: any }> = [];
+  let othersRaw: any[] = [];
+  try {
+    const result = await callResumeLLM(prompt, true);
+    if (result.data && !result.error) {
+      const data = result.data;
+      llmRaw =
+        Array.isArray(data) ? data :
+        Array.isArray(data?.skills) ? data.skills :
+        Array.isArray(data?.matches) ? data.matches : [];
+      othersRaw = Array.isArray(data?.others) ? data.others : [];
+      console.log(`🧬 LLM taxonomy pass returned ${llmRaw.length} rows, ${othersRaw.length} others`);
+    } else {
+      console.warn(`🧬 LLM taxonomy pass unavailable (${result.error || 'no data'}) — using keyword matches only`);
+    }
+  } catch (e) {
+    console.warn('🧬 LLM taxonomy pass threw — using keyword matches only:', e);
+  }
+
+  // ACCURACY MODE: only taxonomy skills with real keyword evidence in the resume are
+  // kept. The LLM may only refine the proficiency of THOSE skills; skills it infers
+  // with no textual keyword match are dropped entirely (no "Hallucination Detection"
+  // for someone who merely built an LLM app).
+  const llmForKeywordSkills = llmRaw
+    .map(r => ({ id: parseInt(String(r?.id), 10), proficiency: parseInt(String(r?.proficiency), 10) || 0 }))
+    .filter(r => Number.isFinite(r.id) && keywordIds.has(r.id));
+
+  // Merge (assemble keeps the higher proficiency per skill id).
+  const assembled = assembleTaxonomyExtraction([...keywordRaw, ...llmForKeywordSkills]);
+  // "Others" (skills outside the 166) are kept only when the resume text actually
+  // contains the skill's distinctive word — drops purely invented entries.
+  assembled.others = parseOtherSkills(othersRaw).filter(o => otherHasEvidence(o.name, lower));
+
+  // Apply the experience gate to the DISPLAYED proficiency only. primarySkill /
+  // secondarySkill / tertiarySkill and the per-family priority tiers were already
+  // derived from the pre-cap strength, so this does not change them.
+  const cap = experienceCap(years);
+  const capP = (p: number) => Math.min(p, cap);
+  assembled.skills.forEach(s => { s.proficiency = capP(s.proficiency); });
+  assembled.byFamily.forEach(f => f.skills.forEach(s => { s.proficiency = capP(s.proficiency); }));
+  Object.keys(assembled.ratingsByName).forEach(k => { assembled.ratingsByName[k] = capP(assembled.ratingsByName[k]); });
+  assembled.others.forEach(o => { o.proficiency = capP(o.proficiency); });
+
+  console.log(`🧬 Taxonomy extraction matched ${assembled.matchedCount} skills + ${assembled.others.length} others across ${assembled.byFamily.length} families (years=${years}, cap=${cap}; keyword ${keywordRaw.length} + llm ${llmRaw.length})`);
+  return assembled;
 }

@@ -13,10 +13,10 @@ import { useAuth } from '@/lib/authContext';
 import { useApp } from '@/lib/AppContext';
 import { toast } from '@/lib/ToastContext';
 import { getEmployee, saveSkillRatings, upsertEmployee } from '@/lib/localDB';
-import { apiSaveSkills, isServerAvailable } from '@/lib/api';
+import { apiSaveSkills, apiSaveTaxonomySkills, isServerAvailable } from '@/lib/api';
 import ZensarLoader from '@/components/ZensarLoader';
 import type { ProficiencyLevel, SkillRating } from '@/lib/types';
-import { extractTextFromFile, accurateExtractFromResume } from '@/lib/resumeExtraction';
+import { extractTextFromFile, accurateExtractFromResume, extractTaxonomySkillsFromResume } from '@/lib/resumeExtraction';
 
 // Enhanced fallback extraction when AI is completely unavailable
 const createEnhancedFallback = (text: string, filename: string) => {
@@ -155,6 +155,7 @@ export default function ResumeUploadPage({
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<'idle' | 'reading' | 'extracting' | 'preview' | 'error'>('idle');
   const [extractedData, setExtractedData] = useState<any>(null);
+  const [resumeText, setResumeText] = useState('');   // kept for the 166-skill taxonomy chain-link at save time
   const [errorMsg, setErrorMsg] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -180,6 +181,7 @@ export default function ResumeUploadPage({
       
       console.log('[ResumeUpload] Starting accurate AI extraction (unlimited time)...');
       
+  setResumeText(text); // retained for the 166-skill taxonomy chain-link on save
   try {
     // Use accurate extraction with unlimited time for perfect results
     const extractionResult = await accurateExtractFromResume(text);
@@ -380,6 +382,37 @@ export default function ResumeUploadPage({
         console.warn('Skills backend save failed, saved locally only');
       }
 
+      // CHAIN-LOCK: map the resume against the full 166-skill QE taxonomy and push
+      // the result into the QISL ZenMatrix (with family + priority). This is what
+      // makes one upload fan out to QISL + the admin/employee family-grouped views.
+      // Guarded + non-fatal: a failure here never blocks the main save.
+      try {
+        if (resumeText && (await isServerAvailable())) {
+          toast.info('Mapping your resume to the QI SL skill matrix…');
+          const taxo = await extractTaxonomySkillsFromResume(resumeText, Number(extractedData?.profile?.yearsIT) || 0);
+          const chainSkills = [
+            ...taxo.skills.map(s => ({ id: s.id, name: s.name, family: s.family, group: s.group, proficiency: s.proficiency, priority: s.priority })),
+            ...taxo.others.map(o => ({ name: o.name, family: o.family, proficiency: o.proficiency, priority: null })),
+          ];
+          if (chainSkills.length > 0) {
+            await apiSaveTaxonomySkills(employeeId, {
+              source: 'ai',
+              primarySkill: taxo.primarySkill,
+              secondarySkill: taxo.secondarySkill,
+              tertiarySkill: taxo.tertiarySkill,
+              skills: chainSkills,
+            });
+            const extra = taxo.others.length ? ` (+${taxo.others.length} in Others)` : '';
+            toast.success(`Mapped ${taxo.matchedCount} skills into your QI SL ZenMatrix${extra} ✓`);
+          } else {
+            toast.info('No QI SL skills could be matched from this resume.');
+          }
+        }
+      } catch (e: any) {
+        console.warn('[ResumeUpload] Taxonomy chain-link failed:', e);
+        toast.error('Could not sync to QI SL ZenMatrix: ' + (e?.message || 'server error') + ' — if you just updated the app, restart the backend.');
+      }
+
       // Fetch existing data to check for duplicates
       let existingEducation: any[] = [];
       let existingCerts: any[] = [];
@@ -562,26 +595,19 @@ export default function ResumeUploadPage({
 
       if (emp && extractedData?.profile) {
         const p = extractedData.profile;
-        upsertEmployee({ 
-          ...emp, 
-          name: p.name || emp.name, 
-          designation: p.designation || emp.designation, 
-          yearsIT: p.yearsIT || emp.yearsIT, 
-          location: p.location || emp.location, 
+        upsertEmployee({
+          ...emp,
+          name: p.name || emp.name,
+          designation: p.designation || emp.designation,
+          yearsIT: p.yearsIT || emp.yearsIT,
+          location: p.location || emp.location,
           phone: p.phone || emp.phone,
           primarySkill: p.primarySkill || emp.primarySkill,
         });
-        // Also update primary/secondary skill in backend
-        if (p.primarySkill || p.secondarySkill) {
-          fetch(`${API_BASE}/admin/employees/update`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              id: employeeId, 
-              primarySkill: p.primarySkill || undefined,
-            })
-          }).catch(() => {});
-        }
+        // NOTE: primary/secondary/tertiary skill in the DB are owned by the QISL
+        // taxonomy chain (apiSaveTaxonomySkills above), which is the source of truth.
+        // We intentionally do NOT overwrite primary_skill from the legacy 32-skill
+        // profile here — that used to clobber the taxonomy primary with e.g. "Python".
       }
 
       // Show success and redirect to ZenAssess

@@ -1,6 +1,6 @@
 /**
  * Start full ZenSkill stack on a single gateway port (default 7000).
- * Internal services: backend :3001, Ollama :11434, PostgreSQL :1234
+ * Internal services: backend :5001, Ollama :11434, PostgreSQL :1234
  * Public entry: http://localhost:7000 (proxy via Vite)
  */
 const { spawn } = require('child_process');
@@ -13,7 +13,7 @@ const ROOT = path.join(__dirname, '..');
 require('dotenv').config({ path: path.join(ROOT, '.env') });
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || '7000';
-const BACKEND_PORT = process.env.PORT || '3001';
+const BACKEND_PORT = process.env.PORT || '5001';
 const isWin = process.platform === 'win32';
 
 const children = [];

@@ -12,7 +12,7 @@ const ROOT = path.join(__dirname, '..');
 require('dotenv').config({ path: path.join(ROOT, '.env') });
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT || '7000';
-const BACKEND_PORT = process.env.PORT || '3001';
+const BACKEND_PORT = process.env.PORT || '5001';
 const isWin = process.platform === 'win32';
 const children = [];
 
