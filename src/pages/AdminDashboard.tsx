@@ -5484,7 +5484,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       </div>
                     )}
 
-                    {popupActiveTab === 'ZenAssess' && <ZenAssessPage key="zenassess" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
+                    {popupActiveTab === 'ZenAssess' && <ZenAssessPage key="zenassess" skillSource="qisl" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'ZenMatrix' && <SkillMatrixPage key="skills" isPopup={true} />}
                     {popupActiveTab === 'QI SL ZenMatrix' && <QislZenMatrixPage key="qisl-skills" isPopup={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'ZenCode' && <GitHubIntelligencePage key="zencode" isPopup={true} readOnly={true} employeeId={previewUser.id} />}

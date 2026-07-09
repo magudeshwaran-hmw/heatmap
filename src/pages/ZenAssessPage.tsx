@@ -934,7 +934,7 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
   // Badge-gated manual P/S/T save. The server re-verifies every chosen skill has an
   // earned verified badge, so an unearned skill is rejected (403) even if picked.
   const saveManualPriority = async () => {
-    if (!pstEdit || !employeeId) return;
+    if (readOnly || !pstEdit || !employeeId) return;
     setPstSaving(true);
     try {
       const r = await apiSetPrioritySkills(employeeId, pstEdit);
@@ -3278,7 +3278,7 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: T.text }}>Your Primary / Secondary / Tertiary</h3>
                           <p style={{ margin: '4px 0 0', fontSize: 12.5, color: T.sub }}>Change these only to skills you have <b>earned a verified badge</b> for — pass its ZenAssess test above to unlock it.</p>
                         </div>
-                        {!pstEdit && (
+                        {!pstEdit && !readOnly && (
                           <button onClick={() => setPstEdit({ primary: v7Taxonomy.primary?.skill || '', secondary: v7Taxonomy.secondary?.skill || '', tertiary: v7Taxonomy.tertiary?.skill || '' })}
                             disabled={earnedList.length === 0}
                             style={{ padding: '8px 16px', borderRadius: 9, background: earnedList.length ? '#3B82F6' : 'rgba(148,163,184,0.3)', color: '#fff', border: 'none', fontWeight: 800, fontSize: 13, cursor: earnedList.length ? 'pointer' : 'not-allowed', flexShrink: 0 }}>Change</button>
