@@ -521,10 +521,13 @@ function buildQislLanding(details: any[]): QislLandingFamily[] {
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?: 'legacy' | 'qisl' } = {}) {
+export default function ZenAssessPage({ skillSource = 'legacy', employeeId: propEmployeeId, readOnly }: { skillSource?: 'legacy' | 'qisl'; employeeId?: string; isPopup?: boolean; readOnly?: boolean } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { employeeId } = useAuth();
+  const { employeeId: authEmployeeId } = useAuth();
+  // Admin can open a read-only view of another employee's assessment (isPopup + readOnly
+  // + employeeId). In that mode we load THAT employee and block every start/write action.
+  const employeeId = propEmployeeId || authEmployeeId;
   const { dark } = useDark();
   const T = mkTheme(dark);
 
@@ -789,7 +792,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
         let resolvedGrade = (emp as any).grade || '';
         if (!resolvedGrade) {
           resolvedGrade = deriveGradeFromYearsIT(yearsIT);
-          apiUpdateEmployee(employeeId, { grade: resolvedGrade } as any).catch(() => {});
+          if (!readOnly) apiUpdateEmployee(employeeId, { grade: resolvedGrade } as any).catch(() => {});
         }
         setV7Grade(resolvedGrade);
         const derivedPath = getGradePathLocal(resolvedGrade);
@@ -1345,6 +1348,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
     skillName: string,
     opts?: { shortlistN?: number },
   ) => {
+    if (readOnly) return;   // admin read-only view — never start a test
     resetRoundState();
     setAssessmentPath(level);
     // Adaptive progression bookkeeping: a positive shortlistN means this is an
@@ -3241,6 +3245,11 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
 
               {!v7ProfileLoading && v7Taxonomy && (
               <>
+              {readOnly && (
+                <div style={{ marginBottom: 12, padding: '12px 16px', borderRadius: 12, background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.25)', fontSize: 13, fontWeight: 700, color: '#3B82F6' }}>
+                  👁️ Admin view — read only. You can see this employee's assessment but cannot start or change anything.
+                </div>
+              )}
               {/* Section A: Employee Info Panel */}
               <div style={{ background: T.card, borderRadius: 16, padding: 24, border: `1px solid ${T.bdr}`, marginBottom: 4, boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 32, alignItems: 'center' }}>
@@ -3363,18 +3372,22 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                                 } catch { /* ignore check failure */ }
                               }
 
+                              if (readOnly) return;
                               // AI proctoring: require permissions before the test begins.
                               proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + sk.skill.replace(/\s+/g, '_');
                               setActiveSkillIdx(idx);
                               setPendingTestStart({ skill: sk.skill, level: startLevel, idx });
                               setShowPermissionScreen(true);
                             }}
-                            style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: state === 4 ? '#3B82F6' : 'linear-gradient(135deg, #3B82F6, #8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}
+                            disabled={readOnly}
+                            style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: state === 4 ? '#3B82F6' : 'linear-gradient(135deg, #3B82F6, #8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: readOnly ? 'not-allowed' : 'pointer', opacity: readOnly ? 0.5 : 1 }}
                           >
-                            {state === 1 && 'Start Assessment →'}
-                            {state === 2 && 'Re-assess →'}
-                            {state === 3 && 'Re-assess →'}
-                            {state === 4 && 'Continue Assessment →'}
+                            {readOnly ? 'View only' : (<>
+                              {state === 1 && 'Start Assessment →'}
+                              {state === 2 && 'Re-assess →'}
+                              {state === 3 && 'Re-assess →'}
+                              {state === 4 && 'Continue Assessment →'}
+                            </>)}
                           </button>
                         </div>
                       </div>
@@ -3421,7 +3434,7 @@ export default function ZenAssessPage({ skillSource = 'legacy' }: { skillSource?
                             {v7SkillBadges[ownSkill]
                               ? <div style={{ fontSize: 12, color: '#10B981', fontWeight: 700, marginBottom: 10 }}>✓ Verified: {v7SkillBadges[ownSkill]}</div>
                               : <div style={{ fontSize: 12, color: '#EF4444', fontWeight: 600, marginBottom: 10 }}>Not Yet Verified</div>}
-                            <button onClick={() => { proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + ownSkill.replace(/\s+/g, '_'); setActiveSkillIdx(0); setPendingTestStart({ skill: ownSkill, level: assessmentPath, idx: 0 }); setShowPermissionScreen(true); }} style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg, #F59E0B, #D97706)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Start Assessment →</button>
+                            <button disabled={readOnly} onClick={() => { if (readOnly) return; proctorSessionIdRef.current = 'proctor_' + Date.now() + '_' + ownSkill.replace(/\s+/g, '_'); setActiveSkillIdx(0); setPendingTestStart({ skill: ownSkill, level: assessmentPath, idx: 0 }); setShowPermissionScreen(true); }} style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg, #F59E0B, #D97706)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: readOnly ? 'not-allowed' : 'pointer', opacity: readOnly ? 0.5 : 1 }}>{readOnly ? 'View only' : 'Start Assessment →'}</button>
                           </div>
                         </>
                       )}

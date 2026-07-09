@@ -22,6 +22,7 @@ import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
 import SkillMatrixPage from './SkillMatrixPage';
 import QislZenMatrixPage from './QislZenMatrixPage';
+import ZenAssessPage from './ZenAssessPage';
 import CertificationsPage from './CertificationsPage';
 import ProjectsPage from './ProjectsPage';
 import EducationPage from './EducationPage';
@@ -1204,7 +1205,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
   const [previewUser, setPreviewUser] = useState<any | null>(null);
   const [previewData, setPreviewData] = useState<AppData | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'Skill Group' | 'ZenScan' | 'ZenMatrix' | 'QI SL ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
+  const [popupActiveTab, setPopupActiveTab] = useState<'ZenRadar' | 'Skill Group' | 'ZenScan' | 'ZenAssess' | 'ZenMatrix' | 'QI SL ZenMatrix' | 'ZenCode' | 'My Education' | 'My Projects' | 'My Certification' | 'My Achievements' | 'ZenProfile'>('ZenRadar');
   const [deleteConfirming, setDeleteConfirming] = useState(false);
 
   // ── Multi-select delete (Manage Employees) ──
@@ -5032,7 +5033,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                </div>
                
                <div style={{ display: 'flex', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, overflowX: 'auto', flex: 1, minWidth: 200, WebkitOverflowScrolling: 'touch' }}>
-                {(['ZenRadar', 'Skill Group', 'ZenScan', 'ZenMatrix', 'QI SL ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
+                {(['ZenRadar', 'Skill Group', 'ZenScan', 'ZenAssess', 'QI SL ZenMatrix', 'ZenCode', 'My Education', 'My Projects', 'My Certification', 'My Achievements', 'ZenProfile'] as const).map(tab => (
                    <button 
                      key={tab} 
                      onClick={() => setPopupActiveTab(tab)}
@@ -5483,6 +5484,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                       </div>
                     )}
 
+                    {popupActiveTab === 'ZenAssess' && <ZenAssessPage key="zenassess" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'ZenMatrix' && <SkillMatrixPage key="skills" isPopup={true} />}
                     {popupActiveTab === 'QI SL ZenMatrix' && <QislZenMatrixPage key="qisl-skills" isPopup={true} employeeId={previewUser.id} />}
                     {popupActiveTab === 'ZenCode' && <GitHubIntelligencePage key="zencode" isPopup={true} readOnly={true} employeeId={previewUser.id} />}
