@@ -8,6 +8,7 @@
 
 import { callResumeLLM } from './llm';
 import { QE_ALL_SKILLS, findQESkillById, findQESkillByName, QE_SKILL_COUNT, QE_FAMILIES } from './qeSkillTaxonomy';
+import { evaluateTaxonomySkills } from './aiEvaluator';
 import { textIncludesTech } from './zenTaxonomy';
 import * as pdfjsDist from 'pdfjs-dist';
 // SECURITY: bundle the PDF.js worker with the app (Vite `?url`) instead of fetching
@@ -487,7 +488,7 @@ function buildTaxonomyCatalog(): string {
 export function keywordExtractTaxonomy(resumeText: string): Array<{ id: number; proficiency: number }> {
   const lower = (resumeText || '').toLowerCase();
   if (!lower) return [];
-  const out: Array<{ id: number; proficiency: number }> = [];
+  const out: Array<{ id: number; proficiency: number; hits: number }> = [];
   for (const s of QE_ALL_SKILLS) {
     let hits = 0;
     for (const kw of s.keywords) {
@@ -495,7 +496,9 @@ export function keywordExtractTaxonomy(resumeText: string): Array<{ id: number; 
     }
     // Beginner-first: a single mention = Beginner (1); 2-3 distinct evidences = a
     // solid Intermediate (2); 4+ = strong Expert-grade (3, later gated by experience).
-    if (hits > 0) out.push({ id: s.id, proficiency: hits >= 4 ? 3 : hits >= 2 ? 2 : 1 });
+    // `hits` (raw evidence count) is retained separately — it is the RANKING signal
+    // (the bucketed proficiency ties too easily once the experience cap flattens it).
+    if (hits > 0) out.push({ id: s.id, proficiency: hits >= 4 ? 3 : hits >= 2 ? 2 : 1, hits });
   }
   return out;
 }
@@ -657,6 +660,9 @@ Respond with ONLY valid JSON, no markdown, in EXACTLY this shape:
   // Reliable floor: keyword matches always available, no LLM required.
   const keywordRaw = keywordExtractTaxonomy(text);
   const keywordIds = new Set(keywordRaw.map(k => k.id));
+  // Raw evidence count per skill id — the deterministic RANKING signal (see below).
+  const hitsById = new Map<number, number>();
+  keywordRaw.forEach((k: any) => hitsById.set(k.id, k.hits ?? k.proficiency ?? 0));
 
   // Best-effort refinement: ask the model to rate skills; if it's offline or returns
   // junk we simply keep the keyword matches instead of failing the whole chain.
@@ -687,11 +693,54 @@ Respond with ONLY valid JSON, no markdown, in EXACTLY this shape:
     .map(r => ({ id: parseInt(String(r?.id), 10), proficiency: parseInt(String(r?.proficiency), 10) || 0 }))
     .filter(r => Number.isFinite(r.id) && keywordIds.has(r.id));
 
-  // Merge (assemble keeps the higher proficiency per skill id).
-  const assembled = assembleTaxonomyExtraction([...keywordRaw, ...llmForKeywordSkills]);
+  // First pass: keyword floor refined by the extractor LLM (assemble keeps the
+  // higher proficiency per id).
+  const firstPass = assembleTaxonomyExtraction([...keywordRaw, ...llmForKeywordSkills]);
+
+  // ── AI EVALUATOR AGENT (skeptical 2nd pass) ──────────────────────────────────
+  // Confirms or DROPS each proposed skill against the resume — kills keyword false
+  // positives (e.g. "Java-Selenium" with no Java/Selenium) and enforces BUILD≠TEST.
+  // Runs on PRE-cap levels so the differentiated result drives an accurate
+  // primary/secondary/tertiary. Keyword floor is the fallback when the AI is offline.
+  const evalCandidates = firstPass.skills.map(s => ({ id: s.id, name: s.name, family: s.family, proficiency: s.proficiency }));
+  const verdicts = await evaluateTaxonomySkills(text, evalCandidates);
+  let finalRaw: Array<{ id: number; proficiency: number }>;
+  if (verdicts && verdicts.size > 0) {
+    // Drop a skill ONLY on an explicit keep:false. A candidate with no matching
+    // verdict (model returned mismatched/partial ids) is KEPT — never dropped by
+    // omission, which previously wiped the whole set to zero skills.
+    finalRaw = evalCandidates
+      .filter(c => { const v = verdicts.get(c.id); return v ? v.keep : true; })
+      .map(c => ({ id: c.id, proficiency: verdicts.get(c.id)?.level || c.proficiency }));
+    // Safety net: if the evaluator still emptied everything, fall back to first-pass.
+    if (finalRaw.length === 0) finalRaw = evalCandidates.map(c => ({ id: c.id, proficiency: c.proficiency }));
+    console.log(`🧪 Evaluator agent kept ${finalRaw.length}/${evalCandidates.length} skills`);
+  } else {
+    finalRaw = evalCandidates.map(c => ({ id: c.id, proficiency: c.proficiency }));
+    console.warn('🧪 Evaluator agent offline — keeping first-pass skills');
+  }
+
+  // Re-assemble from the evaluated set → clean per-family tiers.
+  const assembled = assembleTaxonomyExtraction(finalRaw);
   // "Others" (skills outside the 166) are kept only when the resume text actually
   // contains the skill's distinctive word — drops purely invented entries.
   assembled.others = parseOtherSkills(othersRaw).filter(o => otherHasEvidence(o.name, lower));
+
+  // ── Deterministic trio ranking by RAW evidence strength ──────────────────────
+  // The bucketed proficiency ties heavily once the experience cap flattens everything
+  // to level 2, so ranking by it degenerates to alphabetical (Deep Learning/Docker/
+  // ETL beat LLMs/Vector DB purely on the letter). Rank the overall primary/secondary/
+  // tertiary by the raw keyword-evidence count instead — heavily-evidenced skills
+  // (Deep Learning, LLMs) outrank one-mention skills (Docker, ETL), independent of the
+  // model's (often flat) level output.
+  const rankedByEvidence = [...assembled.skills].sort((a, b) =>
+    (hitsById.get(b.id) || 0) - (hitsById.get(a.id) || 0) ||
+    b.proficiency - a.proficiency ||
+    a.name.localeCompare(b.name)
+  );
+  if (rankedByEvidence[0]) assembled.primarySkill = rankedByEvidence[0].name;
+  if (rankedByEvidence[1]) assembled.secondarySkill = rankedByEvidence[1].name;
+  if (rankedByEvidence[2]) assembled.tertiarySkill = rankedByEvidence[2].name;
 
   // Apply the experience gate to the DISPLAYED proficiency only. primarySkill /
   // secondarySkill / tertiarySkill and the per-family priority tiers were already

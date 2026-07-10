@@ -241,6 +241,8 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
   const [showHow, setShowHow] = useState(false);
   const [openFamily, setOpenFamily] = useState<string | null>(null);
   const [addFor, setAddFor] = useState<{ skill: string } | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const parse = (): any | null => { try { return JSON.parse(uploadText); } catch { toast.error('That is not valid JSON.'); return null; } };
   const onValidate = async () => { const b = parse(); if (!b) return; setBusy(true); try { setResult(await apiQBValidate(b)); } catch (e: any) { toast.error(e?.message || 'Validate failed'); } finally { setBusy(false); } };
@@ -278,29 +280,49 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
         )}
       </div>
 
-      {/* Upload */}
+      {/* Add questions — two easy ways */}
       <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 22, marginBottom: 24 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Bulk upload <span style={{ fontSize: 12, fontWeight: 600, color: T.sub }}>— optional, whole skill at once (JSON)</span></h3>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={downloadTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileJson size={15} /> Template</button>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
-              <Upload size={15} /> Choose file<input type="file" accept=".json" style={{ display: 'none' }} onChange={e => onFile(e.target.files?.[0] || null)} />
-            </label>
+        <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800 }}>Add questions</h3>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: T.sub }}>Two easy ways — no code or JSON needed.</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
+          <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>① One at a time</div>
+            <p style={{ margin: 0, fontSize: 12.5, color: T.sub, flex: 1 }}>Pick a skill in the list below and click <b style={{ color: T.text }}>+ Add</b>. A guided form walks you through every field — including coding test cases.</p>
+            <div style={{ fontSize: 12, color: T.muted }}>↓ scroll to the skills table</div>
+          </div>
+          <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>② Bulk from a spreadsheet</div>
+            <p style={{ margin: 0, fontSize: 12.5, color: T.sub, flex: 1 }}>Have lots of MCQs in Excel? Paste the rows and import them all at once — de-duped automatically.</p>
+            <button onClick={() => setBulkOpen(true)} style={{ alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: meta.color, border: 'none', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}><Upload size={15} /> Paste from Excel / CSV</button>
           </div>
         </div>
-        <p style={{ margin: '0 0 12px', fontSize: 12.5, color: T.sub }}>One JSON file per skill (the skill is auto-detected). Sections: {types.map(t => t.key).join(', ')}. Partial files are fine.</p>
-        <textarea value={uploadText} onChange={e => setUploadText(e.target.value)} placeholder="Paste JSON here, or use “Template” then “Choose file”."
-          style={{ width: '100%', minHeight: 140, resize: 'vertical', padding: 14, borderRadius: 10, border: `1px solid ${T.inputBdr}`, background: T.input, color: T.text, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12.5, boxSizing: 'border-box' }} />
-        <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button onClick={onValidate} disabled={busy || !uploadText.trim()} style={{ padding: '10px 20px', borderRadius: 9, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontWeight: 800, fontSize: 13, cursor: busy ? 'not-allowed' : 'pointer' }}>Validate</button>
-          <button onClick={onUpload} disabled={busy || !uploadText.trim()} style={{ padding: '10px 20px', borderRadius: 9, background: '#10B981', border: 'none', color: '#fff', fontWeight: 800, fontSize: 13, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1 }}>{busy ? 'Working…' : 'Upload'}</button>
-        </div>
-        {result && (
-          <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, fontSize: 13 }}>
-            <div style={{ fontWeight: 800, color: result.errors.length ? '#F59E0B' : '#10B981', marginBottom: 6 }}>{result.skill} · {result.level} — {'inserted' in result && result.inserted != null ? `${result.inserted} added` : `${result.willInsert} ready`}{result.errors.length ? ` · ${result.errors.length} problem(s)` : ' ✓'}</div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', color: T.sub, fontSize: 12 }}>{Object.entries(result.summary || {}).map(([k, v]) => <span key={k}><b style={{ color: T.text }}>{k}</b>: {v.valid}/{v.total}</span>)}</div>
-            {result.errors.length > 0 && <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: '#EF4444', fontSize: 12, maxHeight: 150, overflowY: 'auto' }}>{result.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+
+        {/* Advanced: whole-skill JSON / file (power users) */}
+        <button onClick={() => setShowAdvanced(s => !s)} style={{ marginTop: 16, display: 'inline-flex', alignItems: 'center', gap: 6, background: 'transparent', border: 'none', color: T.muted, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', padding: 0 }}>{showAdvanced ? '▾' : '▸'} Advanced — whole-skill JSON / file upload</button>
+        {showAdvanced && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+              <p style={{ margin: 0, fontSize: 12, color: T.sub }}>One JSON file per skill (skill auto-detected). Sections: {types.map(t => t.key).join(', ')}. Partial files are fine.</p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={downloadTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileJson size={15} /> Template</button>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                  <Upload size={15} /> Choose file<input type="file" accept=".json" style={{ display: 'none' }} onChange={e => onFile(e.target.files?.[0] || null)} />
+                </label>
+              </div>
+            </div>
+            <textarea value={uploadText} onChange={e => setUploadText(e.target.value)} placeholder="Paste JSON here, or use “Template” then “Choose file”."
+              style={{ width: '100%', minHeight: 120, resize: 'vertical', padding: 14, borderRadius: 10, border: `1px solid ${T.inputBdr}`, background: T.input, color: T.text, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12.5, boxSizing: 'border-box' }} />
+            <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+              <button onClick={onValidate} disabled={busy || !uploadText.trim()} style={{ padding: '10px 20px', borderRadius: 9, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontWeight: 800, fontSize: 13, cursor: busy ? 'not-allowed' : 'pointer' }}>Validate</button>
+              <button onClick={onUpload} disabled={busy || !uploadText.trim()} style={{ padding: '10px 20px', borderRadius: 9, background: '#10B981', border: 'none', color: '#fff', fontWeight: 800, fontSize: 13, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1 }}>{busy ? 'Working…' : 'Upload'}</button>
+            </div>
+            {result && (
+              <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, fontSize: 13 }}>
+                <div style={{ fontWeight: 800, color: result.errors.length ? '#F59E0B' : '#10B981', marginBottom: 6 }}>{result.skill} · {result.level} — {'inserted' in result && result.inserted != null ? `${result.inserted} added` : `${result.willInsert} ready`}{result.errors.length ? ` · ${result.errors.length} problem(s)` : ' ✓'}</div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', color: T.sub, fontSize: 12 }}>{Object.entries(result.summary || {}).map(([k, v]) => <span key={k}><b style={{ color: T.text }}>{k}</b>: {v.valid}/{v.total}</span>)}</div>
+                {result.errors.length > 0 && <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: '#EF4444', fontSize: 12, maxHeight: 150, overflowY: 'auto' }}>{result.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -360,6 +382,12 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
           onClose={() => setAddFor(null)}
           onSaved={() => { setAddFor(null); onUploaded(); }} />
       )}
+
+      {bulkOpen && (
+        <BulkPasteModal T={T} dark={dark} level={level}
+          onClose={() => setBulkOpen(false)}
+          onSaved={() => { setBulkOpen(false); onUploaded(); }} />
+      )}
     </>
   );
 }
@@ -369,9 +397,14 @@ function AddQuestionModal({ T, dark, level, skill, types, onClose, onSaved }: an
   const [qtype, setQtype] = useState<string>(types[0]?.key || 'mcq');
   const [saving, setSaving] = useState(false);
   // shared/typed fields
-  const [f, setF] = useState<any>({ question: '', options: ['', '', '', ''], correct: 'A', explanation: '', difficulty: 'MEDIUM', description: '', correctAnswer: '', keywords: '', task: '', expectedKeywords: '', minLength: 30, title: '', testCases: '[\n  { "input": "", "expectedOutput": "", "hidden": false }\n]', timeLimit: 30, minWords: 60, scoringKeywords: '' });
+  const [f, setF] = useState<any>({ question: '', options: ['', '', '', ''], correct: 'A', explanation: '', difficulty: 'MEDIUM', description: '', correctAnswer: '', keywords: '', task: '', expectedKeywords: '', minLength: 30, title: '', testCases: [{ input: '', expectedOutput: '', hidden: false }], timeLimit: 30, minWords: 60, scoringKeywords: '' });
   const set = (k: string, v: any) => setF((p: any) => ({ ...p, [k]: v }));
   const csv = (s: string) => s.split(',').map((x: string) => x.trim()).filter(Boolean);
+
+  // Test-case rows for coding questions — form-driven, no JSON to type.
+  const setTC = (i: number, k: string, v: any) => setF((p: any) => { const tc = p.testCases.map((r: any, j: number) => j === i ? { ...r, [k]: v } : r); return { ...p, testCases: tc }; });
+  const addTC = () => setF((p: any) => ({ ...p, testCases: [...p.testCases, { input: '', expectedOutput: '', hidden: false }] }));
+  const removeTC = (i: number) => setF((p: any) => ({ ...p, testCases: p.testCases.length > 1 ? p.testCases.filter((_: any, j: number) => j !== i) : p.testCases }));
 
   const buildItem = (): any | string => {
     if (qtype === 'mcq') {
@@ -390,8 +423,10 @@ function AddQuestionModal({ T, dark, level, skill, types, onClose, onSaved }: an
     }
     if (qtype === 'coding') {
       if (!f.title.trim() && !f.description.trim()) return 'Enter a title/description.';
-      let tc: any; try { tc = JSON.parse(f.testCases); } catch { return 'Test cases must be valid JSON.'; }
-      if (!Array.isArray(tc) || tc.length < 1) return 'Add at least one test case.';
+      const tc = (f.testCases as any[])
+        .map((t: any) => ({ input: String(t.input ?? ''), expectedOutput: String(t.expectedOutput ?? ''), hidden: !!t.hidden }))
+        .filter((t: any) => t.input.trim() !== '' || t.expectedOutput.trim() !== '');
+      if (tc.length < 1) return 'Add at least one test case (input + expected output).';
       return { title: f.title, description: f.description, testCases: tc, timeLimit: Number(f.timeLimit) || 30 };
     }
     // scenarios / framework
@@ -453,8 +488,20 @@ function AddQuestionModal({ T, dark, level, skill, types, onClose, onSaved }: an
         {qtype === 'coding' && (<>
           <label style={lbl}>Title</label><input value={f.title} onChange={e => set('title', e.target.value)} style={inp} />
           <label style={lbl}>Description</label><textarea value={f.description} onChange={e => set('description', e.target.value)} style={{ ...inp, minHeight: 70, resize: 'vertical' }} />
-          <label style={lbl}>Test cases (JSON: input → expectedOutput, hidden)</label>
-          <textarea value={f.testCases} onChange={e => set('testCases', e.target.value)} style={{ ...inp, minHeight: 100, resize: 'vertical', fontFamily: 'ui-monospace, monospace', fontSize: 12 }} />
+          <label style={lbl}>Test cases <span style={{ fontWeight: 500, color: T.muted }}>— input → expected output. Tick “Hidden” to keep a case secret from the candidate.</span></label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {(f.testCases as any[]).map((tc: any, i: number) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 8, alignItems: 'center' }}>
+                <input value={tc.input} onChange={e => setTC(i, 'input', e.target.value)} placeholder={`Input ${i + 1}`} style={{ ...inp, fontFamily: 'ui-monospace, monospace', fontSize: 12.5 }} />
+                <input value={tc.expectedOutput} onChange={e => setTC(i, 'expectedOutput', e.target.value)} placeholder="Expected output" style={{ ...inp, fontFamily: 'ui-monospace, monospace', fontSize: 12.5 }} />
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: T.sub, fontWeight: 700, whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!tc.hidden} onChange={e => setTC(i, 'hidden', e.target.checked)} /> Hidden
+                </label>
+                <button type="button" onClick={() => removeTC(i)} title="Remove test case" style={{ padding: '7px 9px', borderRadius: 8, border: `1px solid ${T.bdr}`, background: 'transparent', color: '#EF4444', cursor: 'pointer', opacity: (f.testCases as any[]).length > 1 ? 1 : 0.35 }}><X size={14} /></button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={addTC} style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 13px', borderRadius: 8, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 12.5, cursor: 'pointer' }}>+ Add test case</button>
           <label style={lbl}>Time limit (seconds)</label><input type="number" value={f.timeLimit} onChange={e => set('timeLimit', e.target.value)} style={inp} />
         </>)}
 
@@ -468,6 +515,145 @@ function AddQuestionModal({ T, dark, level, skill, types, onClose, onSaved }: an
           <button onClick={save} disabled={saving} style={{ padding: '11px 22px', borderRadius: 9, background: '#10B981', border: 'none', color: '#fff', fontWeight: 800, fontSize: 13.5, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1 }}>{saving ? 'Saving…' : 'Add question'}</button>
           <button onClick={onClose} disabled={saving} style={{ padding: '11px 22px', borderRadius: 9, background: 'transparent', border: `1px solid ${T.bdr}`, color: T.sub, fontWeight: 700, fontSize: 13.5, cursor: 'pointer' }}>Cancel</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Bulk MCQ import — paste straight from Excel / Google Sheets / CSV, no JSON ──
+function BulkPasteModal({ T, dark, level, onClose, onSaved }: any) {
+  const [text, setText] = useState('');
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Split a CSV/TSV line honouring double-quoted fields (Excel paste = tab-separated).
+  const splitLine = (line: string, d: string) => {
+    const out: string[] = []; let cur = ''; let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+      else { if (c === '"') q = true; else if (c === d) { out.push(cur); cur = ''; } else cur += c; }
+    }
+    out.push(cur); return out.map(s => s.trim());
+  };
+  // Resolve the "correct" cell (A–D, 1–4, or the option's own text) to a letter A–D.
+  const toLetter = (raw: string, opts: string[]): string | null => {
+    const v = String(raw || '').trim();
+    if (/^[A-Da-d]$/.test(v)) return v.toUpperCase();
+    if (/^[1-4]$/.test(v)) return 'ABCD'[Number(v) - 1];
+    const i = opts.findIndex(o => o.trim() !== '' && norm(o) === norm(v));
+    return i >= 0 ? 'ABCD'[i] : null;
+  };
+
+  const parse = () => {
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+    if (lines.length < 2) { toast.error('Paste a header row plus at least one question row.'); return; }
+    const d = lines[0].includes('\t') ? '\t' : ',';
+    const H = splitLine(lines[0], d).map(norm);
+    const find = (names: string[]) => H.findIndex(h => names.includes(h));
+    const iSkill = find(['skill', 'skillname']);
+    const iQ = find(['question', 'q', 'questiontext']);
+    const iA = find(['a', 'optiona', 'option1', 'opt1', 'opta']);
+    const iB = find(['b', 'optionb', 'option2', 'opt2', 'optb']);
+    const iC = find(['c', 'optionc', 'option3', 'opt3', 'optc']);
+    const iD = find(['d', 'optiond', 'option4', 'opt4', 'optd']);
+    const iCorr = find(['correct', 'answer', 'correctoption', 'correctanswer', 'key']);
+    const iExp = find(['explanation', 'reason', 'explain']);
+    if (iSkill < 0 || iQ < 0 || iCorr < 0) { toast.error('Header must include at least: skill, question, A, B, C, D, correct.'); return; }
+    const parsed = lines.slice(1).map((line, n) => {
+      const raw = splitLine(line, d);
+      const skill = (raw[iSkill] || '').trim();
+      const question = (raw[iQ] || '').trim();
+      const rawOpts = [iA, iB, iC, iD].map(ix => ix >= 0 ? (raw[ix] || '').trim() : '');
+      const filled = rawOpts.map((o, i) => ({ o, i })).filter(x => x.o !== '');
+      const correctLetter = toLetter(raw[iCorr] || '', rawOpts);
+      const correctIdxOrig = correctLetter ? 'ABCD'.indexOf(correctLetter) : -1;
+      const pos = filled.findIndex(x => x.i === correctIdxOrig);
+      const options = filled.map(x => x.o);
+      let error = '';
+      if (!skill) error = 'missing skill';
+      else if (!question) error = 'missing question';
+      else if (options.length < 2) error = 'need at least 2 options';
+      else if (pos < 0) error = 'correct answer must be A–D and point to a filled option';
+      return { rowNum: n + 2, skill, question, options, correct: pos >= 0 ? 'ABCD'[pos] : '', explanation: iExp >= 0 ? (raw[iExp] || '').trim() : '', error };
+    });
+    setRows(parsed);
+  };
+
+  const valid = (rows || []).filter(r => !r.error);
+  const invalid = (rows || []).filter(r => r.error);
+
+  const doImport = async () => {
+    if (valid.length === 0) { toast.error('No valid rows to import.'); return; }
+    setBusy(true);
+    try {
+      const bySkill: Record<string, any[]> = {};
+      valid.forEach(r => { (bySkill[r.skill] ||= []).push({ question: r.question, options: r.options, correct: r.correct, explanation: r.explanation || '' }); });
+      const batches = Object.entries(bySkill).map(([skill, mcq]) => ({ skill, level, mcq }));
+      const res = await apiQBSeed(batches);
+      toast.success(`Imported ${res.inserted} question(s)${res.skipped ? ` · ${res.skipped} skipped/duplicate` : ''} ✓`);
+      onSaved();
+    } catch (e: any) { toast.error(e?.message || 'Import failed'); }
+    finally { setBusy(false); }
+  };
+
+  const loadExample = () => setText(
+    'skill\tquestion\tA\tB\tC\tD\tcorrect\texplanation\n' +
+    'Java\tWhich keyword makes a variable a constant in Java?\tfinal\tconst\tstatic\tlet\tA\tfinal makes a value unmodifiable.\n' +
+    'Java\tWhat does JVM stand for?\tJava Virtual Machine\tJava Variable Method\tJoint Virtual Memory\tJava Verified Module\tA\t'
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 120, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '4vh 16px', overflowY: 'auto' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 'min(760px, 100%)', background: T.cardSolid, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <h3 style={{ margin: 0, fontSize: 17, fontWeight: 900 }}>Bulk import MCQs — paste from a spreadsheet</h3>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: T.sub, cursor: 'pointer' }}><X size={20} /></button>
+        </div>
+        <p style={{ margin: '0 0 12px', fontSize: 12.5, color: T.sub, textTransform: 'capitalize' }}>{level} · multiple-choice questions</p>
+
+        <div style={{ padding: 12, borderRadius: 10, background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${T.bdr}`, marginBottom: 12 }}>
+          <div style={{ fontSize: 12.5, color: T.text, fontWeight: 700, marginBottom: 4 }}>How to use</div>
+          <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.6 }}>
+            In Excel/Sheets make columns: <b style={{ color: T.text }}>skill · question · A · B · C · D · correct</b> (optionally <b style={{ color: T.text }}>explanation</b>). Put the answer in <b style={{ color: T.text }}>correct</b> as a letter (A–D), a number (1–4), or the exact option text. Copy the rows including the header and paste below.
+          </div>
+          <button onClick={loadExample} style={{ marginTop: 8, padding: '5px 11px', borderRadius: 7, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}>Load an example</button>
+        </div>
+
+        <textarea value={text} onChange={e => { setText(e.target.value); setRows(null); }} placeholder="Paste your spreadsheet rows here (with the header row)…"
+          style={{ width: '100%', minHeight: 130, resize: 'vertical', padding: 12, borderRadius: 10, border: `1px solid ${T.inputBdr}`, background: T.input, color: T.text, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12, boxSizing: 'border-box' }} />
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 12, alignItems: 'center' }}>
+          <button onClick={parse} disabled={!text.trim()} style={{ padding: '10px 20px', borderRadius: 9, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontWeight: 800, fontSize: 13, cursor: text.trim() ? 'pointer' : 'not-allowed' }}>Preview</button>
+          {rows && <button onClick={doImport} disabled={busy || valid.length === 0} style={{ padding: '10px 20px', borderRadius: 9, background: '#10B981', border: 'none', color: '#fff', fontWeight: 800, fontSize: 13, cursor: busy || valid.length === 0 ? 'not-allowed' : 'pointer', opacity: busy || valid.length === 0 ? 0.6 : 1 }}>{busy ? 'Importing…' : `Import ${valid.length} question${valid.length === 1 ? '' : 's'}`}</button>}
+          {rows && <span style={{ fontSize: 12.5, color: T.sub }}><b style={{ color: '#10B981' }}>{valid.length} ready</b>{invalid.length ? <> · <b style={{ color: '#EF4444' }}>{invalid.length} to fix</b></> : null}</span>}
+        </div>
+
+        {rows && (
+          <div style={{ marginTop: 14, border: `1px solid ${T.bdr}`, borderRadius: 12, overflow: 'hidden', maxHeight: 320, overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead><tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', textAlign: 'left', position: 'sticky', top: 0 }}>
+                <th style={{ padding: '8px 12px', color: T.sub, fontWeight: 800 }}>#</th>
+                <th style={{ padding: '8px 12px', color: T.sub, fontWeight: 800 }}>Skill</th>
+                <th style={{ padding: '8px 12px', color: T.sub, fontWeight: 800 }}>Question</th>
+                <th style={{ padding: '8px 12px', color: T.sub, fontWeight: 800 }}>Ans</th>
+                <th style={{ padding: '8px 12px', color: T.sub, fontWeight: 800 }}>Status</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${T.bdr}`, background: r.error ? 'rgba(239,68,68,0.06)' : 'transparent' }}>
+                    <td style={{ padding: '7px 12px', color: T.muted }}>{r.rowNum}</td>
+                    <td style={{ padding: '7px 12px', color: T.text, fontWeight: 600, whiteSpace: 'nowrap' }}>{r.skill || '—'}</td>
+                    <td style={{ padding: '7px 12px', color: T.sub, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.question || '—'}</td>
+                    <td style={{ padding: '7px 12px', color: T.text, fontWeight: 800 }}>{r.correct || '—'}</td>
+                    <td style={{ padding: '7px 12px' }}>{r.error ? <span style={{ color: '#EF4444', fontWeight: 700 }}>{r.error}</span> : <span style={{ color: '#10B981', fontWeight: 700 }}>✓ ok</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

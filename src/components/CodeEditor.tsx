@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Play, Send, CheckCircle, XCircle, Clock, Cpu } from 'lucide-react';
+import { Play, Send, CheckCircle, XCircle, Clock, Cpu, Lock } from 'lucide-react';
 import { API_BASE } from '../lib/api';
 
 export interface TestCase {
@@ -33,6 +33,8 @@ export interface TestResult {
 export interface CodeEditorProps {
   problem: CodingProblem;
   defaultLanguage?: string;
+  /** When set, the compiler is locked to this language (skill-specific) — the selector is hidden. */
+  lockLanguage?: string;
   onResults?: (results: TestResult[], visiblePassed: number, totalVisible: number, hiddenPassed: number, totalHidden: number) => void;
   dark?: boolean;
 }
@@ -46,9 +48,27 @@ const LANGUAGE_OPTIONS = [
   { label: 'SQL', value: 'sql', langId: 82 },
 ];
 
-export default function CodeEditor({ problem, defaultLanguage = 'python', onResults, dark = true }: CodeEditorProps) {
-  const [language, setLanguage] = useState(defaultLanguage);
-  const [code, setCode] = useState(problem.starterCode?.[defaultLanguage] || '');
+/**
+ * Map a skill name to the compiler it should lock to. Language-named skills lock
+ * to their own compiler (Java → Java, Python → Python, …); non-language skills
+ * return undefined, leaving the candidate free to pick (defaults to Python).
+ * Order matters — check the more specific names before the substrings.
+ */
+export function languageForSkill(skill?: string | null): string | undefined {
+  const s = (skill || '').toLowerCase();
+  if (/(c#|c sharp|csharp|\.net|asp\.net)/.test(s)) return 'csharp';
+  if (/\btypescript\b/.test(s)) return 'typescript';
+  if (/(javascript|node\.?js|react|angular)/.test(s)) return 'javascript';
+  if (/\bjava\b/.test(s)) return 'java';
+  if (/\bpython\b/.test(s)) return 'python';
+  if (/(sql|database testing|pl\/sql|plsql|oracle db)/.test(s)) return 'sql';
+  return undefined;
+}
+
+export default function CodeEditor({ problem, defaultLanguage = 'python', lockLanguage, onResults, dark = true }: CodeEditorProps) {
+  const initialLang = (lockLanguage && LANGUAGE_OPTIONS.some(l => l.value === lockLanguage)) ? lockLanguage : defaultLanguage;
+  const [language, setLanguage] = useState(initialLang);
+  const [code, setCode] = useState(problem.starterCode?.[initialLang] || '');
   const [running, setRunning] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [runResults, setRunResults] = useState<TestResult[]>([]);
@@ -196,15 +216,23 @@ export default function CodeEditor({ problem, defaultLanguage = 'python', onResu
       {/* Language selector + editor */}
       <div style={{ background: cardBg, border: `1px solid ${borderCol}`, borderRadius: 12, overflow: 'hidden', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: `1px solid ${borderCol}`, background: dark ? 'rgba(0,0,0,0.3)' : '#f8fafc' }}>
-          <select
-            value={language}
-            onChange={e => handleLanguageChange(e.target.value)}
-            style={{ background: editorBg, color: textCol, border: `1px solid ${borderCol}`, borderRadius: 6, padding: '4px 10px', fontSize: 13, cursor: 'pointer' }}
-          >
-            {LANGUAGE_OPTIONS.map(l => (
-              <option key={l.value} value={l.value}>{l.label}</option>
-            ))}
-          </select>
+          {lockLanguage && LANGUAGE_OPTIONS.some(l => l.value === lockLanguage) ? (
+            <div title="This skill is assessed in a fixed language" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: editorBg, color: textCol, border: `1px solid ${borderCol}`, borderRadius: 6, padding: '5px 10px', fontSize: 13, fontWeight: 600 }}>
+              <Lock size={12} />
+              {LANGUAGE_OPTIONS.find(l => l.value === lockLanguage)?.label}
+              <span style={{ color: mutedCol, fontWeight: 400, fontSize: 11 }}>· fixed for this skill</span>
+            </div>
+          ) : (
+            <select
+              value={language}
+              onChange={e => handleLanguageChange(e.target.value)}
+              style={{ background: editorBg, color: textCol, border: `1px solid ${borderCol}`, borderRadius: 6, padding: '4px 10px', fontSize: 13, cursor: 'pointer' }}
+            >
+              {LANGUAGE_OPTIONS.map(l => (
+                <option key={l.value} value={l.value}>{l.label}</option>
+              ))}
+            </select>
+          )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               onClick={handleRun}

@@ -115,6 +115,10 @@ const matchPctColor = (s: number) => s >= 80 ? COLORS.success : s >= 60 ? COLORS
 const matchBorderColor = (s: number) => s >= 80 ? '#378ADD' : s >= 60 ? '#EF9F27' : '#E24B4A';
 const scoreCellColor = (p: number) => p >= 70 ? COLORS.success : p >= 40 ? COLORS.warning : COLORS.danger;
 
+// ── Tunable match weights (single source of truth — adjust here, not inline) ──
+const VERIFIED_BADGE_WEIGHTS: Record<string, number> = { Expert: 20, Intermediate: 13, Beginner: 7 };
+const READINESS_RISK_WEIGHTS = { riskHigh: -8, riskLow: 4, notReady: -6, highReadiness: 4, highReadinessCut: 80 };
+
 const GRADE_LADDER = ['F1', 'F2', 'E1', 'E2', 'D1', 'D2', 'C1', 'C2', 'B1', 'B2', 'A1', 'A2'];
 function computeGradeMatch(empGrade?: string, roleGrade?: string): number {
   if (!roleGrade) return 100; // role has no grade requirement → no penalty
@@ -2319,8 +2323,19 @@ export default function BFSIDashboard() {
                                     const empGroup = resolveSkillGroup(empSkill);
                                     const reqGroup = resolveSkillGroup(reqSkill);
                                     if (empGroup && reqGroup) return empGroup === reqGroup;
-                                    // Both unrecognised — fall back to exact normalized string match only
-                                    return normSk(empSkill) === normSk(reqSkill);
+                                    // Exactly one side is a recognised group → never cross-match (avoids
+                                    // "performance testing" ≠ "automation testing" false positives).
+                                    if (empGroup || reqGroup) return false;
+                                    // Both unrecognised — exact match OR high token overlap (Jaccard ≥ 0.6).
+                                    // Conservative semantic fallback: catches "sap fico"≈"fico sap" but not loose words.
+                                    const a = normSk(empSkill), b = normSk(reqSkill);
+                                    if (a === b) return true;
+                                    const ta = new Set(a.split(' ').filter(w => w.length > 2));
+                                    const tb = new Set(b.split(' ').filter(w => w.length > 2));
+                                    if (ta.size === 0 || tb.size === 0) return false;
+                                    let inter = 0; ta.forEach(w => { if (tb.has(w)) inter++; });
+                                    const union = new Set([...ta, ...tb]).size;
+                                    return union > 0 && (inter / union) >= 0.6;
                                   };
 
                                   // ── Resolve SRF requirements ─────────────────────────────────
@@ -2342,6 +2357,14 @@ export default function BFSIDashboard() {
                                     if (titleLower.includes('digital')) return 'Digital Testing';
                                     return role.role_title || '';
                                   })();
+                                  // Multi-skill demand: match against ALL required skills on the SRF,
+                                  // not just the primary. Falls back to the resolved single skill.
+                                  const resolvedReqSkills: string[] = (() => {
+                                    const list = (role.required_skills || [])
+                                      .map((s: string) => String(s || '').trim())
+                                      .filter(Boolean);
+                                    return list.length > 0 ? list : [resolvedReqSkill];
+                                  })();
                                   const reqLocGroup = resolveLocationGroup(requiredLocation);
                                   const reqCity = resolveCity(requiredLocation);
                                   // Parse SRF start date once for availability hard-filter
@@ -2356,6 +2379,8 @@ export default function BFSIDashboard() {
                                     let skillMatrixMatch = false;
                                     let excelSkillMatch = false;
                                     let skillLevelBonus = 0;
+                                    let verifiedBadgeBonus = 0;
+                                    let bestVerifiedLevel: string | null = null;
                                     let matchedZenSkills: string[] = [];
                                     let matchedExcelSkills: string[] = [];
                                     
@@ -2384,25 +2409,33 @@ export default function BFSIDashboard() {
                                     if (empSkillMatrixData.length > 0) {
                                       empSkillMatrixData.forEach((skill: any) => {
                                         const skillName = skill.skill_name || skill.skillName || '';
-                                        if (skillsMatch(skillName, resolvedReqSkill)) {
+                                        if (resolvedReqSkills.some(rq => skillsMatch(skillName, rq))) {
                                           skillMatrixMatch = true;
                                           matchedZenSkills.push(skillName);
                                           const level = skill.selfRating || skill.self_rating || 0;
                                           if (level === 3) skillLevelBonus += 15;
                                           else if (level === 2) skillLevelBonus += 10;
                                           else if (level === 1) skillLevelBonus += 5;
+                                          // ── ZenAssess VERIFIED badge (skills.verified_badge_level / qisl) ──
+                                          // Verified proof outranks self-claimed rating in match scoring.
+                                          const vbl = skill.verifiedBadgeLevel || skill.verified_badge_level || null;
+                                          const vScore = vbl === 'Expert' ? 3 : vbl === 'Intermediate' ? 2 : vbl === 'Beginner' ? 1 : 0;
+                                          const prevV = bestVerifiedLevel === 'Expert' ? 3 : bestVerifiedLevel === 'Intermediate' ? 2 : bestVerifiedLevel === 'Beginner' ? 1 : 0;
+                                          if (vScore > prevV) bestVerifiedLevel = vbl;
                                         }
                                       });
                                     }
 
-                                    // Check Excel skills (primary + L1-L4)
+                                    // Check Excel skills (primary + secondary + tertiary + L1-L4)
                                     const allExcelSkills = [
                                       emp.primary_skill || '',
+                                      (emp as any).secondary_skill || '',
+                                      (emp as any).tertiary_skill || '',
                                       ...(emp.current_skills || [])
                                     ].filter(s => s && s.trim() !== '' && s !== 'NOT_AVAILABLE');
 
                                     allExcelSkills.forEach(skill => {
-                                      if (skillsMatch(skill, resolvedReqSkill)) {
+                                      if (resolvedReqSkills.some(rq => skillsMatch(skill, rq))) {
                                         excelSkillMatch = true;
                                         matchedExcelSkills.push(skill);
                                       }
@@ -2473,6 +2506,13 @@ export default function BFSIDashboard() {
                                     if (skillLevelBonus > 0) {
                                       score += skillLevelBonus;
                                       matchReasons.push(`⭐ Level Bonus: +${skillLevelBonus}pts`);
+                                    }
+
+                                    // Verified badge bonus — ZenAssess-verified skill ranks above self-claimed
+                                    verifiedBadgeBonus = bestVerifiedLevel ? (VERIFIED_BADGE_WEIGHTS[bestVerifiedLevel] || 0) : 0;
+                                    if (verifiedBadgeBonus > 0) {
+                                      score += verifiedBadgeBonus;
+                                      matchReasons.push(`✅ ZenAssess Verified: ${bestVerifiedLevel} (+${verifiedBadgeBonus})`);
                                     }
 
                                     // ══════════════════════════════════════════════════════════
@@ -2561,6 +2601,14 @@ export default function BFSIDashboard() {
                                     const isReadyForAlloc = targetSkills.length > 0
                                       ? targetSkills.every(s => s.readyForAllocation !== false && s.ready_for_allocation !== false)
                                       : true;
+
+                                    // ── Verified readiness / risk weighting (ranking-only, UI unchanged) ──
+                                    // Folds ZenAssess allocation_readiness / allocation_risk into the score so
+                                    // verified-ready talent ranks above equally-skilled but risky talent.
+                                    if (aggRisk === 'High') score = Math.max(0, score + READINESS_RISK_WEIGHTS.riskHigh);
+                                    else if (aggRisk === 'Low') score += READINESS_RISK_WEIGHTS.riskLow;
+                                    if (!isReadyForAlloc) score = Math.max(0, score + READINESS_RISK_WEIGHTS.notReady);
+                                    if (avgReadiness >= READINESS_RISK_WEIGHTS.highReadinessCut) score += READINESS_RISK_WEIGHTS.highReadiness;
 
                                     const finalScore = Math.min(score, 100);
 

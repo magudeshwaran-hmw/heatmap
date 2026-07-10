@@ -33,6 +33,9 @@ Thumbs.db
 
 # Resume / personal PDFs — contain personal data, never commit
 *.pdf
+*.pdf.gz
+# Resume Vault storage — gzipped employee resumes (PII), runtime data, never commit
+storage/
 
 # Duplicate subfolder (development artifact)
 zenlap/

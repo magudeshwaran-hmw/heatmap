@@ -2161,10 +2161,38 @@ app.get('/api/employees', async (req, res) => {
     const employeesResult = await query('SELECT * FROM employees ORDER BY created_at DESC');
     const skillsResult = await query('SELECT * FROM skills ORDER BY employee_id, skill_name');
 
+    // 162-skill QISL taxonomy — the REAL extracted skills. This is the source of
+    // truth for the employee card's "Top Skills" (the legacy 32-skill `skills`
+    // table is kept only for the old ZenMatrix / heatmap views). Strongest first,
+    // family-leaders (priority) ahead of the rest at equal level.
+    const qislResult = await query(
+      `SELECT employee_id, skill_name, level, priority
+         FROM qisl_skill_ratings
+        WHERE level > 0
+        ORDER BY employee_id,
+                 level DESC,
+                 CASE priority WHEN 'primary' THEN 0 WHEN 'secondary' THEN 1 WHEN 'tertiary' THEN 2 ELSE 3 END,
+                 skill_name`
+    );
+    const qislByEmp = {};
+    for (const r of qislResult.rows) {
+      (qislByEmp[r.employee_id] = qislByEmp[r.employee_id] || []).push({ name: r.skill_name, level: r.level, priority: r.priority });
+    }
+
     // SECURITY: never return password material over the API (was leaking the
     // decrypted password to any caller). Strip it from every row.
     const employees = employeesResult.rows.map(e => {
       const { password, ...safe } = e;
+      // Order the card's top skills so the employee's primary/secondary/tertiary lead
+      // (they were ranked by real evidence strength at extraction time), then the rest.
+      const trio = [e.primary_skill, e.secondary_skill, e.tertiary_skill]
+        .filter(Boolean).map(s => String(s).toLowerCase());
+      const rows = (qislByEmp[e.id] || []).slice();
+      rows.sort((a, b) => {
+        const ar = trio.indexOf(a.name.toLowerCase()); const br = trio.indexOf(b.name.toLowerCase());
+        return (ar === -1 ? 99 : ar) - (br === -1 ? 99 : br) || b.level - a.level || a.name.localeCompare(b.name);
+      });
+      safe.qislTop = rows.slice(0, 4); // real 162-taxonomy top skills, trio-first
       return safe;
     });
     res.json({
@@ -6304,6 +6332,102 @@ app.delete('/api/admin/question-bank/:id', requireAdminStrict, async (req, res) 
   try {
     await query('DELETE FROM question_bank WHERE id = $1', [parseInt(req.params.id, 10)]);
     res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESUME VAULT — keep the original resume file (gzipped) on disk + a DB reference,
+// so admins can download / re-upload / re-scan any person's resume. Files live under
+// RESUME_STORAGE_DIR (default <project>/storage/resumes); the DB stores only a
+// RELATIVE path, so moving to Azure Blob / a mounted volume later is a base-dir swap.
+// This does NOT touch the skills / projects / employees data.
+// ═══════════════════════════════════════════════════════════════════════════
+const _rzlib = require('zlib');
+const _rfs = require('fs');
+const _rpath = require('path');
+const RESUME_DIR = process.env.RESUME_STORAGE_DIR || _rpath.join(__dirname, 'storage', 'resumes');
+try { _rfs.mkdirSync(RESUME_DIR, { recursive: true }); } catch (e) { console.warn('resume dir init:', e.message); }
+(async () => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS employee_resumes (
+      id SERIAL PRIMARY KEY,
+      employee_id VARCHAR(255) NOT NULL,
+      zensar_id VARCHAR(255),
+      file_name VARCHAR(512),
+      mime_type VARCHAR(128),
+      size_bytes INTEGER,
+      storage_path VARCHAR(1024),
+      extracted_text TEXT,
+      uploaded_by VARCHAR(64),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(employee_id)
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_emp_resumes_emp ON employee_resumes(employee_id)`);
+  } catch (e) { console.warn('employee_resumes init:', e.message); }
+})();
+
+const _sanitizeFile = (s) => String(s || 'resume').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+
+// Store (or replace) a person's resume. Body: { filename, mimeType, dataBase64, extractedText, zensarId }
+app.post('/api/resumes/:employeeId', requireAdmin, async (req, res) => {
+  try {
+    const empId = String(req.params.employeeId);
+    const { filename, mimeType, dataBase64, extractedText, zensarId } = req.body || {};
+    if (!dataBase64) return res.status(400).json({ error: 'Missing resume file data.' });
+    const b64 = String(dataBase64).includes(',') ? String(dataBase64).split(',').pop() : dataBase64;
+    const raw = Buffer.from(b64, 'base64');
+    const gz = _rzlib.gzipSync(raw); // compressed on disk
+    const rel = `${_sanitizeFile(empId)}_${_sanitizeFile(filename)}.gz`;
+    _rfs.writeFileSync(_rpath.join(RESUME_DIR, rel), gz);
+    await pool.query(
+      `INSERT INTO employee_resumes (employee_id, zensar_id, file_name, mime_type, size_bytes, storage_path, extracted_text, uploaded_by, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CURRENT_TIMESTAMP)
+       ON CONFLICT (employee_id) DO UPDATE SET
+         zensar_id=EXCLUDED.zensar_id, file_name=EXCLUDED.file_name, mime_type=EXCLUDED.mime_type,
+         size_bytes=EXCLUDED.size_bytes, storage_path=EXCLUDED.storage_path,
+         extracted_text=EXCLUDED.extracted_text, updated_at=CURRENT_TIMESTAMP`,
+      [empId, zensarId || null, filename || 'resume', mimeType || 'application/octet-stream', raw.length, rel, extractedText || null, req.user?.employeeId || 'admin']
+    );
+    res.json({ success: true, sizeBytes: raw.length, compressedBytes: gz.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List all stored resumes (metadata only) joined with the employee name.
+app.get('/api/resumes', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT r.employee_id, r.zensar_id, r.file_name, r.mime_type, r.size_bytes, r.updated_at,
+              (r.extracted_text IS NOT NULL AND LENGTH(r.extracted_text) > 0) AS has_text,
+              e.name, e.designation, e.years_it
+         FROM employee_resumes r
+         LEFT JOIN employees e ON (e.id = r.employee_id OR e.zensar_id = r.employee_id)
+        ORDER BY r.updated_at DESC`);
+    res.json({ resumes: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Extracted text (used to RE-SCAN without re-parsing the file).
+app.get('/api/resumes/:employeeId/text', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT extracted_text, file_name FROM employee_resumes WHERE employee_id=$1`, [String(req.params.employeeId)]);
+    if (!r.rows.length) return res.status(404).json({ error: 'No resume on file.' });
+    res.json({ text: r.rows[0].extracted_text || '', fileName: r.rows[0].file_name });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Download the original resume (decompressed).
+app.get('/api/resumes/:employeeId/download', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT file_name, mime_type, storage_path FROM employee_resumes WHERE employee_id=$1`, [String(req.params.employeeId)]);
+    if (!r.rows.length) return res.status(404).json({ error: 'No resume on file.' });
+    const row = r.rows[0];
+    const abs = _rpath.join(RESUME_DIR, row.storage_path);
+    if (!_rfs.existsSync(abs)) return res.status(404).json({ error: 'Resume file missing on disk.' });
+    const raw = _rzlib.gunzipSync(_rfs.readFileSync(abs));
+    res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${_sanitizeFile(row.file_name)}"`);
+    res.send(raw);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

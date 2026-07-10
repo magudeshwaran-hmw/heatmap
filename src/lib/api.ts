@@ -316,6 +316,55 @@ export async function apiQBUpload(body: any): Promise<QBUploadResult> {
 export async function apiQBSeed(batches: any[]): Promise<{ success: boolean; inserted: number; skipped: number }> {
   return req('POST', `/admin/question-bank/seed`, { batches });
 }
+
+// ─── Resume Vault ─────────────────────────────────────────────────────────────
+export interface ResumeMeta {
+  employee_id: string; zensar_id: string | null; file_name: string; mime_type: string;
+  size_bytes: number; updated_at: string; has_text: boolean;
+  name: string | null; designation: string | null; years_it: number | null;
+}
+export async function apiStoreResume(
+  employeeId: string,
+  payload: { filename: string; mimeType: string; dataBase64: string; extractedText?: string; zensarId?: string },
+): Promise<{ success: boolean; sizeBytes?: number; compressedBytes?: number }> {
+  return req('POST', `/resumes/${encodeURIComponent(employeeId)}`, payload);
+}
+export async function apiListResumes(): Promise<{ resumes: ResumeMeta[] }> {
+  return req('GET', '/resumes');
+}
+export async function apiGetResumeText(employeeId: string): Promise<{ text: string; fileName: string }> {
+  return req('GET', `/resumes/${encodeURIComponent(employeeId)}/text`);
+}
+export async function apiDownloadResume(employeeId: string, fileName: string): Promise<void> {
+  const token = tokenStore.getAccess();
+  const res = await fetch(`${API_BASE}/resumes/${encodeURIComponent(employeeId)}/download`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Download failed (HTTP ${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = fileName || 'resume'; a.click();
+  URL.revokeObjectURL(url);
+}
+/** Fetch the resume with auth and return an object URL (for viewing inline in a new tab). */
+export async function apiResumeBlobUrl(employeeId: string): Promise<string> {
+  const token = tokenStore.getAccess();
+  const res = await fetch(`${API_BASE}/resumes/${encodeURIComponent(employeeId)}/download`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Could not open resume (HTTP ${res.status})`);
+  return URL.createObjectURL(await res.blob());
+}
+/** Read a File as a base64 data string (for storing the original resume). */
+export function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ''));
+    r.onerror = () => reject(new Error('Could not read file'));
+    r.readAsDataURL(file);
+  });
+}
 export async function apiQBToggle(id: number): Promise<{ success: boolean; active: boolean }> {
   return req('POST', `/admin/question-bank/${id}/toggle`);
 }

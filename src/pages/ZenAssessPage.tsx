@@ -25,6 +25,7 @@ import {
   type TaxonomyResult,
   type AssessmentFlow,
 } from '../lib/zenTaxonomy';
+import { computeQEAssessmentFlow, type QEAssessmentFlow } from '../lib/qeAssessmentFlow';
 import {
   generateExpertProfileAI,
   classifyDocumentAI,
@@ -46,7 +47,8 @@ import {
 } from '../lib/expertPathAI';
 import { getQuestionBank, shuffleMCQs, correctLetterToIndex, getRerouteShortlist, LEVEL_FORMAT, hasQuestionBank } from '../data/questionBank/index';
 import { determineTierResult, REROUTE_SHORTLIST_SIZE } from '../lib/scoringEngine';
-import CodeEditor from '../components/CodeEditor';
+import CodeEditor, { languageForSkill } from '../components/CodeEditor';
+import { gradeTextAnswerAI } from '../lib/aiGrader';
 import AssessmentSidebar, { type SidebarSection, type QuestionStatus } from '../components/AssessmentSidebar';
 import {
   getExpertAssessment, scoreExpertAssessment, flattenAssessment,
@@ -641,6 +643,9 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
   // CHANGE 2: assigned path comes from grade × family × depth, NOT self_claimed_level.
   const [v7Flow, setV7Flow] = useState<AssessmentFlow | null>(null);
   const [v7FlowPath, setV7FlowPath] = useState<'Beginner' | 'Intermediate' | 'Expert'>('Beginner');
+  // NEW ZenAssess (162-only QISL flow): the 166-taxonomy family/group/path result —
+  // ZenSkillMap Phases 2 (40/40/20 family score), 3 (winning group), 5 (Top-3), 6 (path).
+  const [v7QeFlow, setV7QeFlow] = useState<QEAssessmentFlow | null>(null);
   const [v7InProgressSkills, setV7InProgressSkills] = useState<Record<string, boolean>>({});
   const [v7AttemptNumber, setV7AttemptNumber] = useState<number>(1);
   const [v7CompletionSaved, setV7CompletionSaved] = useState<boolean>(false);
@@ -828,25 +833,67 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
             const q = await apiGetQislSkills(employeeId);
             const details = (q.details || []).filter((d: any) => (d.level || 0) > 0);
             if (details.length === 0) {
-              setShowZenScanBanner(true); setV7TaxonomyMismatch(false); setV7Taxonomy(null); setQislLanding(null);
+              setShowZenScanBanner(true); setV7TaxonomyMismatch(false); setV7Taxonomy(null); setQislLanding(null); setV7QeFlow(null);
             } else {
               const nameOf = (d: any) => d.skillName || d.skill_name;
               const findDetail = (name: string) => details.find((d: any) => nameOf(d) === name);
-              // Overall primary/secondary/tertiary = the employee's stored columns (set by
-              // the QISL chain, same values the admin skill columns show). Fill any blank
-              // slot from the highest-level remaining QISL skill so we always have 3.
-              const sorted = [...details].sort((a: any, b: any) => (b.level - a.level) || String(nameOf(a)).localeCompare(String(nameOf(b))));
-              const picked: any[] = [];
-              const pushByName = (name: string) => { const d = name && findDetail(name); if (d && !picked.includes(d)) picked.push(d); };
-              pushByName(primarySkill); pushByName(secondarySkill); pushByName(tertiarySkill);
-              for (const d of sorted) { if (picked.length >= 3) break; if (!picked.includes(d)) picked.push(d); }
+
+              // ── ZenSkillMap Phases 2/3/5/6 on the 166 taxonomy ──────────────────
+              // Score families 40/40/20, elect the winning L4 group, rank the Top-3 by
+              // depth (no self-rating), and set the path from Grade + Family score.
+              const qeSkills = details.map((d: any) => ({
+                name: nameOf(d), level: d.level || 0,
+                family: d.family || d.skill_family || null,
+                group: d.group || d.skill_group || null,
+                priority: d.priority || null,
+                // Carry taxonomy_skill_id so the flow can keep "Others" (custom, non-162
+                // skills) out of the primary/secondary/tertiary assignment.
+                taxonomyId: d.taxonomyId ?? d.taxonomy_skill_id ?? null,
+              }));
+              const qeFlow = computeQEAssessmentFlow(qeSkills, rawProjects, yearsIT, resolvedGrade);
+              setV7QeFlow(qeFlow);
+              // PHASE 6: the assessment path now comes from Grade + Family score
+              // (e.g. E1 + score ≥ 80 → Expert), replacing grade-band-only routing.
+              setAssessmentPath(qeFlow.path);
+              setV7BaseLevel(qeFlow.path);
+              setV7FlowPath(qeFlow.path);
+
+              // Real per-skill evidence from the flow (depth, projects, level) for EVERY
+              // skill — no placeholder zeros anywhere the employee can see.
+              const scoredByName = new Map(qeFlow.allScored.map(t => [t.name, t]));
+
+              // PHASE 5 Top-3 = the flow's depth-ranked trio. It already draws up to 3
+              // skills from the winning group → family → rest, and it is TAXONOMY-ONLY
+              // (custom "Other" skills can never be primary/secondary/tertiary). We do
+              // NOT pad from the raw detail list, because that would let an "Other" skill
+              // slip into the priority slots — the exact thing to avoid.
+              let picked: any[] = qeFlow.top3.map(t => findDetail(t.name)).filter(Boolean);
+              if (picked.length === 0) {
+                // Last resort only when the résumé yielded no 162-taxonomy skill at all:
+                // fall back to the stored priority columns (also set from taxonomy skills).
+                const pushByName = (name: string) => { const d = name && findDetail(name); if (d && !picked.includes(d)) picked.push(d); };
+                pushByName(primarySkill); pushByName(secondarySkill); pushByName(tertiarySkill);
+              }
               const top3 = picked.slice(0, 3);
               // Map EVERY evidenced skill (not just the top-3) so the employee can also
               // pick and test one of their other skills to earn its badge.
               const map: Record<string, string> = {};
               details.forEach((d: any) => { map[nameOf(d)] = resolveBankSkillForQisl(nameOf(d), d.family); });
               qislBankMapRef.current = map;
-              const mk = (d: any) => ({ skill: nameOf(d), score: Math.round(((d.level || 0) / 3) * 100), projectScore: 0, certScore: 0, expScore: 0, keywordScore: 0, projectCount: 0, technologies: [], selfClaimed: 0 } as any);
+              // Card fields come from the flow's REAL evidence for that skill (depth score,
+              // project count, evidence level) — falls back to level-derived only if a skill
+              // somehow isn't in the scored set. No fabricated zeros.
+              const mk = (d: any) => {
+                const sc = scoredByName.get(nameOf(d));
+                return {
+                  skill: nameOf(d),
+                  score: sc ? sc.depthScore : Math.round(((d.level || 0) / 3) * 100),
+                  projectScore: 0, certScore: 0, expScore: 0, keywordScore: 0,
+                  projectCount: sc ? sc.projects : 0,
+                  technologies: [],
+                  selfClaimed: 0,
+                } as any;
+              };
               const tax: any = {
                 primary: mk(top3[0]),
                 secondary: top3[1] ? mk(top3[1]) : mk(top3[0]),
@@ -859,7 +906,7 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
               setShowZenScanBanner(false); setV7TaxonomyMismatch(false);
             }
           } catch (e) {
-            setShowZenScanBanner(true); setV7Taxonomy(null); setQislLanding(null);
+            setShowZenScanBanner(true); setV7Taxonomy(null); setQislLanding(null); setV7QeFlow(null);
           }
         } else if (!hasRealSkills) {
           setShowZenScanBanner(true);
@@ -1094,15 +1141,21 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
   // Compute all three Beginner section scores from current answers. Idempotent —
   // safe to call from the Submit button and from the timer auto-submit path.
   // Scoring formulae are unchanged — only relocated from the old per-round buttons.
-  const finalizeBeginnerScores = () => {
+  // Async: the open-ended "test-case writing" answers are graded by the AI rubric
+  // judge (aiGrader), with the keyword scorer kept as the reliability fallback.
+  // MCQ + Tool ID scoring is unchanged. Returns the merged section scores so the
+  // caller evaluates on fresh values instead of stale closure state.
+  const finalizeBeginnerScores = async (): Promise<Record<string, number>> => {
     const { mcqList, toolMode, toolList, tcTasks } = getBeginnerLists();
+    const skill = getActiveSkillName();
 
     // MCQ (negative marking, identical to the old "Submit MCQ Round")
     let correct = 0, wrong = 0;
     mcqList.forEach((q: any) => { const ans = (v7McqAnswers as any)[q.id]; if (ans !== undefined) { if (ans === q.correct) correct++; else wrong++; } });
     const mcqPct = mcqList.length ? Math.round((Math.max(0, correct - wrong * 0.5) / mcqList.length) * 100) : 0;
 
-    // Tool ID (bank = keyword diagnostic; fallback = MCQ)
+    // Tool ID (bank = keyword diagnostic; fallback = MCQ) — factual short answer,
+    // kept keyword-based (an exact tool name is more reliable matched than judged).
     let toolPct = 0;
     if (toolMode === 'bank') {
       toolPct = Math.round(toolList.reduce((sum: number, q: any) => {
@@ -1116,20 +1169,27 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
       toolPct = Math.round((c / Math.max(toolList.length, 1)) * 100);
     }
 
-    // Practical (test-case writing)
-    const tcPct = Math.round(tcTasks.reduce((sum: number, t: any) => {
+    // Practical (test-case writing) — AI rubric grading, keyword fallback, in parallel.
+    const tcScores = await Promise.all(tcTasks.map(async (t: any) => {
       const a = testCaseAnswers[t.id] || '';
-      return sum + scoreTextAnswer(a, t.expectedKeywords || [], t.minLength ? Math.ceil(t.minLength / 5) : 30);
-    }, 0) / Math.max(tcTasks.length, 1));
+      const minW = t.minLength ? Math.ceil(t.minLength / 5) : 30;
+      const r = await gradeTextAnswerAI(
+        { qtype: 'practical', skill, level: assessmentPath, prompt: t.task || 'Write test cases for the described scenario.', answer: a, rubricKeywords: t.expectedKeywords || [], minWords: minW },
+        () => scoreTextAnswer(a, t.expectedKeywords || [], minW),
+      );
+      return r.score;
+    }));
+    const tcPct = Math.round(tcScores.reduce((s, x) => s + x, 0) / Math.max(tcTasks.length, 1));
 
-    setSectionScores(prev => ({ ...prev, mcq: mcqPct, toolId: Math.min(100, toolPct), testCaseWriting: Math.min(100, tcPct) }));
+    const next = { ...sectionScores, mcq: mcqPct, toolId: Math.min(100, toolPct), testCaseWriting: Math.min(100, tcPct) };
+    setSectionScores(next);
+    return next;
   };
 
   const submitBeginnerAssessment = () => {
     if (!window.confirm('Are you sure you want to submit?')) return;
-    finalizeBeginnerScores();
     setV7TimerActive(false);
-    setV7Step(8);
+    setV7Step(8); // step 8 finalizes (with AI grading) + evaluates on fresh scores
   };
 
   // ── Continuous INTERMEDIATE assessment: shared section builders + scoring ────
@@ -1154,8 +1214,12 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
     return { mcqList, codingProblem, scenarioList, frameworkQ };
   };
 
-  const finalizeIntermediateScores = () => {
+  // Async: scenarios + framework are graded by the AI rubric judge (keyword
+  // fallback preserved); MCQ + coding (Judge0 pass-rate) scoring is unchanged.
+  // Returns the merged section scores for stale-free evaluation.
+  const finalizeIntermediateScores = async (): Promise<Record<string, number>> => {
     const { mcqList, codingProblem, scenarioList, frameworkQ } = getIntermediateLists();
+    const skill = getActiveSkillName();
 
     // MCQ (15, negative marking — identical to old "Submit MCQ Round")
     let correct = 0, wrong = 0;
@@ -1171,44 +1235,58 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
       codingPct = Math.min(100, Math.round((codingAnswer.trim().length / 6) + (codingAnswer.includes('assert') || codingAnswer.includes('expect') ? 20 : 0) + (codingAnswer.includes('function') || codingAnswer.includes('def ') || codingAnswer.includes('void ') ? 15 : 0)));
     }
 
-    // Scenarios (2)
-    const scenariosPct = Math.round(scenarioList.reduce((s: number, scn: any) => {
+    // Scenarios (2) — AI rubric grading, keyword fallback, in parallel.
+    const scenarioScores = await Promise.all(scenarioList.map(async (scn: any) => {
       const a = v7ScenarioAnswers[scn.id] || '';
-      return s + scoreTextAnswer(a, scn.scoringKeywords || [], scn.minWords || 60);
-    }, 0) / Math.max(scenarioList.length, 1));
+      const minW = scn.minWords || 60;
+      const r = await gradeTextAnswerAI(
+        { qtype: 'scenarios', skill, level: assessmentPath, prompt: scn.question || scn.desc || 'Describe your approach.', answer: a, rubricKeywords: scn.scoringKeywords || [], minWords: minW },
+        () => scoreTextAnswer(a, scn.scoringKeywords || [], minW),
+      );
+      return r.score;
+    }));
+    const scenariosPct = Math.round(scenarioScores.reduce((s, x) => s + x, 0) / Math.max(scenarioList.length, 1));
 
-    // Framework (1)
+    // Framework (1) — AI rubric grading, keyword fallback.
     const fwMinWords = frameworkQ?.minWords || 80;
-    const frameworkPct = scoreTextAnswer(frameworkAnswer, frameworkQ?.scoringKeywords || [], fwMinWords);
+    const fwRes = await gradeTextAnswerAI(
+      { qtype: 'framework', skill, level: assessmentPath, prompt: frameworkQ?.question || 'Design the framework / architecture requested.', answer: frameworkAnswer, rubricKeywords: frameworkQ?.scoringKeywords || [], minWords: fwMinWords },
+      () => scoreTextAnswer(frameworkAnswer, frameworkQ?.scoringKeywords || [], fwMinWords),
+    );
+    const frameworkPct = fwRes.score;
 
-    setSectionScores(prev => ({
-      ...prev,
+    const next = {
+      ...sectionScores,
       mcq: mcqPct,
       coding: Math.min(100, codingPct),
       scenarios: Math.min(100, scenariosPct),
       frameworkDesign: Math.min(100, frameworkPct),
-    }));
+    };
+    setSectionScores(next);
+    return next;
   };
 
   const submitIntermediateAssessment = () => {
     if (!window.confirm('Are you sure you want to submit?')) return;
-    finalizeIntermediateScores();
     setV7TimerActive(false);
-    setV7Step(8);
+    setV7Step(8); // step 8 finalizes (with AI grading) + evaluates on fresh scores
   };
 
   // ── EXPERT (Enterprise Scenario Engine): aggregate auto-grade across every
   // linked question of every scenario group. Capstone is optional evidence only.
-  const finalizeExpertScores = () => {
+  // Expert is objective auto-grading (scenario engine) — no free text, so no AI
+  // judge needed. Async + returns scores to match the other finalizers.
+  const finalizeExpertScores = async (): Promise<Record<string, number>> => {
     const mcqPct = v7ExpertAssessment ? scoreExpertAssessment(v7ExpertAssessment, v7ExpertAnswers).final : 0;
-    setSectionScores(prev => ({ ...prev, mcq: mcqPct }));
+    const next = { ...sectionScores, mcq: mcqPct };
+    setSectionScores(next);
+    return next;
   };
 
   const submitExpertAssessment = () => {
     if (!window.confirm('Are you sure you want to submit?')) return;
-    finalizeExpertScores();
     setV7TimerActive(false);
-    setV7Step(8);
+    setV7Step(8); // step 8 finalizes + evaluates on fresh scores
   };
 
   const resetRoundState = () => {
@@ -1388,21 +1466,24 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
   // A drop-up / drop-down re-enters the SAME session on a 10-question shortlist.
   // A shortlist can only authenticate (≥50%) or fail (<50%) — it never moves
   // again, so adaptive movement is capped at exactly one level per session.
-  const evaluateSkillTestOutcome = () => {
+  const evaluateSkillTestOutcome = (scoresOverride?: Record<string, number>) => {
     const level = assessmentPath;          // the assessment that just finished
     const isShortlist = v7IsShortlist;     // is this an adaptive shortlist?
     const skillName = getActiveSkillName();
     const label = getActiveSkillLabel();
     const startLevel = v7SessionStartLevel;
     const rank: Record<string, number> = { Beginner: 1, Intermediate: 2, Expert: 3 };
+    // Use the freshly-finalized scores when provided (async AI grading passes them
+    // in) — falling back to state keeps every other caller working unchanged.
+    const scores = scoresOverride || sectionScores;
 
     // Score for the adaptive decision. The full assessment uses its weighted
     // section formula; an MCQ-only shortlist (Beginner/Intermediate) is judged on
     // its raw question score so the 10-question subset is scored on its own merit.
     // (Expert is already a single raw scenario-engine percentage.)
     const score = (isShortlist && level !== 'Expert')
-      ? Math.round(sectionScores.mcq ?? 0)
-      : computeOverallScoreForLevel(level, sectionScores);
+      ? Math.round(scores.mcq ?? 0)
+      : computeOverallScoreForLevel(level, scores);
 
     const priorDrops = silentDropLog[skillName] || [];
 
@@ -3341,8 +3422,25 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                         <div style={{ fontSize: 10, fontWeight: 800, color: sk.color, letterSpacing: '0.08em', marginBottom: 8 }}>{sk.label}</div>
                         <h4 style={{ margin: '0 0 12px 0', fontSize: 18, fontWeight: 900, color: T.text }}>{sk.skill}</h4>
                         
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
                            <span style={{ fontSize: 12, fontWeight: 700, color: PATH_COLOR[assignedLevel] }}>{assignedLevel} Path</span>
+                           {(() => {
+                             const d = v7QeFlow?.allScored.find(t => t.name === sk.skill);
+                             if (!d) return null;
+                             // ZenSkillMap Phase 5: depth score · level · project usage (no self-rating).
+                             return (
+                               <>
+                                 <span style={{ fontSize: 11, fontWeight: 700, color: T.sub, padding: '2px 8px', borderRadius: 20, background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' }}>
+                                   depth {d.depthScore} · L{d.level}{d.projects > 0 ? ` · ${d.projects} proj` : ''}
+                                 </span>
+                                 {/* Filter 2: grade-appropriate vs stretch (off-grade backfill). */}
+                                 <span title={d.gradeAppropriate ? 'Matches your grade band' : 'Beyond your grade band — included to fill your top 3'}
+                                   style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.03em', padding: '2px 7px', borderRadius: 20, color: d.gradeAppropriate ? '#10B981' : '#F59E0B', background: d.gradeAppropriate ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)' }}>
+                                   {d.gradeAppropriate ? 'grade-fit' : 'stretch'}
+                                 </span>
+                               </>
+                             );
+                           })()}
                         </div>
 
                         <div style={{ marginTop: 'auto' }}>
@@ -4026,6 +4124,7 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                       <CodeEditor
                         problem={codingProblem}
                         defaultLanguage="python"
+                        lockLanguage={languageForSkill(getActiveSkillName())}
                         dark={dark}
                         onResults={(results: any, vPass: number, vTotal: number, hPass: number, hTotal: number) => {
                           setV7CodingResults({ visiblePassed: vPass, totalVisible: vTotal, hiddenPassed: hPass, totalHidden: hTotal });
@@ -4413,6 +4512,7 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                     <CodeEditor
                       problem={bankCodingProblem}
                       defaultLanguage="python"
+                      lockLanguage={languageForSkill(getActiveSkillName())}
                       dark={dark}
                       onResults={(results, vPass, vTotal, hPass, hTotal) => {
                         setV7CodingResults({ visiblePassed: vPass, totalVisible: vTotal, hiddenPassed: hPass, totalHidden: hTotal });
@@ -4778,13 +4878,20 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
               // Beginner reaches step 8 from the continuous flow (manual submit) or
               // directly via timer auto-submit — finalize its section scores here so
               // both paths score identically before evaluation.
-              if (assessmentPath === 'Beginner') finalizeBeginnerScores();
-              else if (assessmentPath === 'Intermediate') finalizeIntermediateScores();
-              else if (assessmentPath === 'Expert') finalizeExpertScores();
-              setTimeout(() => {
-                evaluateSkillTestOutcome();
+              // Finalize (now async — free-text sections are AI-graded) then
+              // evaluate on the RETURNED scores so the decision never reads stale
+              // state. The "Submitted" spinner stays up while the AI judge runs.
+              (async () => {
+                const started = Date.now();
+                let scores: Record<string, number> = sectionScores;
+                if (assessmentPath === 'Beginner') scores = await finalizeBeginnerScores();
+                else if (assessmentPath === 'Intermediate') scores = await finalizeIntermediateScores();
+                else if (assessmentPath === 'Expert') scores = await finalizeExpertScores();
+                const elapsed = Date.now() - started;
+                if (elapsed < 900) await new Promise(r => setTimeout(r, 900 - elapsed));
+                evaluateSkillTestOutcome(scores);
                 setV7ResultsProcessing(false);
-              }, 1500);
+              })();
             }
             return (
               <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 24, padding: '64px 32px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 24 }} className="fadeIn">

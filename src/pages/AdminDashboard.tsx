@@ -16,7 +16,7 @@ import { toast } from '@/lib/ToastContext';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { computeCompletion, exportAllToExcel } from '@/lib/localDB';
-import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills, apiRefreshToken } from '@/lib/api';
+import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills, apiRefreshToken, apiStoreResume, fileToBase64 } from '@/lib/api';
 import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
@@ -1078,6 +1078,15 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           } catch (e) {
             console.warn('[Bulk Import] Taxonomy chain-link failed for', list[i].name, e);
           }
+          // Store the ORIGINAL resume file (compressed) in the Resume Vault so admins
+          // can download / re-upload / re-scan it later. Guarded + non-fatal.
+          try {
+            const dataBase64 = await fileToBase64(list[i]);
+            await apiStoreResume(empId, {
+              filename: list[i].name, mimeType: list[i].type || 'application/octet-stream',
+              dataBase64, extractedText: text, zensarId: detectedZid,
+            });
+          } catch (e) { console.warn('[Bulk Import] Resume store failed for', list[i].name, e); }
           if (existed) updated++;
           skillsTotal += taxoCount;
           // Stream this profile into the live feed the instant it is done + stored.
@@ -1693,6 +1702,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 20 }}
           >
             <FileSpreadsheet size={15} /> Question Bank — upload &amp; manage questions
+          </button>
+
+          {/* Resume Vault — separate page (download / re-scan / re-upload stored resumes) */}
+          <button
+            onClick={() => navigate('/admin/resumes')}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.card, color: T.text, fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 20, marginLeft: 10 }}
+          >
+            🗄️ Resume Vault — download &amp; re-scan
           </button>
 
           {activeTab === 'Overview' && (
@@ -2364,14 +2381,14 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                           })()}
                        </div>
 
-                       {/* Skills Preview */}
-                       {e.skills && e.skills.filter((s: any) => s.selfRating > 0).length > 0 && (
+                       {/* Skills Preview — REAL 162-skill QISL taxonomy (not the legacy 32-skill mock) */}
+                       {e.qislTop && e.qislTop.length > 0 && (
                          <div style={{ marginBottom: 16 }}>
                            <div style={{ fontSize: 9, color: T.muted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>Top Skills</div>
                            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                             {e.skills.filter((s: any) => s.selfRating > 0).slice(0, 4).map((s: any) => (
-                               <span key={s.skillId} style={{ padding: '2px 6px', borderRadius: 4, background: 'rgba(59,130,246,0.1)', color: '#3B82F6', fontSize: 9, fontWeight: 600 }}>
-                                 {SKILLS.find(sk => sk.id === s.skillId)?.name}: {s.selfRating}
+                             {e.qislTop.slice(0, 4).map((s: any, i: number) => (
+                               <span key={i} title={s.priority ? `${s.priority} in its family` : undefined} style={{ padding: '2px 6px', borderRadius: 4, background: 'rgba(59,130,246,0.1)', color: '#3B82F6', fontSize: 9, fontWeight: 600 }}>
+                                 {s.name}: {s.level}
                                </span>
                              ))}
                            </div>
