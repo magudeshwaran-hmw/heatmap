@@ -1836,6 +1836,10 @@ async function syncDatabaseSchema() {
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS pm_name VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS location VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS aging_days INTEGER DEFAULT 0`);
+    // report_date = the date the uploaded Excel report was extracted (parsed from the
+    // file name). Live aging = aging_days + (today - report_date), so bench aging keeps
+    // growing automatically each day without re-uploading the same file.
+    await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS report_date DATE`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS practice_name VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS service_line VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS deployable_flag BOOLEAN DEFAULT FALSE`);
@@ -4499,7 +4503,8 @@ app.get('/api/bfsi/workforce', requireAuth, async (req, res) => {
     const workforce = await query('SELECT * FROM bfsi_workforce ORDER BY employee_name');
     const certifications = await query('SELECT * FROM bfsi_certifications');
     res.json({
-      workforce: workforce.rows,
+      // aging_days is aged forward from the report date to today (see applyLiveAging).
+      workforce: applyLiveAging(workforce.rows),
       certifications: certifications.rows
     });
   } catch (error) {
@@ -5071,6 +5076,45 @@ function parseExcelDate(dateValue) {
 }
 
 // Upload Excel and populate BFSI data - Multi-sheet processing
+// ── Bench-aging helpers (ZenTalentHub) ───────────────────────────────────────
+// The uploaded Excel's file name carries the date the report was extracted, e.g.
+// "Bench_2026-06-30.xlsx", "Supply 30-06-2026.xls", "Report_30Jun2026.xlsx". The
+// aging_days column inside the sheet is accurate AS OF that date; we store the
+// report date and then age it forward against the current date on every read.
+function parseReportDateFromName(name) {
+  if (!name) return null;
+  const s = String(name).replace(/\.(xlsx|xls|csv)$/i, '');
+  // 1) YYYY-MM-DD / YYYY_MM_DD / YYYYMMDD
+  let m = s.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)/);
+  if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); if (!isNaN(d.getTime())) return d; }
+  // 2) DD-MM-YYYY / DD_MM_YYYY / DDMMYYYY
+  m = s.match(/(?<!\d)(\d{2})[-_.]?(\d{2})[-_.]?(20\d{2})/);
+  if (m) { const d = new Date(+m[3], +m[2] - 1, +m[1]); if (!isNaN(d.getTime())) return d; }
+  // 3) DD-Mon-YYYY (e.g. 30-Jun-2026, 30Jun2026)
+  m = s.match(/(\d{1,2})[-_ ]?([A-Za-z]{3})[A-Za-z]*[-_ ]?(20\d{2})/);
+  if (m) {
+    const MO = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const mo = MO[m[2].toLowerCase()];
+    if (mo != null) { const d = new Date(+m[3], mo, +m[1]); if (!isNaN(d.getTime())) return d; }
+  }
+  return null;
+}
+
+// Return rows with aging_days aged forward to today. Keeps the original as
+// base_aging_days and echoes report_date so the UI can show "aged +N days".
+function applyLiveAging(rows) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return (rows || []).map(r => {
+    const base = r.aging_days || 0;
+    let offset = 0;
+    if (r.report_date) {
+      const rd = new Date(r.report_date); rd.setHours(0, 0, 0, 0);
+      if (!isNaN(rd.getTime())) offset = Math.max(0, Math.round((today - rd) / 86400000));
+    }
+    return { ...r, aging_days: base + offset, base_aging_days: base, aging_offset_days: offset };
+  });
+}
+
 app.post('/api/bfsi/upload', requireAdminStrict, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -5683,12 +5727,26 @@ app.post('/api/bfsi/upload', requireAdminStrict, upload.single('file'), async (r
       // This fixes cases where LOB sheet set status='In-project' but Deallocation sheet
       // also listed them — the deallocation_date is the authoritative signal
       await client.query(`
-        UPDATE bfsi_workforce 
+        UPDATE bfsi_workforce
         SET status = 'Deallocating'
-        WHERE deallocation_date IS NOT NULL 
+        WHERE deallocation_date IS NOT NULL
           AND status != 'Deallocating'
           AND status != 'Available-Pool'
       `);
+
+      // Stamp the report date (parsed from the uploaded file name) on every row so
+      // bench aging can be aged forward to today on each read. If no date is found
+      // in the name, leave it NULL → aging shows exactly as it is in the sheet.
+      const reportDate = parseReportDateFromName(req.file.originalname) ||
+        (req.body.reportDate ? new Date(req.body.reportDate) : null);
+      if (reportDate && !isNaN(reportDate.getTime())) {
+        // Format from LOCAL date parts (not toISOString, which shifts the day back
+        // by the UTC offset and would store the wrong date in +ve timezones like IST).
+        const y = reportDate.getFullYear();
+        const mo = String(reportDate.getMonth() + 1).padStart(2, '0');
+        const da = String(reportDate.getDate()).padStart(2, '0');
+        await client.query(`UPDATE bfsi_workforce SET report_date = $1`, [`${y}-${mo}-${da}`]);
+      }
 
       await client.query('COMMIT');
       

@@ -1261,7 +1261,21 @@ export default function BFSIDashboard() {
 
           {activeTab === 'supply' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
-              
+
+              {/* Auto-aging note — bench aging is aged forward from the report date to today */}
+              {(() => {
+                const withDate = workforce.find((w: any) => (w as any).report_date);
+                if (!withDate) return null;
+                const rd = new Date((withDate as any).report_date);
+                const offset = (withDate as any).aging_offset_days || 0;
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderRadius: 12, background: dark ? 'rgba(59,130,246,0.08)' : 'rgba(59,130,246,0.06)', border: `1px solid ${T.bdr}`, fontSize: 12.5, color: T.sub }}>
+                    <span style={{ fontSize: 16 }}>⏳</span>
+                    <span>Bench aging is <b style={{ color: T.text }}>auto-updated to today</b>. Report dated <b style={{ color: T.text }}>{rd.toLocaleDateString()}</b>{offset > 0 ? <> · aged <b style={{ color: COLORS.info }}>+{offset} day{offset !== 1 ? 's' : ''}</b> since then</> : <> · same as report date</>}.</span>
+                  </div>
+                );
+              })()}
+
               {/* Supply Control Panel */}
               <div style={{ background: dark ? '#0f172a' : '#f8fafc', borderRadius: 20, border: `1px solid ${T.bdr}`, padding: 32 }}>
 

@@ -49,7 +49,7 @@ import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement, PointElement, LineElement, ArcElement,
   BarController, LineController, DoughnutController, Tooltip, Legend, Title
 } from 'chart.js';
-import { Bar } from 'react-chartjs-2';
+import { Bar, Doughnut } from 'react-chartjs-2';
 
 ChartJS.register(
   CategoryScale, LinearScale, BarElement, PointElement, LineElement, ArcElement,
@@ -69,6 +69,8 @@ export default function AdminDashboard() {
   // QISL Heatmap explorer: selected family + group (step-by-step drill-down).
   const [qislFam, setQislFam] = useState<string>('');
   const [qislGroup, setQislGroup] = useState<string>('');
+  // "i" info popover for the QI SL Heatmap title — explains what the heatmap does.
+  const [showQislInfo, setShowQislInfo] = useState(false);
   // bumped whenever a QE Skill-Group override is saved, to force a re-derive/re-render
   const [qeTick, setQeTick] = useState(0);
   // filters for the "Skill Groups" tab
@@ -1658,13 +1660,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         {/* Hero Stats */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 24 }}>
           <StatCard label="Team Size" value={stats.teamSize} sub="Total employees" icon={Users} color="#3B82F6" />
-          <StatCard label="Submitted" value={stats.submitted} sub={`${stats.submitted}/${stats.teamSize} total`} icon={CheckCircle2} color="#10B981" />
-          <StatCard label="Avg Readiness" value={`${stats.avgComp}%`} sub="Team benchmark" icon={TrendingUp} color="#8B5CF6" />
-          <StatCard label="Skill Gaps" value={stats.beginnerCount} sub="Development needs" icon={AlertTriangle} color="#F59E0B" />
+          <StatCard label="Resumes Scanned" value={employees.filter((e: any) => e.submitted || (e.skills || []).length > 0).length} sub={`of ${employees.length} people`} icon={FileSpreadsheet} color="#8B5CF6" />
+          <StatCard label="People Assessed" value={employees.filter((e: any) => (e.skills || []).some((k: any) => k.verifiedBadgeLevel)).length} sub="have a verified skill" icon={CheckCircle2} color="#10B981" />
+          <StatCard label="Skill Areas" value={QE_FAMILIES.filter(f => employees.some((e: any) => resolveQEAssignment(e).family === f)).length} sub="skill families covered" icon={Layers} color="#06B6D4" />
         </div>
 
         {/* Main Viewport */}
-        <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: '24px 7vw', maxWidth: '100%', boxSizing: 'border-box' }}>
+        <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: '24px clamp(16px, 2.5vw, 32px)', maxWidth: '100%', boxSizing: 'border-box' }}>
           
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, background: dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)', padding: 4, borderRadius: 12, width: 'fit-content', maxWidth: '100%', marginBottom: 24, border: `1px solid ${T.bdr}` }}>
             {[
@@ -1696,177 +1698,127 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
             ))}
           </div>
 
-          {/* Question Bank manager — separate page (build/manage ZenAssess questions) */}
-          <button
-            onClick={() => navigate('/bank')}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 20 }}
-          >
-            <FileSpreadsheet size={15} /> Question Bank — upload &amp; manage questions
-          </button>
+          {/* Quick actions — separate pages (Question Bank + Resume Vault) */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
+            <button
+              onClick={() => navigate('/bank')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#3B82F6,#8B5CF6)', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}
+            >
+              <FileSpreadsheet size={15} /> Question Bank — upload &amp; manage questions
+            </button>
+            <button
+              onClick={() => navigate('/admin/resumes')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.card, color: T.text, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}
+            >
+              🗄️ Resume Vault — download &amp; re-scan
+            </button>
+          </div>
 
-          {/* Resume Vault — separate page (download / re-scan / re-upload stored resumes) */}
-          <button
-            onClick={() => navigate('/admin/resumes')}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 18px', borderRadius: 10, border: `1px solid ${T.bdr}`, background: T.card, color: T.text, fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 20, marginLeft: 10 }}
-          >
-            🗄️ Resume Vault — download &amp; re-scan
-          </button>
+          {activeTab === 'Overview' && (() => {
+            // ── All numbers below are REAL (from the loaded employees / demand) ──
+            // Team level by profile completion
+            const senior = employees.filter((e: any) => (e.completion || 0) >= 75).length;
+            const mid = employees.filter((e: any) => (e.completion || 0) >= 50 && (e.completion || 0) < 75).length;
+            const junior = employees.filter((e: any) => (e.completion || 0) < 50).length;
 
-          {activeTab === 'Overview' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 30, animation: 'fadeIn 0.4s ease' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 30 }}>
-              <div>
-                <h3 style={{ margin: '0 0 32px', fontSize: 18, fontWeight: 800, display:'flex', alignItems:'center', gap:12 }}><BarChart3 size={20} color="#3B82F6" /> Distribution</h3>
-                <div style={{ height: 350 }}>
-                  <Bar
-                    data={{
-                      labels: ['Tool', 'Tech', 'App', 'Dom', 'Test', 'Devs', 'AI'],
-                      datasets: [{ label: 'Readiness', data: [2.1, 2.4, 1.8, 2.8, 2.3, 1.5, 2.0], backgroundColor: '#3B82F6', borderRadius: 6, barThickness: 24 }]
-                    }}
-                    options={{ maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }, ticks: { color: T.sub, font: { size: 10, weight: 600 } }, beginAtZero: true, max: 3 }, x: { grid: { display: false }, ticks: { color: T.sub, font: { size: 10, weight: 600 } } } } }}
-                  />
+            // People in each skill area (real family headcount)
+            const famCount = QE_FAMILIES
+              .map(f => ({ family: f, count: employees.filter((e: any) => resolveQEAssignment(e).family === f).length }))
+              .filter(x => x.count > 0)
+              .sort((a, b) => b.count - a.count);
+            const famTop = famCount.slice(0, 8);
+            const shortFam = (f: string) => f.replace('Quality Engineering', 'QE').replace(' - SDET', '').replace('AI/ML & Gen AI', 'AI/ML');
+
+            // Skills we have vs need (real)
+            const supplyOf = (skillName: string) => employees.filter((e: any) =>
+              (e.skills || []).some((k: any) => k.skillName === skillName && (k.verifiedBadgeLevel || k.validated))
+            ).length;
+            const demandRows = Object.keys(skillDemand).length
+              ? SKILLS.map(sk => ({ skill: sk.name, have: supplyOf(sk.name), need: skillDemand[sk.name] || 0 }))
+                  .map(r => ({ ...r, gap: r.need - r.have }))
+                  .filter(r => r.need > 0)
+                  .sort((a, b) => b.gap - a.gap)
+                  .slice(0, 6)
+              : [];
+            const statusOf = (gap: number) => gap <= 0 ? { t: '✓ Enough', c: '#10B981' } : gap >= 4 ? { t: '🔴 Urgent', c: '#EF4444' } : { t: '⚠ Low', c: '#F59E0B' };
+
+            const PIE = ['#3B82F6', '#8B5CF6', '#06B6D4', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
+            return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24, animation: 'fadeIn 0.4s ease' }}>
+
+              {/* Two friendly charts ── */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 20 }}>
+
+                {/* Team level doughnut */}
+                <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                  <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>Team Level</h3>
+                  <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 14 }}>How full each person's profile is.</div>
+                  <div style={{ height: 240 }}>
+                    <Doughnut
+                      data={{
+                        labels: ['Senior', 'Mid', 'Junior'],
+                        datasets: [{ data: [senior, mid, junior], backgroundColor: ['#10B981', '#3B82F6', '#EF4444'], borderWidth: 0 }],
+                      }}
+                      options={{ maintainAspectRatio: false, cutout: '62%', plugins: { legend: { position: 'bottom', labels: { color: T.sub, font: { size: 12, weight: 700 }, padding: 14, usePointStyle: true } } } }}
+                    />
+                  </div>
+                </div>
+
+                {/* People per skill area */}
+                <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                  <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>People in Each Skill Area</h3>
+                  <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 14 }}>Where your team's strengths are.</div>
+                  <div style={{ height: 240 }}>
+                    {famTop.length > 0 ? (
+                      <Bar
+                        data={{
+                          labels: famTop.map(f => shortFam(f.family)),
+                          datasets: [{ label: 'People', data: famTop.map(f => f.count), backgroundColor: famTop.map((_, i) => PIE[i % PIE.length]), borderRadius: 6, barThickness: 22 }],
+                        }}
+                        options={{ maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items: any) => famTop[items[0].dataIndex].family } } }, scales: { x: { grid: { color: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }, ticks: { color: T.sub, font: { size: 10, weight: 600 }, precision: 0 }, beginAtZero: true }, y: { grid: { display: false }, ticks: { color: T.sub, font: { size: 10, weight: 700 } } } } }}
+                      />
+                    ) : (
+                      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.sub, fontSize: 13 }}>Upload resumes to see skill areas.</div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div style={{ display: 'grid', alignContent: 'start', gap: 20 }}>
-                 {[{l:'Senior (>75%)', c:employees.filter(e=>e.completion>=75).length, col: '#10B981'}, {l:'Mid (50-74%)', c:employees.filter(e=>e.completion>=50 && e.completion<75).length, col: '#3B82F6'}, {l:'Junior (<50%)', c:employees.filter(e=>e.completion<50).length, col: '#EF4444'}].map(t=>(
-                    <div key={t.l} style={{ background: T.bg, padding: 24, borderRadius: 20, border: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                       <div>
-                         <div style={{ fontSize: 11, fontWeight: 900, color: T.sub, marginBottom: 6, letterSpacing: 0.5 }}>{t.l}</div>
-                         <div style={{ fontSize: 20, fontWeight: 900, color: T.text }}>{t.c} <span style={{ fontSize: 14, color: T.sub, fontWeight: 500 }}>People</span></div>
-                       </div>
-                       <div style={{ width: 8, height: 8, borderRadius: '50%', background: t.col, boxShadow: `0 0 15px ${t.col}` }} />
-                    </div>
-                 ))}
-              </div>
-            </div>
-
-            {(() => {
-              // Evidence score per employee (resume signals + verified + manager + projects)
-              const scoreOf = (e: any) => {
-                let s = 0;
-                if (e.submitted) s += 15;
-                const skills = e.skills || [];
-                const verified = skills.filter((k: any) => k.verifiedBadgeLevel).length;
-                const validated = skills.filter((k: any) => k.validated || (k.managerRating || 0) > 0).length;
-                s += Math.min(verified * 10, 40);
-                s += Math.min(validated * 4, 12);
-                s += (e.certifications?.length ? 10 : 0);
-                s += Math.min((e.projects?.length || 0) * 4, 12);
-                if (skills.some((k: any) => (k.selfRating || 0) > 0)) s += 15;
-                return Math.min(100, s);
-              };
-              const scored = employees.map(e => ({ e, score: scoreOf(e) }));
-              const total = scored.length || 1;
-              const buckets = [
-                { label: 'Elite Profile (80-100)', test: (n: number) => n >= 80, color: '#10B981' },
-                { label: 'Validated (60-79)', test: (n: number) => n >= 60 && n < 80, color: '#3B82F6' },
-                { label: 'Enriched (40-59)', test: (n: number) => n >= 40 && n < 60, color: '#F59E0B' },
-                { label: 'Resume Only (< 40)', test: (n: number) => n < 40, color: '#EF4444' },
-              ].map(b => { const c = scored.filter(x => b.test(x.score)).length; return { ...b, count: c, pct: Math.round((c / total) * 100) }; });
-              const needAttention = buckets[3].count;
-
-              // Hidden talent: 3+ projects but no verified badge / no assessment
-              const hidden = employees.filter(e =>
-                (e.projects?.length || 0) >= 3 &&
-                !(e.skills || []).some((k: any) => k.verifiedBadgeLevel)
-              ).slice(0, 5);
-
-              // Supply vs demand
-              const supplyOf = (skillName: string) => employees.filter(e =>
-                (e.skills || []).some((k: any) => k.skillName === skillName && (k.verifiedBadgeLevel || k.validated))
-              ).length;
-              const demandRows = Object.keys(skillDemand).length
-                ? SKILLS.map(sk => ({ skill: sk.name, supply: supplyOf(sk.name), demand: skillDemand[sk.name] || 0 }))
-                    .map(r => ({ ...r, gap: r.demand - r.supply }))
-                    .filter(r => r.demand > 0)
-                    .sort((a, b) => a.gap - b.gap)
-                    .slice(0, 6)
-                : [];
-              const criticalGaps = demandRows.filter(r => r.gap <= -4).length;
-              const gapColor = (g: number) => g >= 0 ? '#10B981' : g >= -3 ? '#F59E0B' : '#EF4444';
-              const gapIcon = (g: number) => g >= 0 ? '✓' : g <= -4 ? '🔴' : '⚠';
-
-              return (
-                <>
-                  {/* FEATURE 2 — Workforce Visibility Health */}
-                  <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
-                    <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800 }}>Workforce Visibility Health</h3>
-                    <div style={{ fontSize: 12, color: T.sub, marginBottom: 18 }}>Total Employees: {employees.length}</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                      {buckets.map(b => (
-                        <div key={b.label}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                            <span style={{ color: T.text, fontWeight: 700 }}>{b.label}</span>
-                            <span style={{ color: b.color, fontWeight: 800 }}>{b.count} ({b.pct}%)</span>
-                          </div>
-                          <div style={{ height: 8, borderRadius: 999, background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${b.pct}%`, background: b.color, borderRadius: 999 }} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    {needAttention > 0 && (
-                      <div style={{ marginTop: 16, fontSize: 13, color: T.sub }}>
-                        {needAttention} employee{needAttention !== 1 ? 's' : ''} need assessment to become searchable for projects.
-                        <button onClick={() => setActiveTab('Manage Employees')} style={{ marginLeft: 10, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>View Employees</button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* FEATURE 7 — Hidden Talent Discovery */}
-                  {hidden.length > 0 && (
-                    <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
-                      <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>🔍 Hidden Talent Discovery</h3>
-                      <div style={{ fontSize: 12, color: T.sub, marginBottom: 16 }}>Strong project history but no assessment yet — they may be underrepresented in staffing searches.</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {hidden.map(e => (
-                          <div key={e.id} style={{ fontSize: 13, color: T.text }}>
-                            • <strong>{e.name}</strong> — {e.projects?.length || 0} projects, no verified assessment
-                          </div>
-                        ))}
-                      </div>
-                      <button onClick={() => setActiveTab('Manage Employees')} style={{ marginTop: 14, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '8px 14px', borderRadius: 8, cursor: 'pointer' }}>Review Candidates</button>
-                    </div>
-                  )}
-
-                  {/* FEATURE 8 — Skill Supply vs Demand */}
-                  {demandRows.length > 0 && (
-                    <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
-                      <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 800 }}>Skill Supply vs Demand</h3>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ color: T.sub, textAlign: 'left' }}>
-                            <th style={{ padding: '6px 8px', fontWeight: 700 }}>Skill</th>
-                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Supply</th>
-                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Demand</th>
-                            <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Gap</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {demandRows.map(r => (
+              {/* 4 ── Skills we have vs need ── */}
+              {demandRows.length > 0 && (
+                <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
+                  <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>Skills We Have vs Need</h3>
+                  <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 16 }}>Green = enough people · Red = need to hire or train.</div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 420 }}>
+                      <thead>
+                        <tr style={{ color: T.sub, textAlign: 'left' }}>
+                          <th style={{ padding: '6px 8px', fontWeight: 700 }}>Skill</th>
+                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'center' }}>Have</th>
+                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'center' }}>Need</th>
+                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {demandRows.map(r => {
+                          const st = statusOf(r.gap);
+                          return (
                             <tr key={r.skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
-                              <td style={{ padding: '8px', color: T.text, fontWeight: 600 }}>{r.skill}</td>
-                              <td style={{ padding: '8px', textAlign: 'right', color: T.sub }}>{r.supply}</td>
-                              <td style={{ padding: '8px', textAlign: 'right', color: T.sub }}>{r.demand}</td>
-                              <td style={{ padding: '8px', textAlign: 'right', fontWeight: 800, color: gapColor(r.gap) }}>{r.gap > 0 ? `+${r.gap}` : r.gap} {gapIcon(r.gap)}</td>
+                              <td style={{ padding: '9px 8px', color: T.text, fontWeight: 700 }}>{r.skill}</td>
+                              <td style={{ padding: '9px 8px', textAlign: 'center', color: T.text, fontWeight: 700 }}>{r.have}</td>
+                              <td style={{ padding: '9px 8px', textAlign: 'center', color: T.sub }}>{r.need}</td>
+                              <td style={{ padding: '9px 8px', textAlign: 'right', fontWeight: 800, color: st.c }}>{st.t}</td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      {criticalGaps > 0 && (
-                        <div style={{ marginTop: 14, fontSize: 13, color: T.sub }}>
-                          {criticalGaps} critical gap{criticalGaps !== 1 ? 's' : ''} need immediate action.
-                          <button onClick={() => navigate('/admin/bfsi')} style={{ marginLeft: 10, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 800, fontSize: 12, padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>View Reskilling</button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </>
-              );
-            })()}
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
-          )}
+            );
+          })()}
 
           {activeTab === 'Manage Employees' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
@@ -2677,8 +2629,35 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
           {/* ── QISL HEATMAP TAB ── */}
           {activeTab === 'QI SL Heatmap' && (
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
-              <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800 }}>QI SL Heatmap</h3>
-              <div style={{ fontSize: 12, color: T.sub, marginBottom: 18 }}>Displays skill coverage across each skill family based on the uploaded profiles.</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 4px' }}>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>QI SL Heatmap</h3>
+                <button
+                  onClick={() => setShowQislInfo(v => !v)}
+                  title="What is the QI SL Heatmap?"
+                  aria-label="About the QI SL Heatmap"
+                  aria-expanded={showQislInfo}
+                  style={{ width: 18, height: 18, borderRadius: '50%', border: `1px solid ${T.bdr}`, background: showQislInfo ? '#EC4899' : 'transparent', color: showQislInfo ? '#fff' : T.sub, fontSize: 11, fontWeight: 800, fontStyle: 'italic', fontFamily: 'Georgia, "Times New Roman", serif', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1, padding: 0, flexShrink: 0 }}
+                >i</button>
+              </div>
+              <div style={{ fontSize: 12, color: T.sub, marginBottom: showQislInfo ? 10 : 18 }}>Displays skill coverage across each skill family based on the uploaded profiles.</div>
+              {showQislInfo && (
+                <div style={{ marginBottom: 18, padding: '14px 16px', borderRadius: 12, background: dark ? 'rgba(236,72,153,0.07)' : 'rgba(236,72,153,0.05)', border: '1px solid rgba(236,72,153,0.25)', fontSize: 12.5, color: T.sub, lineHeight: 1.6, maxWidth: 760 }}>
+                  <div style={{ fontWeight: 800, color: T.text, marginBottom: 6, fontSize: 13 }}>What the QI SL Heatmap shows</div>
+                  <p style={{ margin: '0 0 8px' }}>
+                    A live coverage map of your workforce across the <b style={{ color: T.text }}>162-skill Quality-Engineering taxonomy</b> — organised into <b style={{ color: T.text }}>14 Skill Families → Skill Groups → Essential (L5) skills</b>.
+                  </p>
+                  <div style={{ fontWeight: 800, color: T.text, margin: '10px 0 4px', fontSize: 12.5 }}>How it's built</div>
+                  <ol style={{ margin: '0 0 8px', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    <li>Each resume is extracted by the AI (Ollama) and checked by the <b style={{ color: T.text }}>AI Evaluator</b>, mapping real evidence to taxonomy skills (build ≠ test enforced).</li>
+                    <li>Every matched skill is stored in the <b style={{ color: T.text }}>QISL ZenMatrix</b> and tagged with its Family and Group.</li>
+                    <li>The heatmap then aggregates everyone: <b style={{ color: T.text }}>headcount per Family</b>, and per Group a <b style={{ color: T.text }}>coverage %</b> = average over that group's skills of (members who have the skill ÷ members in the family).</li>
+                  </ol>
+                  <div style={{ fontWeight: 800, color: T.text, margin: '10px 0 4px', fontSize: 12.5 }}>How to read it</div>
+                  <p style={{ margin: 0 }}>
+                    Click a <b style={{ color: T.text }}>Family</b> to drill into its Groups, then a <b style={{ color: T.text }}>Group</b> to see the individual skills and which employees hold them. Use it to spot skill strengths and gaps across families for hiring, training, and staffing decisions.
+                  </p>
+                </div>
+              )}
               {(() => {
                 const PIE = ['#3B82F6', '#8B5CF6', '#06B6D4', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
                 const assignments = employees.map((e: any) => ({ e, qe: resolveQEAssignment(e) }));
@@ -4775,14 +4754,20 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   const domain = normalizeDomain(ex?.domain) || deriveDomain(emp);
                   const skillGroup = (ex?.skillGroup || '').trim() || qe.group;
                   const experience = String(ex?.experience || emp.years_it || emp.yearsIT || emp.yearsExperience || emp.years_zensar || '').trim();
-                  const primarySkill = qe.primarySkill;
-                  const secondarySkill = qe.secondarySkill;
+                  // Primary / secondary come from the SAME "new Genesis" 162-taxonomy
+                  // trio the ZenAssess page and the employee card use (emp.qislTop,
+                  // trio-first). Falls back to the stored columns, then the keyword
+                  // guess only as a last resort — so this column mirrors ZenAssess.
+                  const qtop = (emp.qislTop || []).map((s: any) => s?.name).filter(Boolean);
+                  const primarySkill = emp.primary_skill || emp.primarySkill || qtop[0] || qe.primarySkill || '';
+                  const secondarySkill = emp.secondary_skill || emp.secondarySkill || qtop[1] || qe.secondarySkill || '';
                   // Options offered when an admin edits the primary/secondary skill.
                   const ratedSkillNames = (emp.skills || [])
                     .map((sk: any) => sk?.skillName || sk?.skill_name || sk?.name)
                     .filter(Boolean);
                   const skillOptions = Array.from(new Set([
                     primarySkill, secondarySkill,
+                    ...qtop,
                     ...essentialSkillsFor(qe.family, qe.group),
                     ...qe.matchedSkills,
                     ...ratedSkillNames,

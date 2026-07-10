@@ -1090,7 +1090,11 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
 
   const getQueueSkillNames = (): string[] => {
     if (!v7Taxonomy) return [];
-    return [v7Taxonomy.primary.skill, v7Taxonomy.secondary.skill, v7Taxonomy.tertiary.skill];
+    // De-duplicate: when the résumé yields fewer than 3 distinct taxonomy skills, the
+    // secondary/tertiary slots mirror the primary object — never queue the same skill twice.
+    return Array.from(new Set(
+      [v7Taxonomy.primary?.skill, v7Taxonomy.secondary?.skill, v7Taxonomy.tertiary?.skill].filter(Boolean)
+    )) as string[];
   };
   const getActiveSkillName = (): string => getQueueSkillNames()[activeSkillIdx] || '';
   const getActiveSkillLabel = (): 'Primary' | 'Secondary' | 'Tertiary' =>
@@ -3399,10 +3403,10 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                 </h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 20 }}>
                   {v7Taxonomy && [
-                    { skill: v7Taxonomy.primary.skill, label: 'PRIMARY SKILL', color: '#3B82F6' },
-                    { skill: v7Taxonomy.secondary.skill, label: 'SECONDARY SKILL', color: '#8B5CF6' },
-                    { skill: v7Taxonomy.tertiary.skill, label: 'TERTIARY SKILL', color: '#10B981' }
-                  ].map((sk, idx) => {
+                    { skill: v7Taxonomy.primary?.skill, label: 'PRIMARY SKILL', color: '#3B82F6' },
+                    { skill: v7Taxonomy.secondary?.skill, label: 'SECONDARY SKILL', color: '#8B5CF6' },
+                    { skill: v7Taxonomy.tertiary?.skill, label: 'TERTIARY SKILL', color: '#10B981' }
+                  ].filter((c, i, arr) => c.skill && arr.findIndex(x => x.skill === c.skill) === i).map((sk, idx) => {
                     const badge = v7SkillBadges[sk.skill];
                     // CHANGE 2: assigned level = grade × family × depth path (not self_claimed).
                     const assignedLevel = v7FlowPath;
@@ -3546,10 +3550,10 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
                 <h3 style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 20 }}>Assessment Overview</h3>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                   {v7Taxonomy && [
-                    { skill: v7Taxonomy.primary.skill, label: 'Primary' },
-                    { skill: v7Taxonomy.secondary.skill, label: 'Secondary' },
-                    { skill: v7Taxonomy.tertiary.skill, label: 'Tertiary' }
-                  ].map((sk, idx) => {
+                    { skill: v7Taxonomy.primary?.skill, label: 'Primary' },
+                    { skill: v7Taxonomy.secondary?.skill, label: 'Secondary' },
+                    { skill: v7Taxonomy.tertiary?.skill, label: 'Tertiary' }
+                  ].filter((c, i, arr) => c.skill && arr.findIndex(x => x.skill === c.skill) === i).map((sk, idx) => {
                     // CHANGE 2: same grade × family × depth path for all top-3 skills.
                     const startLevel = v7FlowPath;
 
