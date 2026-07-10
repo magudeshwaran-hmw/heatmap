@@ -520,66 +520,81 @@ export default function BFSIDashboard() {
           }
         }
 
-        // ── ZEN MATRIX SKILLS = Genesis 162 (QISL) — NOT the legacy 32-skill table.
-        //    The primary is computed with the SAME engine ZenAssess uses, so the
-        //    primary skill shown here is the correct Genesis one. ──
+        // ── ZEN MATRIX SKILLS ──
+        //   Prefer Genesis 162 (QISL) with the correct ZenAssess primary. But BFSI /
+        //   pool people who were never re-scanned have NO QISL rows — for them fall
+        //   back to the existing skills table so the match keeps working for everyone.
         skills = [];
         maxCapabilityScore = 0;
-        // Verified ZenAssess badges (authenticated skills) — only set when the person
-        // actually PASSED the ZenAssess test. This drives the "authenticate ✓" tick.
+        const nameOf = (d: any) => d.skillName || d.skill_name || d.name || '';
+        const levelOf = (d: any) => d.level ?? d.self_rating ?? d.selfRating ?? 0;
+        const capOf = (lvl: number) => (lvl >= 3 ? 90 : lvl >= 2 ? 60 : 35);
+
+        // Legacy skills — used both for the verified-badge ticks AND as the fallback.
+        let legacySkills: any[] = [];
         const verifiedBadges = new Map<string, string>(); // lower skill name → badge level
         try {
           const vbRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
           if (vbRes.ok) {
-            const legacy = await vbRes.json();
-            (legacy as any[]).forEach((sk: any) => {
+            legacySkills = await vbRes.json();
+            (legacySkills as any[]).forEach((sk: any) => {
               const vb = sk.verified_badge_level || sk.verifiedBadgeLevel;
               const nm = sk.skill_name || sk.skillName;
               if (vb && nm) verifiedBadges.set(String(nm).toLowerCase(), String(vb));
             });
           }
-        } catch { /* no badges → no ticks */ }
+        } catch { /* no legacy skills */ }
 
-        const qislRes = await fetch(`${API_BASE}/qisl-skills/${empId}`);
-        if (qislRes.ok) {
-          const qislData = await qislRes.json();
-          const details = (qislData.details || []).filter((d: any) => (d.level || 0) > 0);
-          skills = details;
-          const capOf = (lvl: number) => (lvl >= 3 ? 90 : lvl >= 2 ? 60 : 35);
+        // Genesis 162 (QISL) if the person has any.
+        let genesisSkills: any[] = [];
+        try {
+          const qislRes = await fetch(`${API_BASE}/qisl-skills/${empId}`);
+          if (qislRes.ok) {
+            const qislData = await qislRes.json();
+            genesisSkills = (qislData.details || []).filter((d: any) => (levelOf(d) || 0) > 0);
+          }
+        } catch { /* no QISL */ }
 
-          // Correct Genesis primary = computeQEAssessmentFlow over the QISL trio
-          // (the same result the employee sees in the new ZenAssess).
-          let genesisPrimary = '';
+        const useGenesis = genesisSkills.length > 0;
+        const skillRows: any[] = useGenesis ? genesisSkills : (legacySkills || []);
+        skills = skillRows;
+
+        // Correct Genesis primary (only when we have QISL data) = same engine ZenAssess uses.
+        let genesisPrimary = '';
+        if (useGenesis) {
           try {
-            const qeSkills = details.map((d: any) => ({
-              name: d.skillName || d.skill_name, level: d.level || 0,
+            const qeSkills = genesisSkills.map((d: any) => ({
+              name: nameOf(d), level: levelOf(d),
               family: d.family || d.skill_family || null, group: d.group || d.skill_group || null,
               taxonomyId: d.taxonomyId ?? null,
             }));
             const yrs = Number(emp.experience_years || 0);
             const flow = computeQEAssessmentFlow(qeSkills, [], yrs, emp.grade || deriveGradeFromYears(yrs));
             genesisPrimary = flow.top3[0]?.name || '';
-          } catch { /* fall back to no primary highlight */ }
+          } catch { /* no primary highlight */ }
+        }
 
-          const matched = details.filter((d: any) => matchesSkill(d.skillName || d.skill_name || ''));
-          if (matched.length > 0) maxCapabilityScore = Math.max(...matched.map((d: any) => capOf(d.level || 0)));
+        const matched = skillRows.filter((d: any) => matchesSkill(nameOf(d)));
+        if (matched.length > 0) {
+          maxCapabilityScore = Math.max(...matched.map((d: any) =>
+            useGenesis ? capOf(levelOf(d)) : (d.capabilityScore || d.capability_score || capOf(levelOf(d)))));
+        }
 
-          if (intent === 'skill' || intent === 'general') {
-            (details as any[]).forEach((d: any) => {
-              const name = d.skillName || d.skill_name || '';
-              if (name && matchesSkill(name)) {
-                hasSkillMatch = true;
-                const level = d.level || 0;
-                const isPrimary = !!genesisPrimary && name === genesisPrimary;
-                const badge = verifiedBadges.get(name.toLowerCase());
-                const isAuth = !!badge; // passed ZenAssess for this skill
-                addReason('🎓', isAuth, 'Zen Matrix → Skills', isPrimary ? 'Primary Skill' : 'Skill',
-                  `${name} (L${level})${isPrimary ? ' ⭐ Primary' : ''}`,
-                  `Genesis 162 skill${isPrimary ? ' · your ZenAssess primary' : ''}. ${isAuth ? `✓ ZenAssess authenticated (${badge}).` : 'Self-rated — not yet ZenAssess-tested.'} L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : 'Beginner'}.`,
-                  isPrimary ? 25 : 20, isAuth);
-              }
-            });
-          }
+        if (intent === 'skill' || intent === 'general') {
+          skillRows.forEach((d: any) => {
+            const name = nameOf(d);
+            if (name && matchesSkill(name)) {
+              hasSkillMatch = true;
+              const level = levelOf(d);
+              const isPrimary = useGenesis && !!genesisPrimary && name === genesisPrimary;
+              const badge = verifiedBadges.get(name.toLowerCase());
+              const isAuth = !!badge; // passed ZenAssess for this skill
+              addReason('🎓', isAuth, 'Zen Matrix → Skills', isPrimary ? 'Primary Skill' : 'Skill',
+                `${name} (L${level})${isPrimary ? ' ⭐ Primary' : ''}`,
+                `${useGenesis ? 'Genesis 162 skill' : 'Skill'}${isPrimary ? ' · your ZenAssess primary' : ''}. ${isAuth ? `✓ ZenAssess authenticated (${badge}).` : `L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : level === 1 ? 'Beginner' : 'Not rated'}.`}`,
+                isPrimary ? 25 : 20, isAuth);
+            }
+          });
         }
 
         // ── PROJECTS ──
