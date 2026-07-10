@@ -5,6 +5,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { API_BASE, tokenStore } from '@/lib/api';
+// ZenMatrix (Genesis) side of the match: use the SAME 162-taxonomy trio engine
+// ZenAssess uses, so the primary skill shown/scored here is the correct Genesis one.
+import { computeQEAssessmentFlow } from '@/lib/qeAssessmentFlow';
+import { deriveGradeFromYears } from '@/lib/zenTaxonomy';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { toast } from 'sonner';
 import { formatZensarId, extractZensarId, formatEmployeeDisplay, isValidZensarId, validateAndFormatZensarId } from '@/lib/zensarIdUtils';
@@ -414,17 +418,19 @@ export default function BFSIDashboard() {
 
     for (const emp of currentWorkforce.filter(e => e.status !== 'In-project')) {
       let score = 0;
-      const reasons: { icon: string; verified: boolean; source: string; field: string; value: string; context: string; pts: number }[] = [];
+      // `authenticated` = the person actually PASSED ZenAssess for this skill
+      // (skills.verified_badge_level) — the trust tick. Excel/resume data is NOT this.
+      const reasons: { icon: string; verified: boolean; authenticated: boolean; source: string; field: string; value: string; context: string; pts: number }[] = [];
       let hasSkillMatch = false; // must have at least one skill/cert/project match
 
       const addReason = (
         icon: string, verified: boolean,
         source: string, field: string, value: string,
-        context: string, pts: number
+        context: string, pts: number, authenticated = false
       ) => {
         score += pts;
         if (!reasons.some(r => r.source === source && r.field === field && r.value === value)) {
-          reasons.push({ icon, verified, source, field, value, context, pts });
+          reasons.push({ icon, verified, authenticated, source, field, value, context, pts });
         }
       };
 
@@ -514,33 +520,63 @@ export default function BFSIDashboard() {
           }
         }
 
-        // ── SKILLS ──
+        // ── ZEN MATRIX SKILLS = Genesis 162 (QISL) — NOT the legacy 32-skill table.
+        //    The primary is computed with the SAME engine ZenAssess uses, so the
+        //    primary skill shown here is the correct Genesis one. ──
         skills = [];
         maxCapabilityScore = 0;
-        const skillsRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
-        if (skillsRes.ok) {
-          skills = await skillsRes.json();
-          
-          // Find matching skills and compute max capability score
-          const matchedSkills = skills.filter((sk: any) => {
-            const name = sk.skill_name || sk.skillName || '';
-            return name && matchesSkill(name);
-          });
-          
-          if (matchedSkills.length > 0) {
-            maxCapabilityScore = Math.max(...matchedSkills.map((sk: any) => sk.capabilityScore || sk.capability_score || 0));
+        // Verified ZenAssess badges (authenticated skills) — only set when the person
+        // actually PASSED the ZenAssess test. This drives the "authenticate ✓" tick.
+        const verifiedBadges = new Map<string, string>(); // lower skill name → badge level
+        try {
+          const vbRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
+          if (vbRes.ok) {
+            const legacy = await vbRes.json();
+            (legacy as any[]).forEach((sk: any) => {
+              const vb = sk.verified_badge_level || sk.verifiedBadgeLevel;
+              const nm = sk.skill_name || sk.skillName;
+              if (vb && nm) verifiedBadges.set(String(nm).toLowerCase(), String(vb));
+            });
           }
+        } catch { /* no badges → no ticks */ }
+
+        const qislRes = await fetch(`${API_BASE}/qisl-skills/${empId}`);
+        if (qislRes.ok) {
+          const qislData = await qislRes.json();
+          const details = (qislData.details || []).filter((d: any) => (d.level || 0) > 0);
+          skills = details;
+          const capOf = (lvl: number) => (lvl >= 3 ? 90 : lvl >= 2 ? 60 : 35);
+
+          // Correct Genesis primary = computeQEAssessmentFlow over the QISL trio
+          // (the same result the employee sees in the new ZenAssess).
+          let genesisPrimary = '';
+          try {
+            const qeSkills = details.map((d: any) => ({
+              name: d.skillName || d.skill_name, level: d.level || 0,
+              family: d.family || d.skill_family || null, group: d.group || d.skill_group || null,
+              taxonomyId: d.taxonomyId ?? null,
+            }));
+            const yrs = Number(emp.experience_years || 0);
+            const flow = computeQEAssessmentFlow(qeSkills, [], yrs, emp.grade || deriveGradeFromYears(yrs));
+            genesisPrimary = flow.top3[0]?.name || '';
+          } catch { /* fall back to no primary highlight */ }
+
+          const matched = details.filter((d: any) => matchesSkill(d.skillName || d.skill_name || ''));
+          if (matched.length > 0) maxCapabilityScore = Math.max(...matched.map((d: any) => capOf(d.level || 0)));
 
           if (intent === 'skill' || intent === 'general') {
-            (skills as any[]).forEach((sk: any) => {
-              const name = sk.skill_name || sk.skillName || '';
+            (details as any[]).forEach((d: any) => {
+              const name = d.skillName || d.skill_name || '';
               if (name && matchesSkill(name)) {
                 hasSkillMatch = true;
-                const level = sk.self_rating || sk.selfRating || 0;
-                addReason('🎓', true, 'Zen Matrix → Skills', 'Skill',
-                  `${name} (L${level})`,
-                  `Self-rated skill. L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : level === 1 ? 'Beginner' : 'Not rated'}.`,
-                  20);
+                const level = d.level || 0;
+                const isPrimary = !!genesisPrimary && name === genesisPrimary;
+                const badge = verifiedBadges.get(name.toLowerCase());
+                const isAuth = !!badge; // passed ZenAssess for this skill
+                addReason('🎓', isAuth, 'Zen Matrix → Skills', isPrimary ? 'Primary Skill' : 'Skill',
+                  `${name} (L${level})${isPrimary ? ' ⭐ Primary' : ''}`,
+                  `Genesis 162 skill${isPrimary ? ' · your ZenAssess primary' : ''}. ${isAuth ? `✓ ZenAssess authenticated (${badge}).` : 'Self-rated — not yet ZenAssess-tested.'} L${level} = ${level === 3 ? 'Advanced' : level === 2 ? 'Intermediate' : 'Beginner'}.`,
+                  isPrimary ? 25 : 20, isAuth);
               }
             });
           }
@@ -602,9 +638,17 @@ export default function BFSIDashboard() {
               `Employee is based at this location.`, 10);
             score += 10;
           }
+          // ── 50 / 50 score — cap each side at 50 so the Excel sheet is never blindly
+          //    trusted: final = min(50, Excel points) + min(50, ZenMatrix points). ──
+          const excelPts = reasons.filter(r => r.source === 'BFSI Data').reduce((n, r) => n + r.pts, 0);
+          const zenPts = reasons.filter(r => r.source.startsWith('Zen Matrix')).reduce((n, r) => n + r.pts, 0);
+          const excelScore = Math.min(50, excelPts);
+          const zenScore = Math.min(50, zenPts);
           results.push({
             ...emp,
-            zfScore: score,
+            zfScore: excelScore + zenScore,
+            zfExcelScore: excelScore,
+            zfZenScore: zenScore,
             zfCapabilityScore: maxCapabilityScore,
             zfReasons: reasons.slice(0, 6),
             zfAllReasons: reasons,
@@ -615,7 +659,9 @@ export default function BFSIDashboard() {
       }
     }
 
-    results.sort((a, b) => b.zfCapabilityScore - a.zfCapabilityScore || b.zfScore - a.zfScore);
+    // Rank by the 50/50 score FIRST (Excel + ZenMatrix, capped 50 each) so the balance
+    // actually drives the match; capability (skill depth) only breaks ties.
+    results.sort((a, b) => b.zfScore - a.zfScore || b.zfCapabilityScore - a.zfCapabilityScore);
     setZfResults(results.slice(0, maxResults));
     setZfLoading(false);
   };
@@ -3250,7 +3296,7 @@ export default function BFSIDashboard() {
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 8px', borderRadius: 6, background: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', marginBottom: 3 }}>
                           <span style={{ fontSize: 12, flexShrink: 0 }}>{r.icon}</span>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{r.field}: <span style={{ color: COLORS.purple }}>{r.value}</span></div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{r.field}: <span style={{ color: COLORS.purple }}>{r.value}</span>{r.authenticated && <span title="Authenticated — passed the ZenAssess test" style={{ marginLeft: 5, color: '#10B981', fontWeight: 900 }}>✓</span>}</div>
                             <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic', lineHeight: 1.3 }}>{r.context}</div>
                           </div>
                         </div>
@@ -3554,10 +3600,19 @@ export default function BFSIDashboard() {
                   {formatZensarId(zfScorePopup.employee_id)} · Query: <em>"{zfQuery}"</em>
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{ background: 'rgba(255,255,255,0.2)', borderRadius: 12, padding: '8px 18px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* 50 / 50 split — Excel sheet vs Genesis ZenMatrix, each capped at 50 */}
+                <div style={{ background: 'rgba(255,255,255,0.14)', borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfExcelScore ?? 0}<span style={{ fontSize: 10, opacity: 0.7 }}>/50</span></div>
+                  <div style={{ fontSize: 9, fontWeight: 800, opacity: 0.85 }}>📊 EXCEL</div>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.14)', borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfZenScore ?? 0}<span style={{ fontSize: 10, opacity: 0.7 }}>/50</span></div>
+                  <div style={{ fontSize: 9, fontWeight: 800, opacity: 0.85 }}>🎓 ZENMATRIX</div>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.22)', borderRadius: 12, padding: '8px 18px', textAlign: 'center' }}>
                   <div style={{ fontSize: 28, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfScore}</div>
-                  <div style={{ fontSize: 10, fontWeight: 800, opacity: 0.85 }}>TOTAL PTS</div>
+                  <div style={{ fontSize: 10, fontWeight: 800, opacity: 0.85 }}>TOTAL /100</div>
                 </div>
                 <button onClick={() => setZfScorePopup(null)}
                   style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 36, height: 36, borderRadius: 10, cursor: 'pointer', fontSize: 18 }}>✕</button>
@@ -3591,7 +3646,12 @@ export default function BFSIDashboard() {
                       </td>
                       <td style={{ padding: '10px 14px', fontWeight: 600, color: T.sub, verticalAlign: 'top' }}>{r.field}</td>
                       <td style={{ padding: '10px 14px', verticalAlign: 'top' }}>
-                        <span style={{ background: `${COLORS.purple}15`, color: COLORS.purple, padding: '2px 8px', borderRadius: 6, fontWeight: 700, fontSize: 12 }}>{r.value}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span style={{ background: `${COLORS.purple}15`, color: COLORS.purple, padding: '2px 8px', borderRadius: 6, fontWeight: 700, fontSize: 12 }}>{r.value}</span>
+                          {r.authenticated && (
+                            <span title="Authenticated — passed the ZenAssess test" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: 'rgba(16,185,129,0.14)', color: '#10B981', padding: '2px 7px', borderRadius: 6, fontWeight: 900, fontSize: 10.5 }}>✓ Authenticated</span>
+                          )}
+                        </div>
                       </td>
                       <td style={{ padding: '10px 14px', verticalAlign: 'top', textAlign: 'right' }}>
                         <span style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', padding: '3px 10px', borderRadius: 6, fontWeight: 900, fontSize: 12 }}>+{r.pts}</span>
