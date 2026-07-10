@@ -4,7 +4,7 @@
  */
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, tokenStore } from '@/lib/api';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { toast } from 'sonner';
 import { formatZensarId, extractZensarId, formatEmployeeDisplay, isValidZensarId, validateAndFormatZensarId } from '@/lib/zensarIdUtils';
@@ -1098,8 +1098,12 @@ export default function BFSIDashboard() {
     }, 800);
 
     try {
+      // Send the admin's access token — the upload endpoint requires admin auth.
+      // (Don't set Content-Type: the browser adds the multipart boundary itself.)
+      const token = tokenStore.getAccess();
       const res = await fetch(`${API_BASE}/bfsi/upload`, {
         method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: formData
       });
 
@@ -1134,7 +1138,11 @@ export default function BFSIDashboard() {
     
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/bfsi/reset`, { method: 'POST' });
+      const token = tokenStore.getAccess();
+      const res = await fetch(`${API_BASE}/bfsi/reset`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (res.ok) {
         toast.success('System reset successful');
         fetchDashboardData();
