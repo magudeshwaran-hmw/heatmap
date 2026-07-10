@@ -91,6 +91,28 @@ export async function apiRefreshToken(): Promise<boolean> {
   return tryRefreshToken();
 }
 
+// Raw fetch WITH the access token + one auto-refresh-and-retry on an expired token.
+// Use this for calls that can't go through req() (FormData uploads, blob downloads,
+// or pages that fetch by hand) so a lapsed access token silently refreshes instead
+// of surfacing "token expired". Pass a path (leading "/") — API_BASE is prepended.
+export async function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const build = (): RequestInit => {
+    const headers = new Headers(init.headers || {});
+    const token = tokenStore.getAccess();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  };
+  let res = await fetch(`${API_BASE}${path}`, build());
+  if (res.status === 401) {
+    let code = '';
+    try { code = (await res.clone().json())?.code || ''; } catch { /* non-JSON body */ }
+    if (code === 'TOKEN_EXPIRED' || !tokenStore.getAccess()) {
+      if (await apiRefreshToken()) res = await fetch(`${API_BASE}${path}`, build());
+    }
+  }
+  return res;
+}
+
 async function tryRefreshToken(): Promise<boolean> {
   const refresh = tokenStore.getRefresh();
   if (!refresh) return false;

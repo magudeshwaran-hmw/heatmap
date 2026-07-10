@@ -4,7 +4,7 @@
  */
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { API_BASE, tokenStore } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 // ZenMatrix (Genesis) side of the match: use the SAME 162-taxonomy trio engine
 // ZenAssess uses, so the primary skill shown/scored here is the correct Genesis one.
 import { computeQEAssessmentFlow } from '@/lib/qeAssessmentFlow';
@@ -883,9 +883,7 @@ export default function BFSIDashboard() {
   const fetchAssignments = async () => {
     setLoadingAssignments(true);
     try {
-      const res = await fetch(`${API_BASE}/bfsi/assignments`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
-      });
+      const res = await authFetch(`/bfsi/assignments`);
       const data = await res.json();
       if (res.ok && data.assignments) {
         setAssignments(data.assignments);
@@ -901,12 +899,9 @@ export default function BFSIDashboard() {
     if (!outcomeModal) return;
     setIsRecordingOutcome(true);
     try {
-      const res = await fetch(`${API_BASE}/bfsi/outcome`, {
+      const res = await authFetch(`/bfsi/outcome`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           roleId: outcomeModal.assignment.role_id,
           employeeId: outcomeModal.assignment.employee_id,
@@ -940,9 +935,7 @@ export default function BFSIDashboard() {
   const fetchAnalyticsData = async () => {
     setLoadingAnalytics(true);
     try {
-      const res = await fetch(`${API_BASE}/bfsi/analytics`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` }
-      });
+      const res = await authFetch(`/bfsi/analytics`);
       const data = await res.json();
       if (res.ok) {
         setAnalyticsData(data);
@@ -987,12 +980,9 @@ export default function BFSIDashboard() {
         weeks: type === 'reserve' ? 4 : undefined
       };
 
-      const res = await fetch(`${API_BASE}${endpoint}`, {
+      const res = await authFetch(`${endpoint}`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
@@ -1020,8 +1010,8 @@ export default function BFSIDashboard() {
     setModalSkills([]);
     setModalSkillsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}`, 'Cache-Control': 'no-cache' },
+      const res = await authFetch(`/employees/${emp.employee_id}/skills`, {
+        headers: { 'Cache-Control': 'no-cache' },
       });
       const skills = res.ok ? await res.json() : [];
       console.log('[ViewDetails] skills fetched for', emp.employee_id, Array.isArray(skills) ? skills.length : skills, skills);
@@ -1060,9 +1050,9 @@ export default function BFSIDashboard() {
         [actorKey]: String(localStorage.getItem('skill_nav_session_name') || 'admin'),
       };
       console.log(`[${type === 'assign' ? 'Allocate' : 'Reserve'}] sending`, payload);
-      const res = await fetch(`${API_BASE}${endpoint}`, {
+      const res = await authFetch(`${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('zn_access_token')}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));
@@ -1089,16 +1079,16 @@ export default function BFSIDashboard() {
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      const kpiRes = await fetch(`${API_BASE}/bfsi/dashboard`);
+      const kpiRes = await authFetch(`/bfsi/dashboard`);
       if (kpiRes.ok) setKpiData(await kpiRes.json());
 
-      const rolesRes = await fetch(`${API_BASE}/bfsi/roles`);
+      const rolesRes = await authFetch(`/bfsi/roles`);
       if (rolesRes.ok) {
         const rolesData = await rolesRes.json();
         setRoles(rolesData.roles || []);
       }
 
-      const workforceRes = await fetch(`${API_BASE}/bfsi/workforce`);
+      const workforceRes = await authFetch(`/bfsi/workforce`);
       if (workforceRes.ok) {
         const workforceData = await workforceRes.json();
         setWorkforce(workforceData.workforce || []);
@@ -1144,12 +1134,11 @@ export default function BFSIDashboard() {
     }, 800);
 
     try {
-      // Send the admin's access token — the upload endpoint requires admin auth.
-      // (Don't set Content-Type: the browser adds the multipart boundary itself.)
-      const token = tokenStore.getAccess();
-      const res = await fetch(`${API_BASE}/bfsi/upload`, {
+      // authFetch adds the admin token AND auto-refreshes if it has expired, so the
+      // upload no longer fails with "token expired". (No Content-Type: the browser
+      // sets the multipart boundary itself.)
+      const res = await authFetch(`/bfsi/upload`, {
         method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: formData
       });
 
@@ -1184,11 +1173,7 @@ export default function BFSIDashboard() {
     
     setLoading(true);
     try {
-      const token = tokenStore.getAccess();
-      const res = await fetch(`${API_BASE}/bfsi/reset`, {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const res = await authFetch(`/bfsi/reset`, { method: 'POST' });
       if (res.ok) {
         toast.success('System reset successful');
         fetchDashboardData();
