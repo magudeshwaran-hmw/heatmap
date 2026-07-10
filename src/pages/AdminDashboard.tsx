@@ -16,7 +16,7 @@ import { toast } from '@/lib/ToastContext';
 import { useAuth } from '@/lib/authContext';
 import { useDark, mkTheme } from '@/lib/themeContext';
 import { computeCompletion, exportAllToExcel } from '@/lib/localDB';
-import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills, apiRefreshToken, apiStoreResume, fileToBase64 } from '@/lib/api';
+import { apiGetAllEmployees, API_BASE, apiGetCompletions, apiSaveCompletions, apiClearCompletions, apiResetCompletionFlag, apiSaveTaxonomySkills, apiRefreshToken, apiStoreResume, fileToBase64, apiGetAllQislSkills } from '@/lib/api';
 import { AppContext, useApp } from '@/lib/AppContext';
 import { loadAppData, AppData } from '@/lib/appStore';
 import EmployeeDashboard from './EmployeeDashboard';
@@ -35,10 +35,14 @@ import Modal from '@/components/Modal';
 import { callResumeLLM } from '@/lib/llm';
 import { extractTextFromFile, accurateExtractFromResume, extractZensarIdFromText, extractTaxonomySkillsFromResume } from '@/lib/resumeExtraction';
 import {
-  resolveQEAssignment, setQEOverride, clearQEOverride,
+  resolveQEAssignment, setQEOverride, clearQEOverride, getQEOverride,
   QE_FAMILIES, groupsForFamily, essentialSkillsFor,
   QE_DOMAINS, QE_DOMAIN_LABEL, normalizeDomain, deriveDomain,
 } from '@/lib/qeSkillTaxonomy';
+// Same trio engine the new ZenAssess uses — so the Skill Groups "Skill" column shows
+// EXACTLY the primary/secondary ZenAssess shows (not the stale stored trio column).
+import { computeQEAssessmentFlow } from '@/lib/qeAssessmentFlow';
+import { deriveGradeFromYears } from '@/lib/zenTaxonomy';
 import {
   StoredCompletions, loadCompletions, saveCompletions, clearCompletions,
   parseCompletionRows, completionFlagsFor,
@@ -66,9 +70,11 @@ export default function AdminDashboard() {
   const T = mkTheme(dark);
 
   const [activeTab, setActiveTab] = useState<'Overview' | 'Manage Employees' | 'Skill Heatmap' | 'QI SL Heatmap' | 'Skill Groups' | 'Certifications' | 'Achievements' | 'Education' | 'Projects' | 'Expert Reviews' | 'Re-assessment' | 'Workforce Intelligence'>('Overview');
-  // QISL Heatmap explorer: selected family + group (step-by-step drill-down).
+  // QISL Heatmap explorer: selected family + group + skill (step-by-step drill-down).
   const [qislFam, setQislFam] = useState<string>('');
   const [qislGroup, setQislGroup] = useState<string>('');
+  // Clicking a skill card reveals the people who have that skill (id · name · View).
+  const [qislSkill, setQislSkill] = useState<string>('');
   // "i" info popover for the QI SL Heatmap title — explains what the heatmap does.
   const [showQislInfo, setShowQislInfo] = useState(false);
   // bumped whenever a QE Skill-Group override is saved, to force a re-derive/re-render
@@ -914,6 +920,45 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
 
 
   const [employees, setEmployees] = useState<any[]>([]);
+  // Bulk QISL details per employee (id → rows w/ family/group/level) — used to run the
+  // SAME trio engine ZenAssess uses, so the Skill Groups column matches ZenAssess.
+  const [qislByEmp, setQislByEmp] = useState<Record<string, any[]>>({});
+
+  // Primary/secondary per employee, computed with the EXACT engine + inputs the new
+  // ZenAssess uses (computeQEAssessmentFlow over the QISL details, projects, years,
+  // grade). This is the source of truth for the Skill Groups "Skill" column, so what
+  // the admin sees == what the employee sees in ZenAssess. Memoized (heavy per-row).
+  const qeTrioByEmp = useMemo(() => {
+    const out: Record<string, { primary: string; secondary: string }> = {};
+    for (const emp of employees) {
+      const details = qislByEmp[emp.id] || qislByEmp[String(emp.id)] || qislByEmp[emp.zensar_id] || [];
+      if (!details.length) continue;
+      const qeSkills = details
+        .filter((d: any) => (d.level || 0) > 0)
+        .map((d: any) => ({
+          name: d.skillName || d.skill_name,
+          level: d.level || 0,
+          family: d.family || d.skill_family || null,
+          group: d.group || d.skill_group || null,
+          taxonomyId: d.taxonomyId ?? d.taxonomy_skill_id ?? null,
+        }));
+      const projects = (emp.projects || []).map((p: any) => ({
+        name: p.ProjectName || p.project_name || p.name || '',
+        technologies: p.Technologies || p.technologies || [],
+        skills: p.SkillsUsed || p.skills || [],
+        domain: p.Domain || p.domain || '',
+        description: p.Description || p.description || '',
+        role: p.Role || p.role || '',
+      }));
+      const years = Number(emp.years_it || emp.yearsIT || 0);
+      const grade = emp.grade || deriveGradeFromYears(years);
+      try {
+        const flow = computeQEAssessmentFlow(qeSkills, projects, years, grade);
+        out[emp.id] = { primary: flow.top3[0]?.name || '', secondary: flow.top3[1]?.name || '' };
+      } catch { /* leave unset → falls back to the stored trio */ }
+    }
+    return out;
+  }, [employees, qislByEmp, qeTick]);
   const [skillDemand, setSkillDemand] = useState<Record<string, number>>({});
 
   // Demand signal: how many open BFSI roles reference each canonical skill (best-effort)
@@ -1394,6 +1439,13 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
         const pRes = await fetch(`${API_BASE}/projects/ALL`);
         if (pRes.ok) ({ projects } = await pRes.json());
       } catch { /* ignore — show employees without project data */ }
+
+      // ── Bulk QISL details (non-blocking) — powers the Skill Groups trio so it
+      // matches the new ZenAssess exactly. Falls back to the stored trio if absent. ──
+      try {
+        const q = await apiGetAllQislSkills();
+        setQislByEmp(q.byEmployee || {});
+      } catch { /* ignore — falls back to stored primary/secondary */ }
 
       // ── Achievements (non-blocking) ──
       let achievements: any[] = [];
@@ -2890,8 +2942,12 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                               <div style={{ fontSize: 11.5, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 8, marginLeft: 20 }}>{g.group} <span style={{ color: T.muted, fontWeight: 700 }}>· {g.skills.length} skills · {g.gCnt} members</span></div>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 12 }}>
                                 {g.skills.map(sk => {
+                                  const skKey = `${fam}|${g.group}|${sk.skill}`;
+                                  const skOpen = qislSkill === skKey;
                                   return (
                                     <div key={sk.skill}
+                                      onClick={() => setQislSkill(skOpen ? '' : skKey)}
+                                      title={`Click to see the ${sk.cnt} member${sk.cnt === 1 ? '' : 's'} who have ${sk.skill}`}
                                       onMouseEnter={e => {
                                         const el = e.currentTarget;
                                         el.style.overflow = 'visible';
@@ -2924,7 +2980,7 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                                           nameEl.textContent = sk.skill;
                                         }
                                       }}
-                                      style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 14, padding: 14, textAlign: 'center', position: 'relative', overflow: 'hidden', zIndex: 1, transition: 'box-shadow 0.2s, border 0.2s', cursor: 'default' }}>
+                                      style={{ background: skOpen ? 'rgba(6,182,212,0.10)' : T.bg, border: `1px solid ${skOpen ? '#06B6D4' : T.bdr}`, borderRadius: 14, padding: 14, textAlign: 'center', position: 'relative', overflow: 'hidden', zIndex: 1, transition: 'box-shadow 0.2s, border 0.2s', cursor: 'pointer' }}>
                                       <div
                                         className="skill-name"
                                         style={{
@@ -2949,6 +3005,68 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                         </div>
                       );
                     })}
+
+                    {/* ── Skill drill-down POPUP: people who have the clicked skill ── */}
+                    {(() => {
+                      if (!qislSkill) return null;
+                      const [pFam, pGrp, pSkill] = qislSkill.split('|');
+                      if (!pSkill) return null;
+                      const people = assignments
+                        .filter(a => a.qe.family === pFam && a.qe.group === pGrp && a.qe.matchedSkills.includes(pSkill))
+                        .map(a => a.e);
+                      return (
+                        <div
+                          onClick={() => setQislSkill('')}
+                          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '4vh 4vw' }}
+                        >
+                          <div
+                            onClick={ev => ev.stopPropagation()}
+                            style={{ background: T.bg, borderRadius: 18, border: `1px solid ${T.bdr}`, width: '100%', maxWidth: 640, maxHeight: '86vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 30px 80px rgba(0,0,0,0.5)' }}
+                          >
+                            <div style={{ padding: '18px 22px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                              <div>
+                                <div style={{ fontSize: 16, fontWeight: 900, color: T.text }}>👥 People with <span style={{ color: '#06B6D4' }}>{pSkill}</span></div>
+                                <div style={{ fontSize: 12, color: T.sub, marginTop: 2 }}>{people.length} member{people.length === 1 ? '' : 's'} · {pFam} · {pGrp}</div>
+                              </div>
+                              <button onClick={() => setQislSkill('')} style={{ width: 34, height: 34, borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 15, fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>✕</button>
+                            </div>
+                            <div style={{ padding: 18, overflowY: 'auto' }}>
+                              {people.length === 0 ? (
+                                <div style={{ fontSize: 13, color: T.muted, textAlign: 'center', padding: 20 }}>No one has this skill yet.</div>
+                              ) : (
+                                <div style={{ overflowX: 'auto', borderRadius: 12, border: `1px solid ${T.bdr}` }}>
+                                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                    <thead>
+                                      <tr style={{ background: dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', color: T.sub, textAlign: 'left' }}>
+                                        <th style={{ padding: '10px 14px', fontWeight: 800, width: 56, whiteSpace: 'nowrap' }}>S.No</th>
+                                        <th style={{ padding: '10px 14px', fontWeight: 800, whiteSpace: 'nowrap' }}>Zensar ID</th>
+                                        <th style={{ padding: '10px 14px', fontWeight: 800 }}>Name</th>
+                                        <th style={{ padding: '10px 14px', fontWeight: 800, textAlign: 'right', width: 90 }}>View</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {people.map((e, i) => (
+                                        <tr key={e.id} style={{ borderTop: `1px solid ${T.bdr}` }}>
+                                          <td style={{ padding: '10px 14px', fontWeight: 700, color: T.sub }}>{i + 1}</td>
+                                          <td style={{ padding: '10px 14px', fontWeight: 800, color: T.sub, whiteSpace: 'nowrap' }}>{e.zensar_id || e.id}</td>
+                                          <td style={{ padding: '10px 14px', fontWeight: 700, color: T.text }}>{e.name}</td>
+                                          <td style={{ padding: '10px 14px', textAlign: 'right' }}>
+                                            <button
+                                              onClick={() => { setQislSkill(''); handleOpenPreview(e); }}
+                                              style={{ padding: '6px 14px', borderRadius: 8, border: 'none', background: '#06B6D4', color: '#fff', fontSize: 12, fontWeight: 800, cursor: 'pointer' }}
+                                            >View →</button>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </>
                 );
               })()}
@@ -4754,13 +4872,16 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                   const domain = normalizeDomain(ex?.domain) || deriveDomain(emp);
                   const skillGroup = (ex?.skillGroup || '').trim() || qe.group;
                   const experience = String(ex?.experience || emp.years_it || emp.yearsIT || emp.yearsExperience || emp.years_zensar || '').trim();
-                  // Primary / secondary come from the SAME "new Genesis" 162-taxonomy
-                  // trio the ZenAssess page and the employee card use (emp.qislTop,
-                  // trio-first). Falls back to the stored columns, then the keyword
-                  // guess only as a last resort — so this column mirrors ZenAssess.
+                  // Primary / secondary are computed with the SAME ZenAssess engine
+                  // (qeTrioByEmp = computeQEAssessmentFlow), so this column shows EXACTLY
+                  // what the employee sees in the new ZenAssess. Only if that engine has
+                  // no data do we fall back to the stored trio → qislTop → keyword guess.
+                  const ov = getQEOverride(emp.id) || {};
+                  const zenTrio = qeTrioByEmp[emp.id] || { primary: '', secondary: '' };
                   const qtop = (emp.qislTop || []).map((s: any) => s?.name).filter(Boolean);
-                  const primarySkill = emp.primary_skill || emp.primarySkill || qtop[0] || qe.primarySkill || '';
-                  const secondarySkill = emp.secondary_skill || emp.secondarySkill || qtop[1] || qe.secondarySkill || '';
+                  // Precedence: admin's manual pick → ZenAssess-computed trio → stored → guess.
+                  const primarySkill = ov.primarySkill || zenTrio.primary || emp.primary_skill || emp.primarySkill || qtop[0] || qe.primarySkill || '';
+                  const secondarySkill = ov.secondarySkill || zenTrio.secondary || emp.secondary_skill || emp.secondarySkill || qtop[1] || qe.secondarySkill || '';
                   // Options offered when an admin edits the primary/secondary skill.
                   const ratedSkillNames = (emp.skills || [])
                     .map((sk: any) => sk?.skillName || sk?.skill_name || sk?.name)
