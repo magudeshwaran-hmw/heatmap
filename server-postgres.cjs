@@ -1833,6 +1833,7 @@ async function syncDatabaseSchema() {
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS billing_status VARCHAR(50)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS project_name VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS customer VARCHAR(255)`);
+    await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS customer_group VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS pm_name VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS location VARCHAR(255)`);
     await query(`ALTER TABLE bfsi_workforce ADD COLUMN IF NOT EXISTS aging_days INTEGER DEFAULT 0`);
@@ -3337,57 +3338,57 @@ app.post('/api/employees/batch-skills', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'employeeIds array is required' });
     }
 
-    // Create placeholders for the IN clause
+    // QISL 162 taxonomy is the ONE skill source of truth (the legacy 32-skill set is
+    // retired). The legacy `skills` table is LEFT-JOINed ONLY to carry the ZenAssess
+    // verified-badge tick + a stored capability score; skill matching runs on QISL.
     const placeholders = employeeIds.map((_, index) => `$${index + 1}`).join(',');
-    const query_text = `SELECT * FROM skills WHERE employee_id IN (${placeholders})`;
-    
+    const query_text = `
+      SELECT q.employee_id, q.skill_name, q.level,
+             q.skill_family, q.skill_group, q.priority,
+             s.verified_badge_level, s.capability_score
+      FROM qisl_skill_ratings q
+      LEFT JOIN skills s
+        ON s.employee_id::text = q.employee_id::text
+       AND LOWER(s.skill_name) = LOWER(q.skill_name)
+      WHERE q.employee_id IN (${placeholders}) AND q.level > 0`;
+
     const result = await query(query_text, employeeIds);
+
+    const capFromLevel = (lvl) => (lvl >= 3 ? 90 : lvl >= 2 ? 60 : 35);
 
     // Group skills by employee_id
     const skillsByEmployee = {};
-    
+
     result.rows.forEach(row => {
       if (!Reflect.has(skillsByEmployee, row.employee_id)) {
         Reflect.set(skillsByEmployee, row.employee_id, []);
       }
-      
-      // Check if it's a predefined skill
+
       const predefinedIdx = SKILL_NAMES.indexOf(row.skill_name);
       const skillId = predefinedIdx >= 0 ? `s${predefinedIdx + 1}` : row.skill_name;
 
       Reflect.get(skillsByEmployee, row.employee_id).push({
         skillId: skillId,
-        skill_name: row.skill_name, // Keep original field name for compatibility
+        skill_name: row.skill_name,
         skillName: row.skill_name,
-        selfRating: row.self_rating,
-        managerRating: row.manager_rating,
-        validated: row.validated,
-        // ZenAssess verified badge + self-claimed level (needed by match modal)
+        // QISL level maps onto the selfRating field the match engine reads.
+        selfRating: row.level,
+        self_rating: row.level,
+        level: row.level,
+        skillFamily: row.skill_family,
+        skillGroup: row.skill_group,
+        priority: row.priority,
+        // ZenAssess verified badge (auth tick) carried over from legacy if present.
         verifiedBadgeLevel: row.verified_badge_level,
         verified_badge_level: row.verified_badge_level,
-        selfClaimedLevel: row.self_claimed_level,
-        self_claimed_level: row.self_claimed_level,
-        lastValidationDate: row.last_validated_date,
-        lastProjectDate: row.last_project_date,
-        lastCertificationDate: row.last_cert_date,
-        lastUsedDate: row.last_used_date,
-        freshnessScore: row.freshness_score,
-        freshnessStatus: row.freshness_status,
-        revalidationReq: row.revalidation_req,
-        confidenceScore: row.confidence_score,
-        allocationReadiness: row.allocation_readiness,
-        allocationRisk: row.allocation_risk,
-        readyForAllocation: row.ready_for_allocation,
-        capabilityScore: row.capability_score
+        capabilityScore: row.capability_score || capFromLevel(row.level),
       });
     });
 
-    // Filter out skills with 0 rating and ensure all requested employees are in response
+    // Ensure every requested employee is present (empty array if no QISL rows)
     employeeIds.forEach(empId => {
       if (!Reflect.has(skillsByEmployee, empId)) {
         Reflect.set(skillsByEmployee, empId, []);
-      } else {
-        Reflect.set(skillsByEmployee, empId, Reflect.get(skillsByEmployee, empId).filter(s => s.selfRating > 0));
       }
     });
 
@@ -4483,12 +4484,23 @@ app.get('/api/bfsi/roles', requireAuth, async (req, res) => {
 // Get all BFSI assignments
 app.get('/api/bfsi/assignments', requireAuth, async (req, res) => {
   try {
+    // LEFT JOINs + text-cast so an allocation is NEVER silently dropped when the
+    // employee/role id format differs (e.g. pool candidates, leading zeros). Falls
+    // back to the employees table for a real name, then to the raw id as a last resort.
     const result = await query(`
-      SELECT a.*, r.role_title, r.client_name, r.required_skills, r.location as role_location,
-             w.employee_name, w.primary_skill, w.status as employee_status, w.experience_years
+      SELECT a.*,
+             COALESCE(r.role_title, 'Role ' || a.role_id)          AS role_title,
+             r.client_name,
+             r.required_skills,
+             r.location                                            AS role_location,
+             COALESCE(w.employee_name, e.name, 'Employee ' || a.employee_id) AS employee_name,
+             COALESCE(w.primary_skill, e.primary_skill)            AS primary_skill,
+             COALESCE(w.status, 'Assigned')                        AS employee_status,
+             COALESCE(w.experience_years, e.years_it, 0)           AS experience_years
       FROM bfsi_assignments a
-      JOIN bfsi_roles r ON a.role_id = r.role_id
-      JOIN bfsi_workforce w ON a.employee_id = w.employee_id
+      LEFT JOIN bfsi_roles r     ON a.role_id::text = r.role_id::text
+      LEFT JOIN bfsi_workforce w ON a.employee_id::text = w.employee_id::text
+      LEFT JOIN employees e      ON e.id::text = a.employee_id::text OR e.zensar_id::text = a.employee_id::text
       ORDER BY a.assigned_date DESC
     `);
     res.json({ assignments: result.rows });
@@ -5181,20 +5193,35 @@ app.post('/api/bfsi/upload', requireAdminStrict, upload.single('file'), async (r
           } else if (billingStatus.includes('pool')) {
             status = 'Available';
           }
-          
+
+          // Robust "Customer Group" lookup — the Excel header may have odd spacing or
+          // casing ("Customer  Group" with a double space, "CustomerGroup", trailing
+          // spaces, etc.), so match on a normalized key rather than an exact string.
+          const customerGroupVal = (() => {
+            try {
+              for (const k of Object.keys(row || {})) {
+                if (k.replace(/[\s_]/g, '').toLowerCase() === 'customergroup') {
+                  return String(row[k] || '').trim();
+                }
+              }
+            } catch { /* ignore malformed row */ }
+            return '';
+          })();
+
           await client.query(`
             INSERT INTO bfsi_workforce (
-              employee_id, employee_name, email, current_skills, certifications, 
-              experience_years, status, doj, primary_skill, band, 
+              employee_id, employee_name, email, current_skills, certifications,
+              experience_years, status, doj, primary_skill, band,
               billing_status, project_name, customer, pm_name, location,
-              aging_days, practice_name, service_line, deployable_flag
+              aging_days, practice_name, service_line, deployable_flag, customer_group
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             ON CONFLICT (employee_id) DO UPDATE SET
               employee_name = EXCLUDED.employee_name,
               current_skills = EXCLUDED.current_skills,
               status = EXCLUDED.status,
               project_name = EXCLUDED.project_name,
+              customer_group = EXCLUDED.customer_group,
               updated_at = CURRENT_TIMESTAMP
           `, [
             empId,
@@ -5215,7 +5242,8 @@ app.post('/api/bfsi/upload', requireAdminStrict, upload.single('file'), async (r
             safeParseInt(row['Aging'] || row['Ageing'], 0),
             row['Practice Name(L1)'] || row['PracticeName'] || '',
             row['Service Lines'] || '',
-            row['DeployableFlag'] === 'YES' || row['DeployableFlag'] === 'Y'
+            row['DeployableFlag'] === 'YES' || row['DeployableFlag'] === 'Y',
+            customerGroupVal
           ]);
           workforceCount++;
         }
@@ -5845,6 +5873,12 @@ app.post('/api/admin/reserve', requireAdmin, async (req, res) => {
       [srfId || null, roleName || null, reservedBy || null, eid]
     );
     const upWf = await pool.query(`UPDATE bfsi_workforce SET status='Reserved' WHERE employee_id::text=$1::text RETURNING employee_id`, [eid]).catch(() => ({ rowCount: 0 }));
+    // Write a bfsi_assignments row so the reservation shows in the Allocations tab,
+    // exactly like an allocation does (previously reserve only logged + set status,
+    // so reserved people never appeared as projects).
+    if (srfId) {
+      await pool.query(`INSERT INTO bfsi_assignments (role_id, employee_id, assignment_status) VALUES ($1,$2,'Reserved') ON CONFLICT (role_id, employee_id) DO UPDATE SET assignment_status='Reserved', updated_at=CURRENT_TIMESTAMP`, [srfId, eid]).catch((e) => console.warn('[Reserve] assignment skip:', e.message));
+    }
     await pool.query(
       `INSERT INTO allocation_log (employee_id, srf_id, role_name, action, actioned_by, actioned_at) VALUES ($1,$2,$3,'reserved',$4,NOW())`,
       [eid, srfId || null, roleName || null, reservedBy || null]

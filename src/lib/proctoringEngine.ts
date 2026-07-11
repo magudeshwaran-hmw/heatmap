@@ -17,6 +17,7 @@ import * as tf from '@tensorflow/tfjs'
 import * as cocoSsd from '@tensorflow-models/coco-ssd'
 import * as faceapi from 'face-api.js'
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection'
+import { VideoEnhancer, type QualityMetrics, type EnhanceState } from './videoEnhancement'
 
 export interface ProctoringFlag {
   type: 'tab_switch' | 'copy_paste' |
@@ -113,6 +114,17 @@ export class ProctoringEngine {
   private modelLoaded: boolean = false
   private cameraEnabled: boolean = false
 
+  // ─── Deterrent mode ──────────────────────
+  // Product strategy: the camera + live AI overlay exist to DETER cheating (a
+  // candidate who believes they're being watched behaves honestly). We deliberately
+  // do NOT accuse honest users with "phone detected" / "devtools detected" popups,
+  // deduct their score, or record violations — false positives just confuse people.
+  // When true (the default): every hard-violation flag, violation toast, score
+  // deduction and recording is suppressed. Face/eye/iris tracking, the on-video
+  // overlay and the live "monitoring" status all keep running for the deterrent
+  // effect. Set false to restore full enforcement/recording.
+  private deterrentMode: boolean = true
+
   // ─── Detection state ─────────────────────
   private stopped: boolean = false
   private isRunningFace: boolean = false
@@ -148,6 +160,19 @@ export class ProctoringEngine {
     level: 'unknown', score: 100, color: 'gray', message: 'Starting…',
     gazeDirection: 'center', faceCount: 0, faceBox: null, leftEyeBox: null, rightEyeBox: null
   }
+
+  // ─── Video enhancement pipeline ──────────
+  // Raw webcam frames (dark/noisy/soft on low-end laptops) are preprocessed into an
+  // offscreen canvas BEFORE detection; the detectors run on the enhanced frame while
+  // the displayed PIP keeps its smooth native feed. See videoEnhancement.ts.
+  private enhancer: VideoEnhancer = new VideoEnhancer({ maxWidth: 640 })
+  private enhancedCanvas: HTMLCanvasElement | null = null
+  private quality: QualityMetrics | null = null
+  private enhanceState: EnhanceState | null = null
+  private lastFaceBox: Box | null = null
+  // Detection-FPS measurement (rolling, from the face-loop cadence).
+  private lastFaceTs = 0
+  private detectFps = 0
 
   // Loop timing.
   private readonly FACE_INTERVAL = 100      // 10fps
@@ -254,10 +279,43 @@ export class ProctoringEngine {
 
   isIrisLoaded(): boolean { return this.irisModelLoaded }
   isModelLoaded(): boolean { return this.modelLoaded }
+  // COCO-SSD (phone/object layer) load status — null model = layer silently off.
+  isObjectModelLoaded(): boolean { return this.model !== null }
   isCameraEnabled(): boolean { return this.cameraEnabled }
   getStream(): MediaStream | null { return this.stream }
   getAttentionState(): AttentionState { return this.attentionState }
   getMotionLevel(): number { return this.motionLevel }
+
+  // ─── Enhancement / quality accessors (for the live quality panel) ──
+  getQuality(): QualityMetrics | null {
+    if (this.quality) this.quality.fps = Math.round(this.detectFps)
+    return this.quality
+  }
+  getEnhanceState(): EnhanceState | null { return this.enhanceState }
+  getDetectFps(): number { return Math.round(this.detectFps) }
+  setEnhancementEnabled(on: boolean) { this.enhancer.setEnabled(on) }
+
+  // Preprocess the current frame; the detectors run on the returned canvas. The
+  // enhanced canvas is shared with the iris/object loops for the same frame. Falls
+  // back to the raw <video> if enhancement is disabled or errors out.
+  private refreshEnhancedFrame(v: HTMLVideoElement): HTMLVideoElement | HTMLCanvasElement {
+    try {
+      const { canvas, metrics, state } = this.enhancer.process(v, this.lastFaceBox)
+      this.enhancedCanvas = canvas
+      this.quality = metrics
+      this.enhanceState = state
+      return canvas
+    } catch {
+      this.enhancedCanvas = null
+      return v
+    }
+  }
+
+  // Size of the frame the detectors actually see (enhanced canvas, else raw video).
+  private inferenceSize(): { w: number; h: number } {
+    if (this.enhancedCanvas) return { w: this.enhancedCanvas.width, h: this.enhancedCanvas.height }
+    return { w: this.videoElement?.videoWidth || 640, h: this.videoElement?.videoHeight || 480 }
+  }
 
   attachVideo(videoEl: HTMLVideoElement) { this.videoElement = videoEl }
   attachCanvas(canvasEl: HTMLCanvasElement) {
@@ -333,9 +391,24 @@ export class ProctoringEngine {
 
     this.isRunningFace = true
     try {
+      // Rolling detection-FPS from the actual face-loop cadence.
+      const nowTs = performance.now()
+      if (this.lastFaceTs) {
+        const inst = 1000 / Math.max(1, nowTs - this.lastFaceTs)
+        this.detectFps = this.detectFps ? this.detectFps * 0.8 + inst * 0.2 : inst
+      }
+      this.lastFaceTs = nowTs
+
+      // Enhance the current frame (WB/exposure/gamma/denoise/sharpen + face-ROI
+      // boost using last frame's box) and detect on THAT, not the raw video.
+      const input = this.refreshEnhancedFrame(v)
+
       const detections = await faceapi
-        .detectAllFaces(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.2 }))
+        .detectAllFaces(input, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.2 }))
         .withFaceLandmarks(true)
+      this.lastFaceBox = detections?.[0]?.detection?.box
+        ? { x: detections[0].detection.box.x, y: detections[0].detection.box.y, width: detections[0].detection.box.width, height: detections[0].detection.box.height }
+        : null
       this.processFaceDetection(detections)
       if (this.detectionCanvas) this.drawOverlay(detections)
     } catch { /* silent */ }
@@ -374,7 +447,7 @@ export class ProctoringEngine {
         if (this.consecutiveNoFace === 8) {
           // Flip the UI overlay fast; hard score flag waits for 3s.
           this.wasAway = true
-          this.onViolationCallback?.('face_away')
+          this.fireViolation('face_away')
         }
         if (this.consecutiveNoFace === 30) { // 3s
           const nowAbsent = Date.now()
@@ -529,7 +602,7 @@ export class ProctoringEngine {
         type: 'multiple_persons', severity: 'severe', timestamp: now,
         details: `${count} faces in frame`, questionNumber: this.currentQuestion,
       })
-      this.onViolationCallback?.('multiple_persons')
+      this.fireViolation('multiple_persons')
     }
   }
 
@@ -603,14 +676,19 @@ export class ProctoringEngine {
     const totalPixels = 160 * 120
     const avgBrightness = totalBrightness / totalPixels
 
-    // Isolated bright rectangle in an otherwise normal scene ⇒ likely a screen.
-    const rects = this.findBrightRectangles(brightRegions)
-    for (const rect of rects) {
-      const isPhoneShaped =
-        (rect.height / rect.width > 1.2 || rect.width / rect.height > 1.2) &&
-        rect.area > 200 && rect.area < totalPixels * 0.4
-      if (isPhoneShaped) {
-        this.flagPhoneDetected('BRIGHTNESS', 'N/A', `Bright screen rectangle detected — possible phone/device. Brightness: ${rect.brightness.toFixed(0)}%`)
+    // Isolated bright rectangle ⇒ possible glowing screen. This heuristic is only
+    // trustworthy in a DIM room (a phone screen stands out); in normal lighting a
+    // bright rectangle is usually a window/lamp/paper and would false-fire, burning
+    // the shared 30s phone cooldown and masking real COCO-SSD detections.
+    if (avgBrightness < 60) {
+      const rects = this.findBrightRectangles(brightRegions)
+      for (const rect of rects) {
+        const isPhoneShaped =
+          (rect.height / rect.width > 1.2 || rect.width / rect.height > 1.2) &&
+          rect.area > 200 && rect.area < totalPixels * 0.4
+        if (isPhoneShaped) {
+          this.flagPhoneDetected('BRIGHTNESS', 'N/A', `Bright screen in a dark room — possible phone/device. Brightness: ${rect.brightness.toFixed(0)}%`)
+        }
       }
     }
 
@@ -724,7 +802,7 @@ export class ProctoringEngine {
             type: 'multiple_persons', severity: 'severe', timestamp: now,
             details: 'Additional person detected after movement', questionNumber: this.currentQuestion,
           })
-          this.onViolationCallback?.('multiple_persons')
+          this.fireViolation('multiple_persons')
         }
       }
     } catch { /* silent */ }
@@ -739,6 +817,10 @@ export class ProctoringEngine {
     if (this.model && v && v.readyState === 4 && !this.isRunningObject) {
       this.isRunningObject = true
       try {
+        // COCO-SSD runs on the RAW video, NOT the enhanced canvas: the enhancement
+        // is tuned for faces (heavy unsharp + face-ROI lift + 640px downscale) and
+        // actively hurts small-object detection like a distant phone. Face/iris keep
+        // the enhanced input; the object layer wants the untouched native frame.
         const predictions = await this.model.detect(v)
         this.analyzeDetections(predictions)
       } catch { /* silent */ }
@@ -750,7 +832,7 @@ export class ProctoringEngine {
   private analyzeDetections(predictions: cocoSsd.DetectedObject[]) {
     const detected = predictions.map(p => ({ class: p.class, score: p.score, bbox: p.bbox }))
 
-    const phones = detected.filter(d => d.class === 'cell phone' && d.score > 0.5)
+    const phones = detected.filter(d => d.class === 'cell phone' && d.score > 0.4)
     if (phones.length > 0) {
       this.flagPhoneDetected('COCO-SSD', `${Math.round(phones[0].score * 100)}%`, `Mobile phone detected by object detection — position: ${this.getBboxPosition(phones[0].bbox)}`)
     }
@@ -770,6 +852,7 @@ export class ProctoringEngine {
   }
 
   private getBboxPosition(bbox: number[]): string {
+    // Object detection runs on the RAW video → bbox coords are in native space.
     const fw = this.videoElement?.videoWidth || 640
     const fh = this.videoElement?.videoHeight || 480
     const cx = (bbox[0] + bbox[2] / 2) / fw
@@ -792,7 +875,7 @@ export class ProctoringEngine {
       details: `[${source}] ${details}${conf}`,
       questionNumber: this.currentQuestion,
     })
-    this.onViolationCallback?.('phone_detected')
+    this.fireViolation('phone_detected')
   }
 
   // ─── LAYER 5 — MEDIAPIPE IRIS (true pupil-position gaze) ──
@@ -806,7 +889,7 @@ export class ProctoringEngine {
     }
     this.isRunningIris = true
     try {
-      const faces = await this.irisModel.estimateFaces(v)
+      const faces = await this.irisModel.estimateFaces(this.enhancedCanvas || v)
       if (faces && faces.length > 0) this.processIrisData(faces[0])
     } catch { /* silent */ }
     this.isRunningIris = false
@@ -920,7 +1003,7 @@ export class ProctoringEngine {
           details: `IRIS TRACKING: eyes off-centre for ${recentAway}/15 frames (avg X=${avgPos.toFixed(2)}, centre≈${center}). Possible cheating detected.`,
           questionNumber: this.currentQuestion,
         })
-        this.onViolationCallback?.('eyes_off_screen')
+        this.fireViolation('eyes_off_screen')
         this.irisHistory = []
       }
     }
@@ -973,10 +1056,13 @@ export class ProctoringEngine {
     if (!this.detectionCanvas || !this.detectionCtx || !this.videoElement) return
     const ctx = this.detectionCtx
     const canvas = this.detectionCanvas
-    const video = this.videoElement
 
-    canvas.width = video.videoWidth || 640
-    canvas.height = video.videoHeight || 480
+    // Match the overlay to the frame the detectors saw (enhanced canvas, else video)
+    // so face/eye/iris boxes land on the right pixels. Aspect ratio is preserved and
+    // both the <video> and overlay use object-fit:cover, so they stay aligned.
+    const { w: inW, h: inH } = this.inferenceSize()
+    canvas.width = inW
+    canvas.height = inH
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
     if (!detections || detections.length === 0) {
@@ -1132,7 +1218,7 @@ export class ProctoringEngine {
           type: 'fullscreen_exit', severity: 'high', timestamp: Date.now(),
           details: 'Exited fullscreen mode during assessment', questionNumber: this.currentQuestion
         })
-        this.onViolationCallback?.('fullscreen_exit')
+        this.fireViolation('fullscreen_exit')
         setTimeout(() => { this.requestFullscreen() }, 2000)
       }
     }
@@ -1152,7 +1238,7 @@ export class ProctoringEngine {
           details: `Tab/window switch detected (#${this.tabSwitchCount})`,
           questionNumber: this.currentQuestion
         })
-        this.onViolationCallback?.('tab_switch')
+        this.fireViolation('tab_switch')
       }
     }
     document.addEventListener('visibilitychange', this.visibilityHandler)
@@ -1189,12 +1275,12 @@ export class ProctoringEngine {
         }
         if (e.key === 'PrintScreen') {
           this.addFlag({ type: 'screenshot_attempt', severity: 'high', timestamp: Date.now(), details: 'Screenshot key pressed', questionNumber: this.currentQuestion })
-          this.onViolationCallback?.('screenshot_attempt')
+          this.fireViolation('screenshot_attempt')
         }
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && ['i', 'j', 'c', 'k'].includes(e.key.toLowerCase())) {
           this.devToolsAttempts++
           this.addFlag({ type: 'devtools', severity: 'severe', timestamp: Date.now(), details: 'DevTools shortcut detected', questionNumber: this.currentQuestion })
-          this.onViolationCallback?.('devtools')
+          this.fireViolation('devtools')
         }
       }
     }
@@ -1227,15 +1313,55 @@ export class ProctoringEngine {
 
   // ─── DEVTOOLS DETECTION ──────────────────
 
+  // Geometry-based DevTools detection.
+  //
+  // The old version flagged whenever `outer - inner > 160`. That is a FALSE-POSITIVE
+  // magnet: normal browser chrome (tab strip + omnibox + bookmarks bar ≈ 120-160px),
+  // a downloads bar, zoom ≠ 100%, or a fullscreen transition all trip it with no
+  // devtools open — and because it ran every 3s with an additive −25 integrity hit
+  // and no dedup, a benign layout collapsed the score to 0 in ~12s.
+  //
+  // New approach: only trust the geometry while the assessment is in FULLSCREEN
+  // (chrome hidden → any large outer/inner gap really is a docked panel). Capture a
+  // per-session baseline once fullscreen is stable, flag only on a LARGE SUDDEN
+  // increase over that baseline, require two consecutive positive samples, and raise
+  // at most one flag per open (reset when it closes). Keyboard-chord detection in
+  // setupKeyboardBlocking() remains the primary, always-on signal.
+  private dtBaseW = 0
+  private dtBaseH = 0
+  private dtBaselineSet = false
+  private dtConsecutive = 0
+  private dtFlagged = false
   setupDevToolsDetection() {
-    const threshold = 160
+    const DELTA_MARGIN = 220   // a docked devtools pane is far wider than any toolbar
     this.devToolsInterval = setInterval(() => {
+      // Outside fullscreen the browser chrome is visible and the geometry is
+      // meaningless — skip entirely and re-baseline on the next fullscreen tick.
+      if (!document.fullscreenElement) { this.dtBaselineSet = false; this.dtConsecutive = 0; return }
+
       const widthDiff = window.outerWidth - window.innerWidth
       const heightDiff = window.outerHeight - window.innerHeight
-      if (widthDiff > threshold || heightDiff > threshold) {
-        this.devToolsAttempts++
-        this.addFlag({ type: 'devtools', severity: 'severe', timestamp: Date.now(), details: 'DevTools panel detected open', questionNumber: this.currentQuestion })
-        this.onViolationCallback?.('devtools')
+
+      if (!this.dtBaselineSet) {
+        // First stable fullscreen sample = this machine's normal outer/inner gap.
+        this.dtBaseW = widthDiff; this.dtBaseH = heightDiff; this.dtBaselineSet = true
+        return
+      }
+
+      const opened = (widthDiff - this.dtBaseW > DELTA_MARGIN) || (heightDiff - this.dtBaseH > DELTA_MARGIN)
+      if (opened) {
+        this.dtConsecutive++
+        if (this.dtConsecutive >= 2 && !this.dtFlagged) {
+          this.dtFlagged = true
+          this.devToolsAttempts++
+          this.addFlag({ type: 'devtools', severity: 'severe', timestamp: Date.now(), details: 'DevTools panel detected (viewport shrunk by a docked pane)', questionNumber: this.currentQuestion })
+          this.fireViolation('devtools')
+        }
+      } else {
+        // Panel closed / transient blip — reset so a later genuine open can re-flag,
+        // but a single benign sample can never raise a flag.
+        this.dtConsecutive = 0
+        this.dtFlagged = false
       }
     }, 3000)
   }
@@ -1257,9 +1383,23 @@ export class ProctoringEngine {
   // ─── FLAG MANAGEMENT ─────────────────────
 
   addFlag(flag: ProctoringFlag) {
+    // Deterrent mode: never record a violation or surface its toast/flag-list entry.
+    // With no flags stored, the integrity score stays 100 and the report is clean.
+    if (this.deterrentMode) return
     this.flags.push(flag)
     this.onFlagCallback?.(flag)
   }
+
+  // Central gate for the red "violation" toasts. Suppressed in deterrent mode so the
+  // candidate is never accused; full proctoring still fires them when disabled.
+  private fireViolation(type: string) {
+    if (this.deterrentMode) return
+    this.onViolationCallback?.(type)
+  }
+
+  // Toggle enforcement. true = deterrent-only (default); false = full recording.
+  setDeterrentMode(on: boolean) { this.deterrentMode = on }
+  isDeterrentMode(): boolean { return this.deterrentMode }
 
   getFlags(): ProctoringFlag[] { return this.flags }
 
@@ -1333,6 +1473,11 @@ export class ProctoringEngine {
     this.irisHistory = []
     this.lastLeftIris = null
     this.lastRightIris = null
+
+    try { this.enhancer.dispose() } catch { /* ignore */ }
+    this.enhancedCanvas = null
+    this.quality = null
+    this.enhanceState = null
 
     this.detectionCanvas = null
     this.detectionCtx = null

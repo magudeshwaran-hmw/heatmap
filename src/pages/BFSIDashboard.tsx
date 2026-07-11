@@ -17,7 +17,7 @@ import {
   Upload, FileText, Download, Search, Filter, ChevronRight,
   Briefcase, GraduationCap, Clock, CheckCircle, XCircle,
   BarChart3, PieChart, Calendar, ArrowRight, Sparkles,
-  Shield, CreditCard, Landmark, FileSpreadsheet, Plus, Trash2, RefreshCw
+  Shield, CreditCard, Landmark, FileSpreadsheet, Plus, Trash2, RefreshCw, MapPin
 } from 'lucide-react';
 
 // Types
@@ -305,6 +305,8 @@ export default function BFSIDashboard() {
   const [zfSearched, setZfSearched]     = useState(false);
   const [zfScorePopup, setZfScorePopup] = useState<any | null>(null);
   const [cardSelectedRoleMap, setCardSelectedRoleMap] = useState<Record<string, string>>({});
+  // The structured filters ZenFinder extracted from the last query (for the chip row).
+  const [zfParsed, setZfParsed] = useState<{ skillTerms: string[]; locationTerms: string[]; wantsPool: boolean; agingMax: number | null; agingMin: number | null; customer: string } | null>(null);
 
   // ── ZenFinder: detect search intent from query ──
   const detectZenFinderIntent = (q: string): 'certification' | 'achievement' | 'skill' | 'project' | 'general' => {
@@ -321,15 +323,59 @@ export default function BFSIDashboard() {
     return 'general';
   };
 
-  // ── ZenFinder: parse query into skill terms and location terms ──
+  // ── ZenFinder: parse query into skill terms, location terms + structured filters ──
   const LOCATION_WORDS = ['pune', 'hyderabad', 'bangalore', 'bengaluru', 'chennai', 'mumbai', 'noida', 'delhi', 'gurgaon', 'gurugram', 'india', 'offshore', 'onshore', 'uk', 'usa', 'remote'];
   const STOP_WORDS = ['in', 'at', 'with', 'and', 'or', 'for', 'the', 'a', 'an', 'developer', 'engineer', 'tester', 'who', 'has', 'have', 'from', 'based'];
+  // Words that describe a FILTER, not a skill — these must be pulled OUT of the skill
+  // terms, otherwise the AND-matcher looks for a skill literally called "pool" / "days"
+  // and returns nothing (the "automation testing in pool" → No-data bug).
+  const AVAIL_WORDS = ['available', 'availability', 'bench', 'free', 'pool', 'unallocated', 'deployable'];
+  const AGING_WORDS = ['aging', 'ageing', 'age', 'day', 'days'];
+  const CMP_LT = ['below', 'under', 'less', 'lessthan', 'lessthen', 'within', 'max', 'maximum', 'upto', 'fewer', 'atmost'];
+  const CMP_GT = ['above', 'over', 'more', 'morethan', 'morethen', 'min', 'minimum', 'greater', 'greaterthan', 'greaterthen', 'older', 'atleast'];
+  const FILTER_NOISE = [
+    ...AVAIL_WORDS, ...AGING_WORDS, ...CMP_LT, ...CMP_GT,
+    'than', 'range', 'ranges', 'between', 'open', 'position', 'positions',
+    'resource', 'resources', 'employee', 'employees', 'people', 'need', 'want',
+    'show', 'give', 'list', 'find', 'me', 'all', 'are', 'is',
+  ];
 
+  // Extracts everything ZenFinder understands from a natural-language query:
+  //   skill terms, location, "pool/bench" intent, and an ageing-days range.
   const parseQuery = (q: string) => {
-    const words = q.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    const raw = q.toLowerCase();
+    const words = raw.split(/\s+/).filter(w => w.length > 1);
     const locationTerms = words.filter(w => LOCATION_WORDS.some(l => w.includes(l)));
-    const skillTerms = words.filter(w => !LOCATION_WORDS.some(l => w.includes(l)) && !STOP_WORDS.includes(w) && w.length > 2);
-    return { skillTerms, locationTerms, allWords: words };
+
+    // Pool / bench / availability intent.
+    const wantsPool = words.some(w => AVAIL_WORDS.includes(w));
+
+    // Ageing-days constraint: "aging 10 days", "10 days below", "under 15 days",
+    // "30+ days", "between 5 and 20 days".
+    let agingMax: number | null = null, agingMin: number | null = null;
+    const betweenM = raw.match(/between\s+(\d+)\s+and\s+(\d+)\s*days?/);
+    if (betweenM) { agingMin = +betweenM[1]; agingMax = +betweenM[2]; }
+    else {
+      const dayM = raw.match(/(\d+)\s*\+?\s*days?/) || raw.match(/(?:aging|ageing|age)\D{0,10}(\d+)/);
+      if (dayM) {
+        const n = parseInt(dayM[1], 10);
+        const hasGt = CMP_GT.some(w => words.includes(w)) || /\d+\s*\+/.test(raw);
+        const hasLt = CMP_LT.some(w => words.includes(w));
+        if (hasGt && !hasLt) agingMin = n;
+        else agingMax = n; // default & "below/under/within" → ≤ N days on bench
+      }
+    }
+
+    // Skill terms = whatever is left after stripping locations, stop words, filter
+    // noise and bare numbers.
+    const skillTerms = words.filter(w =>
+      !LOCATION_WORDS.some(l => w.includes(l)) &&
+      !STOP_WORDS.includes(w) &&
+      !FILTER_NOISE.includes(w) &&
+      !/^\d+\+?$/.test(w) &&
+      w.length > 2
+    );
+    return { skillTerms, locationTerms, allWords: words, wantsPool, agingMax, agingMin };
   };
 
   // ── ZenFinder: shared search function ──
@@ -339,15 +385,42 @@ export default function BFSIDashboard() {
     setZfSearched(true);
     const q = rawQuery.trim().toLowerCase();
     const intent = detectZenFinderIntent(q);
-    const { skillTerms, locationTerms, allWords } = parseQuery(q);
+    const parsed = parseQuery(q);
+    const { locationTerms, allWords, wantsPool, agingMax, agingMin } = parsed;
+    let skillTerms = parsed.skillTerms;
+
+    // ── Customer / customer-group filter ──
+    // Recognise a customer name typed in the query (from the actual workforce data) so
+    // e.g. "MACYS SYSTEMS AND TECHNOLOGY INC" is treated as a CUSTOMER filter, not a
+    // skill — otherwise its words leak into the skill terms and match nothing.
+    const normalizeName = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const qNorm = normalizeName(q);
+    let customerFilter = '';   // normalized matched customer name
+    let customerLabel = '';    // original-cased name (for the chip)
+    let customerTokens: string[] = [];
+    const seenCust = new Set<string>();
+    for (const e of currentWorkforce) {
+      const cn = ((e as any).customer_group || e.customer || '') as string;
+      if (!cn || seenCust.has(cn)) continue;
+      seenCust.add(cn);
+      const cnNorm = normalizeName(cn);
+      if (!cnNorm) continue;
+      const toks = cnNorm.split(' ').filter(w => w.length > 2 && !STOP_WORDS.includes(w));
+      const allPresent = toks.length > 0 && toks.every(t => qNorm.includes(t));
+      if ((qNorm.includes(cnNorm) || allPresent) && cnNorm.length > customerFilter.length) {
+        customerFilter = cnNorm; customerLabel = cn; customerTokens = toks;
+      }
+    }
+    if (customerFilter) skillTerms = skillTerms.filter(w => !customerTokens.includes(w));
+
+    setZfParsed({ skillTerms, locationTerms, wantsPool, agingMax, agingMin, customer: customerLabel });
 
     // Parse open positions count (N)
     const posMatch = rawQuery.match(/(\d+)\s*(?:open\s*)?positions?/i);
     const maxResults = posMatch ? parseInt(posMatch[1], 10) : 50;
 
-    // Detect availability filter
-    const availKeywords = ['available', 'bench', 'free', 'pool', 'unallocated'];
-    const filterAvailability = allWords.some(w => availKeywords.includes(w));
+    // Availability (pool/bench) filter — extracted by parseQuery.
+    const filterAvailability = wantsPool;
 
     // Detect domain terms
     const domainKeywords = ['bfsi', 'banking', 'finance', 'insurance', 'healthcare', 'retail', 'telecom', 'ecommerce'];
@@ -530,22 +603,23 @@ export default function BFSIDashboard() {
         const levelOf = (d: any) => d.level ?? d.self_rating ?? d.selfRating ?? 0;
         const capOf = (lvl: number) => (lvl >= 3 ? 90 : lvl >= 2 ? 60 : 35);
 
-        // Legacy skills — used both for the verified-badge ticks AND as the fallback.
-        let legacySkills: any[] = [];
+        // Legacy `skills` table is read ONLY for the ZenAssess "authenticated ✓" tick
+        // (verified_badge_level). It is NEVER used for skill matching anymore — the
+        // 32-skill set is retired; matching runs on the QISL 162 taxonomy only.
         const verifiedBadges = new Map<string, string>(); // lower skill name → badge level
         try {
           const vbRes = await fetch(`${API_BASE}/employees/${empId}/skills`);
           if (vbRes.ok) {
-            legacySkills = await vbRes.json();
-            (legacySkills as any[]).forEach((sk: any) => {
+            const badgeRows = await vbRes.json();
+            (badgeRows as any[]).forEach((sk: any) => {
               const vb = sk.verified_badge_level || sk.verifiedBadgeLevel;
               const nm = sk.skill_name || sk.skillName;
               if (vb && nm) verifiedBadges.set(String(nm).toLowerCase(), String(vb));
             });
           }
-        } catch { /* no legacy skills */ }
+        } catch { /* no auth badges */ }
 
-        // Genesis 162 (QISL) if the person has any.
+        // Genesis 162 (QISL) — the ONE skill source of truth for the match.
         let genesisSkills: any[] = [];
         try {
           const qislRes = await fetch(`${API_BASE}/qisl-skills/${empId}`);
@@ -555,8 +629,11 @@ export default function BFSIDashboard() {
           }
         } catch { /* no QISL */ }
 
+        // QISL 162 ONLY — no legacy fallback. A pool/BFSI person with no QISL rows
+        // simply contributes no Zen-Matrix skills (their BFSI-sheet skills, certs and
+        // projects still match).
         const useGenesis = genesisSkills.length > 0;
-        const skillRows: any[] = useGenesis ? genesisSkills : (legacySkills || []);
+        const skillRows: any[] = genesisSkills;
         skills = skillRows;
 
         // Correct Genesis primary (only when we have QISL data) = same engine ZenAssess uses.
@@ -637,12 +714,21 @@ export default function BFSIDashboard() {
       // Filter by domain if domain terms were provided
       const domainOk = matchesDomain(emp);
 
-      // Filter by availability if specified
-      const availOk = !filterAvailability || (emp.status === 'Available-Pool' || emp.rmg_status === 'Bench');
+      // Filter by availability (pool / bench) if specified
+      const inPool = emp.status === 'Available-Pool' || emp.rmg_status === 'Bench' || !!emp.pool_status;
+      const availOk = !filterAvailability || inPool;
+
+      // Filter by ageing-days range if the query specified one.
+      const ageDays = Number(emp.aging_days ?? 0);
+      const agingOk = (agingMax == null || ageDays <= agingMax) && (agingMin == null || ageDays >= agingMin);
+
+      // Filter by customer / customer-group if the query named one.
+      const empCust = normalizeName(((emp as any).customer_group || emp.customer || '') as string);
+      const custOk = !customerFilter || (!!empCust && (empCust.includes(customerFilter) || customerFilter.includes(empCust)));
 
       // ── Only include if there's a real skill/cert/project match ──
       // If location was specified in query, employee MUST be in that location
-      if (score > 0 && hasSkillMatch && domainOk && availOk) {
+      if (score > 0 && hasSkillMatch && domainOk && availOk && agingOk && custOk) {
         // If query has location terms, location match is REQUIRED not optional
         if (locationTerms.length > 0 && !locMatch) {
           // Location specified but employee not in that location — skip
@@ -1008,6 +1094,7 @@ export default function BFSIDashboard() {
         setOverrideReasonInput('');
         setMatchResults(null);
         await fetchDashboardData();
+        fetchAssignments(); // so the new allocation shows in Project Allocations & Outcomes
       } else {
         toast.error(data.error || 'Failed to allocate employee');
       }
@@ -1080,6 +1167,7 @@ export default function BFSIDashboard() {
         setOverrideReasonInput('');
         setDetailModal(null);
         fetchDashboardData(); // refresh in background; keep results modal open
+        fetchAssignments();   // reflect the allocation in Project Allocations & Outcomes
       } else {
         const errMsg = data?.error || data?.message || `HTTP ${res.status}`;
         toast.error(`Failed to ${type === 'assign' ? 'allocate' : 'reserve'}: ${errMsg}`);
@@ -1110,7 +1198,7 @@ export default function BFSIDashboard() {
       }
     } catch (error) {
       console.error('Error fetching BFSI data:', error);
-      toast.error('Failed to load ZenTalenHub data');
+      toast.error('Failed to load ZenTalentHub data');
     } finally {
       setLoading(false);
     }
@@ -1161,25 +1249,30 @@ export default function BFSIDashboard() {
       setUploadStep(100);
       setUploadStepLabel('Upload complete!');
 
+      // Parse the body defensively — a crashed/restarting backend (or dev-proxy
+      // timeout) returns an EMPTY body, which res.json() turns into the cryptic
+      // "Unexpected end of JSON input". Read text first and surface the real cause.
+      const raw = await res.text().catch(() => '');
+      let data: any = {};
+      if (raw) { try { data = JSON.parse(raw); } catch { data = { error: raw.slice(0, 300) }; } }
+
       if (res.ok) {
-        const result = await res.json();
         setTimeout(() => {
           setUploading(false);
           setUploadStep(0);
-          toast.success(`Upload successful! ${result.summary?.roles || 0} roles, ${result.summary?.employees || 0} employees`);
+          toast.success(`Upload successful! ${data.summary?.roles || 0} roles, ${data.summary?.employees || 0} employees`);
           fetchDashboardData();
         }, 600);
       } else {
-        const error = await res.json();
         setUploading(false);
         setUploadStep(0);
-        toast.error(error.error || 'Upload failed');
+        toast.error(data.error || `Upload failed (HTTP ${res.status}${raw ? '' : ' — empty response; the backend may have crashed or need a restart'}).`);
       }
     } catch (error) {
       clearInterval(stepTimer);
       setUploading(false);
       setUploadStep(0);
-      toast.error('Upload error: ' + (error as Error).message);
+      toast.error('Upload error: ' + ((error as Error).message || 'network/backend unreachable — restart the backend and try again'));
     }
   };
 
@@ -1207,7 +1300,7 @@ export default function BFSIDashboard() {
       <div style={{ minHeight: '100vh', background: T.bg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div style={{ textAlign: 'center' }}>
           <div style={{ width: 48, height: 48, border: '3px solid #e2e8f0', borderTopColor: '#3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
-          <p style={{ color: T.sub }}>Loading ZenTalenHub...</p>
+          <p style={{ color: T.sub }}>Loading ZenTalentHub...</p>
         </div>
       </div>
     );
@@ -1238,14 +1331,14 @@ export default function BFSIDashboard() {
           <div style={{ display: 'flex', gap: 10 }}>
              <button 
               onClick={handleReset}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: 'transparent', color: COLORS.error, border: `1px solid ${COLORS.error}`, borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 900 }}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: 'transparent', color: COLORS.error, border: `1px solid ${COLORS.error}`, borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
             >
               <Trash2 size={16} />
-              RESET
+              Reset
             </button>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: COLORS.info, color: '#fff', borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 900, boxShadow: '0 6px 14px rgba(59, 130, 246, 0.2)' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: COLORS.info, color: '#fff', borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
               <Upload size={16} />
-              SYNC DATA
+              Sync data
               <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} disabled={uploading} style={{ display: 'none' }} />
             </label>
             <button 
@@ -1254,55 +1347,48 @@ export default function BFSIDashboard() {
                 if (res.ok) setWeeklyReport(await res.json());
                 else toast.error('Failed to generate report');
               }} 
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: dark ? '#1e293b' : '#fff', color: T.text, border: `1px solid ${T.bdr}`, borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 900 }}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', background: dark ? '#1e293b' : '#fff', color: T.text, border: `1px solid ${T.bdr}`, borderRadius: 10, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
             >
               <FileText size={16} />
-              WEEKLY REPORT
+              Weekly report
             </button>
           </div>
         </div>
 
         {/* Primary Tabs */}
-        <div style={{ background: dark ? 'rgba(30,30,45,0.4)' : 'rgba(255,255,255,0.4)', backdropFilter: 'blur(20px)', borderRadius: '20px 20px 0 0', border: `1px solid ${T.bdr}`, borderBottom: 'none', padding: '0 24px' }}>
+        <div style={{ background: T.card, borderRadius: '20px 20px 0 0', border: `1px solid ${T.bdr}`, borderBottom: 'none', padding: '0 24px' }}>
           <div style={{ display: 'flex', gap: 32 }}>
             <button 
               onClick={() => setActiveTab('supply')} 
-              style={{ padding: '18px 0', color: activeTab === 'supply' ? COLORS.info : T.sub, borderBottom: `3px solid ${activeTab === 'supply' ? COLORS.info : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+              style={{ padding: '18px 0', color: activeTab === 'supply' ? COLORS.info : T.sub, borderBottom: `3px solid ${activeTab === 'supply' ? COLORS.info : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
             >
               <Users size={16} />
               Supply Dashboard
             </button>
             <button 
               onClick={() => setActiveTab('demand')} 
-              style={{ padding: '18px 0', color: activeTab === 'demand' ? COLORS.info : T.sub, borderBottom: `3px solid ${activeTab === 'demand' ? COLORS.info : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+              style={{ padding: '18px 0', color: activeTab === 'demand' ? COLORS.info : T.sub, borderBottom: `3px solid ${activeTab === 'demand' ? COLORS.info : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
             >
               <Briefcase size={16} />
               Demand Dashboard
             </button>
             <button 
               onClick={() => setActiveTab('match')} 
-              style={{ padding: '18px 0', color: activeTab === 'match' ? COLORS.success : T.sub, borderBottom: `3px solid ${activeTab === 'match' ? COLORS.success : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+              style={{ padding: '18px 0', color: activeTab === 'match' ? COLORS.success : T.sub, borderBottom: `3px solid ${activeTab === 'match' ? COLORS.success : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
             >
               <Sparkles size={16} />
               Find a Match
             </button>
             <button 
               onClick={() => setActiveTab('zenfinder')} 
-              style={{ padding: '18px 0', color: activeTab === 'zenfinder' ? COLORS.purple : T.sub, borderBottom: `3px solid ${activeTab === 'zenfinder' ? COLORS.purple : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+              style={{ padding: '18px 0', color: activeTab === 'zenfinder' ? COLORS.purple : T.sub, borderBottom: `3px solid ${activeTab === 'zenfinder' ? COLORS.purple : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
             >
               <Search size={16} />
               ZenFinder
             </button>
-            <button 
-              onClick={() => setActiveTab('allocations')} 
-              style={{ padding: '18px 0', color: activeTab === 'allocations' ? '#EC4899' : T.sub, borderBottom: `3px solid ${activeTab === 'allocations' ? '#EC4899' : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
-            >
-              <CheckCircle size={16} />
-              Allocations
-            </button>
-            <button 
-              onClick={() => setActiveTab('analytics')} 
-              style={{ padding: '18px 0', color: activeTab === 'analytics' ? '#F59E0B' : T.sub, borderBottom: `3px solid ${activeTab === 'analytics' ? '#F59E0B' : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 900, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
+            <button
+              onClick={() => setActiveTab('analytics')}
+              style={{ padding: '18px 0', color: activeTab === 'analytics' ? '#F59E0B' : T.sub, borderBottom: `3px solid ${activeTab === 'analytics' ? '#F59E0B' : 'transparent'}`, background: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'uppercase' }}
             >
               <BarChart3 size={16} />
               Executive Analytics
@@ -1365,7 +1451,7 @@ export default function BFSIDashboard() {
                           <Users size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.info, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Pool</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.info, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Pool</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{totalPool}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Bench resources available now</div>
                         </div>
@@ -1393,7 +1479,7 @@ export default function BFSIDashboard() {
                           <Clock size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.warning, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Deallocation</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.warning, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Deallocation</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{totalDealloc}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Rolling off from projects</div>
                         </div>
@@ -1415,7 +1501,7 @@ export default function BFSIDashboard() {
                           <CheckCircle size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Supply</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.success, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Total Supply</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{totalPool + totalDealloc}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Pool {totalPool} + Deallocation {totalDealloc}</div>
                         </div>
@@ -1433,13 +1519,13 @@ export default function BFSIDashboard() {
                   <div style={{ display: 'flex', background: dark ? '#1e293b' : '#fff', padding: 6, borderRadius: 14, border: `1px solid ${T.bdr}` }}>
                     <button 
                       onClick={() => setSupplySubTab('pool')}
-                      style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: supplySubTab === 'pool' ? COLORS.info : 'transparent', color: supplySubTab === 'pool' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 900, transition: '0.3s' }}
+                      style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: supplySubTab === 'pool' ? COLORS.info : 'transparent', color: supplySubTab === 'pool' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 700, transition: '0.3s' }}
                     >
                       Pool Dashboard
                     </button>
                     <button 
                       onClick={() => setSupplySubTab('deallocation')}
-                      style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: supplySubTab === 'deallocation' ? COLORS.info : 'transparent', color: supplySubTab === 'deallocation' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 900, transition: '0.3s' }}
+                      style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: supplySubTab === 'deallocation' ? COLORS.info : 'transparent', color: supplySubTab === 'deallocation' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 700, transition: '0.3s' }}
                     >
                       Deallocation Dashboard
                     </button>
@@ -1523,13 +1609,13 @@ export default function BFSIDashboard() {
                 <div style={{ padding: '24px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                     <div style={{ width: 12, height: 12, borderRadius: '50%', background: supplySubTab === 'pool' ? COLORS.success : COLORS.warning }} />
-                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>
+                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
                       {supplySubTab === 'pool' ? 'Current Bench Resources' : 'Project Release Roadmap'}
                     </h3>
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     {/* Excel total (authoritative) */}
-                    <div style={{ padding: '4px 14px', background: supplySubTab === 'pool' ? `${COLORS.info}20` : `${COLORS.warning}20`, color: supplySubTab === 'pool' ? COLORS.info : COLORS.warning, borderRadius: 20, fontSize: 11, fontWeight: 900, border: `1px solid ${supplySubTab === 'pool' ? COLORS.info : COLORS.warning}44` }}>
+                    <div style={{ padding: '4px 14px', background: supplySubTab === 'pool' ? `${COLORS.info}20` : `${COLORS.warning}20`, color: supplySubTab === 'pool' ? COLORS.info : COLORS.warning, borderRadius: 20, fontSize: 11, fontWeight: 700, border: `1px solid ${supplySubTab === 'pool' ? COLORS.info : COLORS.warning}44` }}>
                       {supplySubTab === 'pool'
                         ? `${kpiData?.skillGaps?.reduce((s, sg) => s + (Number(sg.pool) || 0), 0) ?? 0} Total (Excel)`
                         : `${kpiData?.skillGaps?.reduce((s, sg) => s + (Number(sg.deallocation) || 0), 0) ?? 0} Total (Excel)`
@@ -1558,13 +1644,13 @@ export default function BFSIDashboard() {
                             <div style={{ padding: '16px 20px', display: 'flex', gap: 14, alignItems: 'flex-start' }}>
                               <div style={{ width: 46, height: 46, borderRadius: 12, background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 18, flexShrink: 0 }}>{emp.employee_name?.[0]}</div>
                               <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontWeight: 900, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{emp.employee_name}</div>
+                                <div style={{ fontWeight: 700, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{emp.employee_name}</div>
                                 <div style={{ fontSize: 12, color: COLORS.info, fontWeight: 700, marginTop: 1 }}>{emp.primary_skill || '—'}</div>
                                 <div style={{ fontSize: 11, color: T.sub, marginTop: 1 }}>ID: {formatZensarId(emp.employee_id)} · {(emp as any).grade || '—'} · {emp.location || '—'}</div>
                               </div>
                               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                                 <div style={{ fontSize: 22, fontWeight: 800, color: (emp.aging_days||0) > 30 ? COLORS.danger : COLORS.success, lineHeight: 1 }}>{emp.aging_days || 0}</div>
-                                <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase' }}>Days</div>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase' }}>Days</div>
                               </div>
                             </div>
                             {/* Details grid */}
@@ -1575,14 +1661,14 @@ export default function BFSIDashboard() {
                                 { label: 'PM',         value: emp.pm_name || '—' },
                               ].map(f => (
                                 <div key={f.label} style={{ padding: '8px 12px', borderRight: f.label !== 'PM' ? `1px solid ${T.bdr}` : 'none' }}>
-                                  <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
+                                  <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
                                   <div style={{ fontSize: 11, fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                                 </div>
                               ))}
                             </div>
                             {/* Footer: skills + deployable */}
                             <div style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 6, background: isDeployable ? `${COLORS.success}18` : `${COLORS.danger}18`, color: isDeployable ? COLORS.success : COLORS.danger, border: `1px solid ${isDeployable ? COLORS.success : COLORS.danger}44` }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: isDeployable ? `${COLORS.success}18` : `${COLORS.danger}18`, color: isDeployable ? COLORS.success : COLORS.danger, border: `1px solid ${isDeployable ? COLORS.success : COLORS.danger}44` }}>
                                 {isDeployable ? '✅ Deployable' : '❌ Not Deployable'}
                               </span>
                               {(emp.current_skills || []).filter(s => s && s !== 'NOT_AVAILABLE').slice(0, 3).map((s, j) => (
@@ -1620,7 +1706,7 @@ export default function BFSIDashboard() {
                             <div style={{ padding: '14px 18px', display: 'flex', gap: 14, alignItems: 'flex-start' }}>
                               <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg,${urgency},${urgency}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 17, flexShrink: 0 }}>{emp.employee_name?.[0]}</div>
                               <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontWeight: 900, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{emp.employee_name}</div>
+                                <div style={{ fontWeight: 700, fontSize: 14, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{emp.employee_name}</div>
                                 <div style={{ fontSize: 12, color: COLORS.info, fontWeight: 700, marginTop: 1 }}>{emp.primary_skill || '—'}</div>
                                 <div style={{ fontSize: 11, color: T.sub, marginTop: 1 }}>ID: {formatZensarId(emp.employee_id)} · {(emp as any).band || '—'} · {emp.location || '—'}</div>
                               </div>
@@ -1628,7 +1714,7 @@ export default function BFSIDashboard() {
                                 <div style={{ fontSize: 18, fontWeight: 800, color: urgency, lineHeight: 1 }}>
                                   {daysLeft < 0 ? 'PAST' : Math.abs(daysLeft)}
                                 </div>
-                                <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>
                                   {daysLeft < 0 ? 'Overdue' : 'Days Left'}
                                 </div>
                                 <div style={{ fontSize: 10, color: urgency, fontWeight: 800, marginTop: 3 }}>📅 {releaseDate}</div>
@@ -1642,7 +1728,7 @@ export default function BFSIDashboard() {
                                 { label: 'PM',       value: emp.pm_name || '—' },
                               ].map(f => (
                                 <div key={f.label} style={{ padding: '8px 12px', borderRight: f.label !== 'PM' ? `1px solid ${T.bdr}` : 'none' }}>
-                                  <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
+                                  <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
                                   <div style={{ fontSize: 11, fontWeight: 700, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                                 </div>
                               ))}
@@ -1692,7 +1778,7 @@ export default function BFSIDashboard() {
                           <Briefcase size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.danger, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Reactive SRF Total</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.danger, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Reactive SRF Total</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{reactiveSRF}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Urgent open positions</div>
                         </div>
@@ -1717,7 +1803,7 @@ export default function BFSIDashboard() {
                           <Target size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.purple, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Proactive SRF Total</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.purple, textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Proactive SRF Total</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{proactiveSRF}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Pipeline positions</div>
                         </div>
@@ -1739,7 +1825,7 @@ export default function BFSIDashboard() {
                           <CheckCircle size={26} color="#fff" />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: '#4f46e5', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Demand Total</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: '#4f46e5', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4 }}>Demand Total</div>
                           <div style={{ fontSize: 38, fontWeight: 800, color: T.text, lineHeight: 1 }}>{demandTotal}</div>
                           <div style={{ fontSize: 12, color: T.sub, marginTop: 5 }}>Reactive {reactiveSRF} + Proactive {proactiveSRF}</div>
                         </div>
@@ -1759,13 +1845,13 @@ export default function BFSIDashboard() {
                     <div style={{ display: 'flex', background: dark ? '#1e293b' : '#fff', padding: 6, borderRadius: 14, border: `1px solid ${T.bdr}` }}>
                       <button
                         onClick={() => setDemandSubTab('reactive')}
-                        style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: demandSubTab === 'reactive' ? COLORS.danger : 'transparent', color: demandSubTab === 'reactive' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 900, transition: '0.3s' }}
+                        style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: demandSubTab === 'reactive' ? COLORS.danger : 'transparent', color: demandSubTab === 'reactive' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 700, transition: '0.3s' }}
                       >
                         Reactive SRF
                       </button>
                       <button
                         onClick={() => setDemandSubTab('proactive')}
-                        style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: demandSubTab === 'proactive' ? COLORS.purple : 'transparent', color: demandSubTab === 'proactive' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 900, transition: '0.3s' }}
+                        style={{ padding: '12px 32px', borderRadius: 10, border: 'none', background: demandSubTab === 'proactive' ? COLORS.purple : 'transparent', color: demandSubTab === 'proactive' ? '#fff' : T.sub, cursor: 'pointer', fontSize: 14, fontWeight: 700, transition: '0.3s' }}
                       >
                         Proactive SRF
                       </button>
@@ -1843,7 +1929,7 @@ export default function BFSIDashboard() {
 
               <div style={{ background: dark ? '#0f172a' : '#fff', borderRadius: 20, border: `1px solid ${T.bdr}`, overflow: 'hidden' }}>
                 <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>
+                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
                     {demandSubTab === 'reactive' ? '🔴 Reactive SRFs' : '🟣 Proactive SRFs'}
                     <span style={{ marginLeft: 10, fontSize: 13, fontWeight: 700, color: T.sub }}>({filteredRoles.length} shown)</span>
                   </h3>
@@ -1863,9 +1949,9 @@ export default function BFSIDashboard() {
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                              <span style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{role.role_title}</span>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || '—'}</span>
+                              <span style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{role.role_title}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || '—'}</span>
                             </div>
                             <div style={{ fontSize: 12, color: T.sub }}>
                               SRF: <strong style={{ color: T.text }}>{role.role_id}</strong>
@@ -1885,7 +1971,7 @@ export default function BFSIDashboard() {
                             { label: 'Month',      value: meta.month || '—' },
                           ].map((f, fi) => (
                             <div key={f.label} style={{ padding: '10px 14px', borderRight: fi < 5 ? `1px solid ${T.bdr}` : 'none' }}>
-                              <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
                               <div style={{ fontSize: 12, fontWeight: 800, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                             </div>
                           ))}
@@ -1939,21 +2025,20 @@ export default function BFSIDashboard() {
                   <Search size={20} color={T.sub} style={{ position: 'absolute', left: 20, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                   <input
                     type="text"
-                    placeholder="🔍 Start typing SRF number, skill, customer, location... (e.g., 141816, SDET, Entain, UK)"
+                    placeholder="Search SRF number, skill, customer or location — e.g. 141816, SDET, Entain, UK"
                     value={dSearch}
                     onChange={e => setDSearch(e.target.value)}
                     style={{
                       width: '100%',
-                      padding: '18px 20px 18px 56px',
-                      borderRadius: 16,
-                      border: `2px solid ${dSearch ? COLORS.success : T.bdr}`,
-                      background: dark ? '#1e293b' : '#fff',
+                      padding: '15px 20px 15px 52px',
+                      borderRadius: 12,
+                      border: `1px solid ${dSearch ? COLORS.success : T.bdr}`,
+                      background: T.input || (dark ? '#1e293b' : '#fff'),
                       color: T.text,
-                      fontSize: 15,
-                      fontWeight: 600,
+                      fontSize: 14,
+                      fontWeight: 500,
                       outline: 'none',
-                      transition: 'all 0.3s',
-                      boxShadow: dSearch ? `0 8px 24px rgba(16,185,129,0.15)` : 'none'
+                      transition: 'border-color 0.2s',
                     }}
                   />
                   {dSearch && (
@@ -1979,12 +2064,12 @@ export default function BFSIDashboard() {
 
                 {/* Smart Filters - Auto-populated from data */}
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 }}>
-                  {filterSelect('🎯 Skill', dSkill, setDSkill, uniq(roles.map(r => r.required_skills?.[0])), COLORS.success)}
-                  {filterSelect('🏢 Customer', dCustomer, setDCustomer, uniq(roles.map(r => r.client_name)), COLORS.info)}
-                  {filterSelect('🌍 Location', dCountry, setDCountry, uniq(roles.map(r => r.location)), COLORS.purple)}
-                  {filterSelect('📊 Grade', dGrade, setDGrade, uniq(roles.map(r => parseMeta(r).grade)), COLORS.warning)}
-                  {filterSelect('⚡ Priority', dPriority, setDPriority, uniq(roles.map(r => r.fill_priority)), COLORS.danger)}
-                  {filterSelect('📅 Month', dMonth, setDMonth, uniq(roles.map(r => parseMeta(r).month)), COLORS.info)}
+                  {filterSelect('Skill', dSkill, setDSkill, uniq(roles.map(r => r.required_skills?.[0])), COLORS.success)}
+                  {filterSelect('Customer', dCustomer, setDCustomer, uniq(roles.map(r => r.client_name)), COLORS.info)}
+                  {filterSelect('Location', dCountry, setDCountry, uniq(roles.map(r => r.location)), COLORS.purple)}
+                  {filterSelect('Grade', dGrade, setDGrade, uniq(roles.map(r => parseMeta(r).grade)), COLORS.warning)}
+                  {filterSelect('Priority', dPriority, setDPriority, uniq(roles.map(r => r.fill_priority)), COLORS.danger)}
+                  {filterSelect('Month', dMonth, setDMonth, uniq(roles.map(r => parseMeta(r).month)), COLORS.info)}
                   
                   {/* Clear All Filters Button */}
                   {(dSkill !== 'All' || dCustomer !== 'All' || dCountry !== 'All' || dGrade !== 'All' || dPriority !== 'All' || dMonth !== 'All' || dSearch) && (
@@ -2021,16 +2106,16 @@ export default function BFSIDashboard() {
                 {/* Summary Stats */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
                   <div style={{ background: 'linear-gradient(135deg, rgba(239,68,68,0.1), rgba(249,115,22,0.05))', borderRadius: 14, padding: '16px 20px', border: `2px solid ${COLORS.danger}44` }}>
-                    <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.danger, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Open SRFs</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.danger, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Open SRFs</div>
                     <div style={{ fontSize: 32, fontWeight: 800, color: T.text, lineHeight: 1 }}>{filteredRoles.length}</div>
                   </div>
                   <div style={{ background: 'linear-gradient(135deg, rgba(59,130,246,0.1), rgba(99,102,241,0.05))', borderRadius: 14, padding: '16px 20px', border: `2px solid ${COLORS.info}44` }}>
-                    <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.info, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Pool Available</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.info, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Pool Available</div>
                     <div style={{ fontSize: 32, fontWeight: 800, color: T.text, lineHeight: 1 }}>{workforce.filter(w => w.status === 'Available-Pool').length}</div>
                     <div style={{ fontSize: 11, color: T.sub, marginTop: 4 }}>Excel data</div>
                   </div>
                   <div style={{ background: 'linear-gradient(135deg, rgba(245,158,11,0.1), rgba(249,115,22,0.05))', borderRadius: 14, padding: '16px 20px', border: `2px solid ${COLORS.warning}44` }}>
-                    <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.warning, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Deallocating</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.warning, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Deallocating</div>
                     <div style={{ fontSize: 32, fontWeight: 800, color: T.text, lineHeight: 1 }}>{workforce.filter(w => w.status === 'Deallocating').length}</div>
                     <div style={{ fontSize: 11, color: T.sub, marginTop: 4 }}>Excel data</div>
                   </div>
@@ -2041,7 +2126,7 @@ export default function BFSIDashboard() {
               <div style={{ background: dark ? '#0f172a' : '#fff', borderRadius: 20, border: `1px solid ${T.bdr}`, overflow: 'hidden' }}>
                 <div style={{ padding: '24px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <div>
-                    <h3 style={{ margin: 0, fontSize: 20, fontWeight: 900, color: T.text }}>Open Positions Ready for Matching</h3>
+                    <h3 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: T.text }}>Open Positions Ready for Matching</h3>
                     <p style={{ margin: '4px 0 0', fontSize: 13, color: T.sub }}>
                       {filteredRoles.length} SRFs · Click "Find Matches" to see available talent
                     </p>
@@ -2076,9 +2161,9 @@ export default function BFSIDashboard() {
                               </div>
                               <div style={{ flex: 1, minWidth: 0 }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                                  <span style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{role.role_title}</span>
-                                  <span style={{ fontSize: 10, fontWeight: 900, padding: '3px 10px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
-                                  <span style={{ fontSize: 10, fontWeight: 900, padding: '3px 10px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || 'P3'}</span>
+                                  <span style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{role.role_title}</span>
+                                  <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
+                                  <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || 'P3'}</span>
                                 </div>
                                 <div style={{ fontSize: 12, color: T.sub, marginTop: 2 }}>
                                   SRF: <strong style={{ color: COLORS.info }}>{role.role_id}</strong>
@@ -2095,7 +2180,7 @@ export default function BFSIDashboard() {
                                 { label: 'Grade', value: meta.grade || '—', icon: Award },
                               ].map((f, fi) => (
                                 <div key={f.label} style={{ padding: '12px 16px', borderRight: fi < 2 ? `1px solid ${T.bdr}` : 'none' }}>
-                                  <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                                     <f.icon size={10} />
                                     {f.label}
                                   </div>
@@ -2794,7 +2879,7 @@ export default function BFSIDashboard() {
                                   borderRadius: 12,
                                   cursor: 'pointer',
                                   fontSize: 13,
-                                  fontWeight: 900,
+                                  fontWeight: 700,
                                   border: 'none',
                                   boxShadow: '0 4px 12px rgba(16,185,129,0.25)',
                                   transition: '0.3s'
@@ -2832,8 +2917,8 @@ export default function BFSIDashboard() {
           {activeTab === 'allocations' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24, animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <CheckCircle size={20} color="#EC4899" /> LOB Project Allocations & Outcomes
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <CheckCircle size={20} color="#EC4899" /> Project Allocations & Outcomes
                 </h3>
                 <button onClick={fetchAssignments} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <RefreshCw size={13} className={loadingAssignments ? 'animate-spin' : ''} /> Refresh Allocations
@@ -2845,7 +2930,7 @@ export default function BFSIDashboard() {
               ) : assignments.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: 48, background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 16 }}>
                   <CheckCircle size={40} color={T.bdr} style={{ margin: '0 auto 12px', display: 'block' }} />
-                  <div style={{ fontWeight: 700, color: T.sub }}>No active or past allocations logged in LOB</div>
+                  <div style={{ fontWeight: 700, color: T.sub }}>No allocations yet — allocate or reserve an employee from Find a Match or ZenFinder and it will appear here.</div>
                 </div>
               ) : (
                 <div style={{ overflowX: 'auto' }}>
@@ -2958,7 +3043,7 @@ export default function BFSIDashboard() {
           {activeTab === 'analytics' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 28, animation: 'fadeIn 0.4s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
                   <BarChart3 size={20} color="#F59E0B" /> LOB Executive Analytics & Growth Projections
                 </h3>
                 <button onClick={fetchAnalyticsData} style={{ padding: '6px 14px', borderRadius: 10, background: T.card, border: `1px solid ${T.bdr}`, color: T.text, fontSize: 12, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2976,7 +3061,7 @@ export default function BFSIDashboard() {
                       <div>
                         <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 800, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>Allocation Utilization Rate</h4>
                         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
-                          <span style={{ fontSize: 44, fontWeight: 900, color: '#F59E0B' }}>{analyticsData.allocationRates.allocationRate}%</span>
+                          <span style={{ fontSize: 44, fontWeight: 700, color: '#F59E0B' }}>{analyticsData.allocationRates.allocationRate}%</span>
                           <span style={{ fontSize: 12, color: T.sub }}>Target: 85%</span>
                         </div>
                         {/* Utilization Bar */}
@@ -3018,7 +3103,7 @@ export default function BFSIDashboard() {
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
                       {analyticsData.readinessTrends.map((trend: any) => (
                         <div key={trend.band} style={{ background: T.card, padding: 16, borderRadius: 12, border: `1px solid ${T.bdr}`, textAlign: 'center' }}>
-                          <span style={{ fontSize: 11, fontWeight: 900, background: 'rgba(245,158,11,0.1)', color: '#F59E0B', padding: '2px 8px', borderRadius: 10 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, background: 'rgba(245,158,11,0.1)', color: '#F59E0B', padding: '2px 8px', borderRadius: 10 }}>
                             Band {trend.band || 'N/A'}
                           </span>
                           <div style={{ fontSize: 28, fontWeight: 800, color: T.text, marginTop: 12, marginBottom: 8 }}>
@@ -3067,6 +3152,51 @@ export default function BFSIDashboard() {
                       </div>
                     )}
                   </div>
+
+                  {/* Complete LOB workforce — every employee from the uploaded LOB sheet */}
+                  <div style={{ background: T.bg, padding: 24, borderRadius: 16, border: `1px solid ${T.bdr}` }}>
+                    <h4 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: 1 }}>
+                      Complete LOB Workforce ({workforce.length})
+                    </h4>
+                    <div style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto', border: `1px solid ${T.bdr}`, borderRadius: 12 }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                        <thead>
+                          <tr style={{ position: 'sticky', top: 0, background: T.card, color: T.sub, textAlign: 'left', zIndex: 1 }}>
+                            {['Employee', 'Grade / Band', 'Primary Skill', 'Location', 'Status', 'Ageing', 'Customer / Project', 'Service Line'].map(h => (
+                              <th key={h} style={{ padding: '10px 14px', fontWeight: 600, whiteSpace: 'nowrap', borderBottom: `1px solid ${T.bdr}` }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {workforce.map((e: any, i: number) => {
+                            const st = e.status === 'Available-Pool' ? COLORS.success : e.status === 'Deallocating' ? COLORS.warning : COLORS.info;
+                            return (
+                              <tr key={e.employee_id || i} style={{ borderBottom: `1px solid ${T.bdr}` }}>
+                                <td style={{ padding: '10px 14px' }}>
+                                  <div style={{ fontWeight: 600, color: T.text }}>{e.employee_name || '—'}</div>
+                                  <div style={{ fontSize: 10.5, color: T.sub }}>{formatZensarId(e.employee_id)}</div>
+                                </td>
+                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{e.grade || '—'}{e.band ? ` · ${e.band}` : ''}</td>
+                                <td style={{ padding: '10px 14px', color: T.text }}>{e.primary_skill || '—'}</td>
+                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{e.location || '—'}</td>
+                                <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: st, fontWeight: 600 }}>
+                                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: st }} />{e.status || '—'}
+                                  </span>
+                                </td>
+                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{e.aging_days != null ? `${e.aging_days} d` : '—'}</td>
+                                <td style={{ padding: '10px 14px', color: T.sub }}>{[e.customer, e.project_name].filter(Boolean).join(' · ') || '—'}</td>
+                                <td style={{ padding: '10px 14px', color: T.sub, whiteSpace: 'nowrap' }}>{(e as any).service_line || e.practice_name || '—'}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    {workforce.length === 0 && (
+                      <div style={{ padding: 24, textAlign: 'center', color: T.sub, fontSize: 13 }}>No LOB workforce loaded — upload the Excel to populate.</div>
+                    )}
+                  </div>
                 </>
               )}
             </div>
@@ -3085,7 +3215,7 @@ export default function BFSIDashboard() {
                     <Search size={26} color="#fff" />
                   </div>
                   <div style={{ textAlign: 'left' }}>
-                    <h2 style={{ margin: 0, fontSize: 28, fontWeight: 900, color: T.text }}>ZenFinder</h2>
+                    <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text }}>ZenFinder</h2>
                   </div>
                 </div>
               </div>
@@ -3201,7 +3331,7 @@ export default function BFSIDashboard() {
                       setZfShowSugg(false);
                       runZenFinderSearch(zfQuery, workforce);
                     }}
-                    style={{ padding: '18px 32px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 16, fontSize: 15, fontWeight: 900, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: '0 4px 16px rgba(139,92,246,0.35)', transition: '0.3s', flexShrink: 0 }}
+                    style={{ padding: '18px 32px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 16, fontSize: 15, fontWeight: 700, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: '0 4px 16px rgba(139,92,246,0.35)', transition: '0.3s', flexShrink: 0 }}
                   >
                     <Search size={18} style={{ display: 'inline', marginRight: 8, verticalAlign: 'middle' }} />
                     Search
@@ -3233,10 +3363,10 @@ export default function BFSIDashboard() {
               {/* Results */}
               {!zfLoading && zfSearched && (
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-                    <h4 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: T.text }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <h4 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: T.text }}>
                       {zfResults.length > 0
-                        ? `Found ${zfResults.length} employees matching "${zfQuery}"`
+                        ? `Found ${zfResults.length} employee${zfResults.length !== 1 ? 's' : ''} matching "${zfQuery}"`
                         : `No employees found for "${zfQuery}"`}
                     </h4>
                     {zfResults.length > 0 && (
@@ -3244,11 +3374,49 @@ export default function BFSIDashboard() {
                     )}
                   </div>
 
+                  {/* Understood-filters chips — shows exactly what ZenFinder extracted */}
+                  {zfParsed && (zfParsed.skillTerms.length > 0 || zfParsed.locationTerms.length > 0 || zfParsed.wantsPool || zfParsed.agingMax != null || zfParsed.agingMin != null || !!zfParsed.customer) && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 20 }}>
+                      <span style={{ fontSize: 11, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginRight: 2 }}>Filters</span>
+                      {[
+                        zfParsed.skillTerms.length > 0 ? { label: 'Skill', val: zfParsed.skillTerms.join(' '), color: COLORS.purple } : null,
+                        zfParsed.customer ? { label: 'Customer', val: zfParsed.customer, color: COLORS.orange } : null,
+                        zfParsed.locationTerms.length > 0 ? { label: 'Location', val: zfParsed.locationTerms.map(l => l[0].toUpperCase() + l.slice(1)).join(', '), color: COLORS.info } : null,
+                        zfParsed.wantsPool ? { label: 'Availability', val: 'Pool / bench', color: COLORS.success } : null,
+                        (zfParsed.agingMax != null || zfParsed.agingMin != null) ? {
+                          label: 'Ageing',
+                          val: zfParsed.agingMin != null && zfParsed.agingMax != null ? `${zfParsed.agingMin}–${zfParsed.agingMax} days`
+                             : zfParsed.agingMax != null ? `≤ ${zfParsed.agingMax} days`
+                             : `≥ ${zfParsed.agingMin} days`,
+                          color: COLORS.warning,
+                        } : null,
+                      ].filter(Boolean).map((c: any, i) => (
+                        <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: T.text, background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', border: `1px solid ${T.bdr}`, borderRadius: 999, padding: '4px 12px' }}>
+                          <span style={{ width: 7, height: 7, borderRadius: '50%', background: c.color }} />
+                          <span style={{ color: T.sub, fontWeight: 500 }}>{c.label}:</span> {c.val}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
                   {zfResults.length === 0 && (
                     <div style={{ textAlign: 'center', padding: 64, color: T.sub }}>
                       <Search size={48} color={T.bdr} style={{ margin: '0 auto 16px', display: 'block' }} />
-                      <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>No matches found</div>
-                      <div style={{ fontSize: 13 }}>Try different keywords, a broader term, or check spelling</div>
+                      <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8, color: T.text }}>No matches found</div>
+                      <div style={{ fontSize: 13, maxWidth: 460, margin: '0 auto', lineHeight: 1.6 }}>
+                        {zfParsed && (() => {
+                          const bits: string[] = [];
+                          if (zfParsed.skillTerms.length) bits.push(`skill "${zfParsed.skillTerms.join(' ')}"`);
+                          if (zfParsed.customer) bits.push(`customer "${zfParsed.customer}"`);
+                          if (zfParsed.locationTerms.length) bits.push(`in ${zfParsed.locationTerms.join(', ')}`);
+                          if (zfParsed.wantsPool) bits.push('in the pool/bench');
+                          if (zfParsed.agingMax != null) bits.push(`with ageing ≤ ${zfParsed.agingMax} days`);
+                          if (zfParsed.agingMin != null) bits.push(`with ageing ≥ ${zfParsed.agingMin} days`);
+                          return bits.length
+                            ? `No employee matched all of your filters (${bits.join(', ')}). Try removing one — e.g. widen the location, drop the pool filter, or increase the ageing range.`
+                            : 'Try different keywords, a broader term, or check spelling.';
+                        })()}
+                      </div>
                     </div>
                   )}
 
@@ -3287,7 +3455,7 @@ export default function BFSIDashboard() {
                       const SectionHeader = ({ icon, label, color, count }: { icon: string; label: string; color: string; count: number }) => (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                           <span style={{ fontSize: 13 }}>{icon}</span>
-                          <span style={{ fontSize: 10, fontWeight: 900, color, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</span>
+                          <span style={{ fontSize: 10, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</span>
                           <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 6px', borderRadius: 10, background: `${color}18`, color }}>{count} match{count !== 1 ? 'es' : ''}</span>
                         </div>
                       );
@@ -3296,7 +3464,7 @@ export default function BFSIDashboard() {
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 8px', borderRadius: 6, background: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', marginBottom: 3 }}>
                           <span style={{ fontSize: 12, flexShrink: 0 }}>{r.icon}</span>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{r.field}: <span style={{ color: COLORS.purple }}>{r.value}</span>{r.authenticated && <span title="Authenticated — passed the ZenAssess test" style={{ marginLeft: 5, color: '#10B981', fontWeight: 900 }}>✓</span>}</div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{r.field}: <span style={{ color: COLORS.purple }}>{r.value}</span>{r.authenticated && <span title="Authenticated — passed the ZenAssess test" style={{ marginLeft: 5, color: '#10B981', fontWeight: 700 }}>✓</span>}</div>
                             <div style={{ fontSize: 10, color: T.sub, fontStyle: 'italic', lineHeight: 1.3 }}>{r.context}</div>
                           </div>
                         </div>
@@ -3307,11 +3475,11 @@ export default function BFSIDashboard() {
 
                           {/* ── TOP HEADER ── */}
                           <div style={{ padding: '14px 16px', background: `linear-gradient(135deg,${COLORS.purple}18,${COLORS.purple}08)`, borderBottom: `1px solid ${T.bdr}`, display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg,${statusColor},${statusColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 900, fontSize: 18, flexShrink: 0 }}>
+                            <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg,${statusColor},${statusColor}99)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 18, flexShrink: 0 }}>
                               {(emp.employee_name || '?')[0]}
                             </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{emp.employee_name}</div>
+                              <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{emp.employee_name}</div>
                               <div style={{ fontSize: 11, color: T.sub, marginTop: 1 }}>
                                 {formatZensarId(emp.employee_id)} · {(emp as any).grade || (emp as any).band || '—'} · {emp.location || '—'}
                               </div>
@@ -3319,7 +3487,7 @@ export default function BFSIDashboard() {
                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
                               <div
                                 onClick={e => { e.stopPropagation(); setZfScorePopup(emp); }}
-                                style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 8, padding: '3px 10px', fontSize: 11, fontWeight: 900, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+                                style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 8, padding: '3px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
                                 title="Click to see score breakdown"
                               >
                                 {emp.zfScore} pts ℹ️
@@ -3333,15 +3501,15 @@ export default function BFSIDashboard() {
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, padding: '10px 12px', background: dark ? 'rgba(236,72,153,0.04)' : '#fff5f7', borderRadius: 12, border: `1px solid ${dark ? 'rgba(236,72,153,0.1)' : '#ffd2dc'}`, fontSize: 11 }}>
                               <div style={{ textAlign: 'center' }}>
                                 <div style={{ color: T.sub, fontSize: 9 }}>Capability Score</div>
-                                <div style={{ fontWeight: 900, color: '#ec4899', fontSize: 13, marginTop: 2 }}>{capabilityScore}%</div>
+                                <div style={{ fontWeight: 700, color: '#ec4899', fontSize: 13, marginTop: 2 }}>{capabilityScore}%</div>
                               </div>
                               <div style={{ textAlign: 'center' }}>
                                 <div style={{ color: T.sub, fontSize: 9 }}>Skill Confidence</div>
-                                <div style={{ fontWeight: 900, color: '#3b82f6', fontSize: 13, marginTop: 2 }}>{skillConfidence}%</div>
+                                <div style={{ fontWeight: 700, color: '#3b82f6', fontSize: 13, marginTop: 2 }}>{skillConfidence}%</div>
                               </div>
                               <div style={{ textAlign: 'center' }}>
                                 <div style={{ color: T.sub, fontSize: 9 }}>Freshness Score</div>
-                                <div style={{ fontWeight: 900, color: '#10b981', fontSize: 13, marginTop: 2 }}>{freshnessScore}%</div>
+                                <div style={{ fontWeight: 700, color: '#10b981', fontSize: 13, marginTop: 2 }}>{freshnessScore}%</div>
                               </div>
                               <div style={{ textAlign: 'center', borderTop: `1px solid ${dark ? 'rgba(255,255,255,0.06)' : '#e2e8f0'}`, paddingTop: 6, marginTop: 4 }}>
                                 <div style={{ color: T.sub, fontSize: 9 }}>Proj Strength</div>
@@ -3421,77 +3589,22 @@ export default function BFSIDashboard() {
 
                           {/* ── FOOTER ACTIONS ── */}
                           <div style={{ padding: '10px 16px', borderTop: `1px solid ${T.bdr}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    const res = await fetch(`${API_BASE}/employees/${emp.employee_id}/skills`);
-                                    const skills = res.ok ? await res.json() : [];
-                                    setSkillMatrixModal({ employee: emp, skills });
-                                  } catch { setSkillMatrixModal({ employee: emp, skills: [] }); }
-                                }}
-                                style={{ flex: 1, padding: '9px 12px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', borderRadius: 9, fontSize: 12, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                              >
-                                <GraduationCap size={14} /> Zen Matrix
-                              </button>
-                              <button
-                                onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
-                                style={{ padding: '9px 14px', background: dark ? '#1e293b' : '#f1f5f9', color: T.text, borderRadius: 9, fontSize: 12, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}
-                              >
-                                Profile
-                              </button>
-                            </div>
+                            {/* Dimmed + relabelled when the person has no profile/resume
+                                data, so admins can spot who hasn't been scanned yet. */}
+                            <button
+                              onClick={() => navigate(`/admin/employee/${formatZensarId(emp.employee_id)}`)}
+                              title={hasZenData ? 'Open employee profile' : 'No profile / resume updated yet for this employee'}
+                              style={{ width: '100%', padding: '9px 14px', background: hasZenData ? COLORS.purple : (dark ? 'rgba(255,255,255,0.05)' : '#f1f5f9'), color: hasZenData ? '#fff' : T.sub, borderRadius: 9, fontSize: 12, fontWeight: 600, border: hasZenData ? 'none' : `1px solid ${T.bdr}`, cursor: 'pointer', opacity: hasZenData ? 1 : 0.55, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                            >
+                              <ArrowRight size={14} /> {hasZenData ? 'View profile' : 'No profile updated'}
+                            </button>
 
-                            {/* Instant Allocation Dropdown & Button */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderTop: `1px dashed ${T.bdr}`, paddingTop: 10 }}>
-                              <select
-                                value={cardSelectedRoleMap[emp.employee_id] || selectedSRF?.role_id || ''}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setCardSelectedRoleMap(prev => ({ ...prev, [emp.employee_id]: val }));
-                                }}
-                                style={{
-                                  flex: 1,
-                                  padding: '8px 10px',
-                                  borderRadius: 9,
-                                  border: `1px solid ${T.bdr}`,
-                                  background: dark ? '#1e293b' : '#fff',
-                                  color: T.text,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                <option value="">Select SRF / Role...</option>
-                                {roles.filter(r => r.status === 'Open').map(r => (
-                                  <option key={r.role_id} value={r.role_id}>
-                                    {r.role_title} ({r.client_name})
-                                  </option>
-                                ))}
-                              </select>
-                              <button
-                                onClick={() => {
-                                  const roleId = cardSelectedRoleMap[emp.employee_id] || selectedSRF?.role_id;
-                                  const targetRole = roles.find(r => r.role_id === roleId);
-                                  if (!targetRole) {
-                                    toast.error('Please select an open role first.');
-                                    return;
-                                  }
-                                  handlePerformAllocation(emp, 'assign', '', targetRole);
-                                }}
-                                style={{
-                                  padding: '9px 12px',
-                                  background: 'linear-gradient(135deg,#3b82f6,#2563eb)',
-                                  color: '#fff',
-                                  borderRadius: 9,
-                                  fontSize: 12,
-                                  fontWeight: 900,
-                                  border: 'none',
-                                  cursor: 'pointer',
-                                  whiteSpace: 'nowrap'
-                                }}
-                              >
-                                Allocate
-                              </button>
+                            {/* This employee's REAL record from the Excel LOB sheet (per-employee,
+                                read-only, full text — never truncated). */}
+                            <div style={{ borderTop: `1px dashed ${T.bdr}`, paddingTop: 10 }}>
+                              <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, background: dark ? 'rgba(255,255,255,0.03)' : '#f8fafc', border: `1px solid ${T.bdr}`, borderRadius: 8, padding: '7px 10px', wordBreak: 'break-word' }}>
+                                <div><span style={{ fontWeight: 600, color: T.sub }}>Customer Group: </span><span style={{ color: T.text }}>{(emp as any).customer_group || emp.customer || '—'}</span></div>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -3504,8 +3617,8 @@ export default function BFSIDashboard() {
               {/* Empty state before first search */}
               {!zfLoading && !zfSearched && (
                 <div style={{ textAlign: 'center', padding: '48px 0', color: T.sub }}>
-                  <div style={{ fontSize: 64, marginBottom: 16 }}>🔍</div>
-                  <div style={{ fontWeight: 800, fontSize: 20, color: T.text, marginBottom: 8 }}>Search anything about your employees</div>
+                  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}><Search size={40} color={T.sub} strokeWidth={1.5} /></div>
+                  <div style={{ fontWeight: 700, fontSize: 20, color: T.text, marginBottom: 8 }}>Search anything about your employees</div>
                   <div style={{ fontSize: 14, maxWidth: 500, margin: '0 auto', lineHeight: 1.7 }}>
                     Type a skill, domain, keyword, or even a full sentence.<br />
                     ZenFinder searches across <strong>BFSI data</strong> (skills, projects, location) and <strong>Zen Matrix resumes</strong> (certifications, awards, all skills).
@@ -3535,7 +3648,7 @@ export default function BFSIDashboard() {
             </div>
 
             {/* Title */}
-            <div style={{ fontSize: 22, fontWeight: 900, color: dark ? '#fff' : '#0f172a', marginBottom: 8 }}>Syncing Data</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: dark ? '#fff' : '#0f172a', marginBottom: 8 }}>Syncing Data</div>
             <div style={{ fontSize: 14, color: dark ? 'rgba(255,255,255,0.6)' : '#64748b', marginBottom: 32 }}>Processing your Excel file, please wait...</div>
 
             {/* Progress bar */}
@@ -3586,36 +3699,36 @@ export default function BFSIDashboard() {
       {/* ZENFINDER SCORE BREAKDOWN POPUP */}
       {/* ══════════════════════════════════════════════════════════════ */}
       {zfScorePopup && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(8px)' }}
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
           onClick={() => setZfScorePopup(null)}>
-          <div style={{ background: T.cardSolid, borderRadius: 20, border: `2px solid ${COLORS.purple}`, maxWidth: 680, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 32px 80px rgba(139,92,246,0.3)' }}
+          <div style={{ background: T.cardSolid, borderRadius: 20, border: `1px solid ${T.bdr}`, maxWidth: 680, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 60px rgba(0,0,0,0.5)' }}
             onClick={e => e.stopPropagation()}>
 
             {/* Header */}
-            <div style={{ padding: '20px 28px', background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 900, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 4 }}>Score Breakdown</div>
-                <div style={{ fontSize: 20, fontWeight: 900 }}>{zfScorePopup.employee_name}</div>
-                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', marginTop: 2 }}>
+            <div style={{ padding: '18px 24px', background: T.card, borderBottom: `1px solid ${T.bdr}`, color: T.text, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Score Breakdown</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: T.text }}>{zfScorePopup.employee_name}</div>
+                <div style={{ fontSize: 12, color: T.sub, marginTop: 2 }}>
                   {formatZensarId(zfScorePopup.employee_id)} · Query: <em>"{zfQuery}"</em>
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {/* 50 / 50 split — Excel sheet vs Genesis ZenMatrix, each capped at 50 */}
-                <div style={{ background: 'rgba(255,255,255,0.14)', borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
-                  <div style={{ fontSize: 18, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfExcelScore ?? 0}<span style={{ fontSize: 10, opacity: 0.7 }}>/50</span></div>
-                  <div style={{ fontSize: 9, fontWeight: 800, opacity: 0.85 }}>📊 EXCEL</div>
+                <div style={{ background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', border: `1px solid ${T.bdr}`, borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1, color: T.text }}>{zfScorePopup.zfExcelScore ?? 0}<span style={{ fontSize: 10, color: T.sub }}>/50</span></div>
+                  <div style={{ fontSize: 9, fontWeight: 600, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2 }}>Excel</div>
                 </div>
-                <div style={{ background: 'rgba(255,255,255,0.14)', borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
-                  <div style={{ fontSize: 18, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfZenScore ?? 0}<span style={{ fontSize: 10, opacity: 0.7 }}>/50</span></div>
-                  <div style={{ fontSize: 9, fontWeight: 800, opacity: 0.85 }}>🎓 ZENMATRIX</div>
+                <div style={{ background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', border: `1px solid ${T.bdr}`, borderRadius: 10, padding: '6px 12px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1, color: T.text }}>{zfScorePopup.zfZenScore ?? 0}<span style={{ fontSize: 10, color: T.sub }}>/50</span></div>
+                  <div style={{ fontSize: 9, fontWeight: 600, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2 }}>ZenMatrix</div>
                 </div>
-                <div style={{ background: 'rgba(255,255,255,0.22)', borderRadius: 12, padding: '8px 18px', textAlign: 'center' }}>
-                  <div style={{ fontSize: 28, fontWeight: 900, lineHeight: 1 }}>{zfScorePopup.zfScore}</div>
-                  <div style={{ fontSize: 10, fontWeight: 800, opacity: 0.85 }}>TOTAL /100</div>
+                <div style={{ background: COLORS.purple, borderRadius: 12, padding: '8px 18px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: '#fff' }}>{zfScorePopup.zfScore}</div>
+                  <div style={{ fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2 }}>Total /100</div>
                 </div>
-                <button onClick={() => setZfScorePopup(null)}
-                  style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 36, height: 36, borderRadius: 10, cursor: 'pointer', fontSize: 18 }}>✕</button>
+                <button onClick={() => setZfScorePopup(null)} aria-label="Close"
+                  style={{ background: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', border: 'none', color: T.sub, width: 32, height: 32, borderRadius: 10, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
               </div>
             </div>
 
@@ -3649,21 +3762,21 @@ export default function BFSIDashboard() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <span style={{ background: `${COLORS.purple}15`, color: COLORS.purple, padding: '2px 8px', borderRadius: 6, fontWeight: 700, fontSize: 12 }}>{r.value}</span>
                           {r.authenticated && (
-                            <span title="Authenticated — passed the ZenAssess test" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: 'rgba(16,185,129,0.14)', color: '#10B981', padding: '2px 7px', borderRadius: 6, fontWeight: 900, fontSize: 10.5 }}>✓ Authenticated</span>
+                            <span title="Authenticated — passed the ZenAssess test" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: 'rgba(16,185,129,0.14)', color: '#10B981', padding: '2px 7px', borderRadius: 6, fontWeight: 700, fontSize: 10.5 }}>✓ Authenticated</span>
                           )}
                         </div>
                       </td>
                       <td style={{ padding: '10px 14px', verticalAlign: 'top', textAlign: 'right' }}>
-                        <span style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', padding: '3px 10px', borderRadius: 6, fontWeight: 900, fontSize: 12 }}>+{r.pts}</span>
+                        <span style={{ background: COLORS.purple, color: '#fff', padding: '3px 10px', borderRadius: 6, fontWeight: 700, fontSize: 12 }}>+{r.pts}</span>
                       </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr style={{ background: dark ? 'rgba(139,92,246,0.15)' : '#f5f3ff', borderTop: `2px solid ${COLORS.purple}44` }}>
-                    <td colSpan={3} style={{ padding: '12px 14px', fontWeight: 900, fontSize: 14, color: T.text }}>Total Score</td>
+                    <td colSpan={3} style={{ padding: '12px 14px', fontWeight: 700, fontSize: 14, color: T.text }}>Total Score</td>
                     <td style={{ padding: '12px 14px', textAlign: 'right' }}>
-                      <span style={{ background: 'linear-gradient(135deg,#8b5cf6,#6366f1)', color: '#fff', padding: '5px 14px', borderRadius: 8, fontWeight: 900, fontSize: 15 }}>{zfScorePopup.zfScore} pts</span>
+                      <span style={{ background: COLORS.purple, color: '#fff', padding: '5px 14px', borderRadius: 8, fontWeight: 700, fontSize: 15 }}>{zfScorePopup.zfScore} pts</span>
                     </td>
                   </tr>
                 </tfoot>
@@ -3702,57 +3815,54 @@ export default function BFSIDashboard() {
       {/* MATCH RESULTS MODAL - POPUP */}
       {/* ══════════════════════════════════════════════════════════════ */}
       {matchResults && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }} onClick={() => setMatchResults(null)}>
-          <div style={{ background: T.cardSolid, borderRadius: 24, border: `2px solid ${COLORS.success}`, maxWidth: 1400, width: '100%', maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 40px 100px rgba(16,185,129,0.3)' }} onClick={e => e.stopPropagation()}>
-            
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.80)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={() => setMatchResults(null)}>
+          <div style={{ background: T.cardSolid, borderRadius: 20, border: `1px solid ${T.bdr}`, maxWidth: 1400, width: '100%', maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 60px rgba(0,0,0,0.5)' }} onClick={e => e.stopPropagation()}>
+
             {/* Header */}
-            <div style={{ padding: '24px 32px', background: 'linear-gradient(135deg,#10b981,#059669)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 11, fontWeight: 900, color: 'rgba(255,255,255,0.8)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 6 }}>✨ Match Results</div>
-                <h3 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>{matchResults.role.role_title}</h3>
-                <div style={{ fontSize: 14, marginTop: 6, color: 'rgba(255,255,255,0.95)', display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span>SRF: <strong>{matchResults.role.role_id}</strong></span>
+            <div style={{ padding: '20px 28px', background: T.card, borderBottom: `1px solid ${T.bdr}`, color: T.text, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Match Results</div>
+                <h3 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: T.text }}>{matchResults.role.role_title}</h3>
+                <div style={{ fontSize: 14, marginTop: 6, color: T.sub, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span>SRF: <strong style={{ color: T.text }}>{matchResults.role.role_id}</strong></span>
                   <span>·</span>
                   <span>{matchResults.role.client_name}</span>
                   <span>·</span>
-                  <span>📍 {matchResults.role.location || 'N/A'}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><MapPin size={13} /> {matchResults.role.location || 'N/A'}</span>
                 </div>
               </div>
-              
+
               {/* Action Buttons */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 {/* BFSI Pool count badge */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.25)', border: '0.5px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '6px 12px', fontSize: 12, color: '#fff' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f6c90e', flexShrink: 0 }} />
-                  BFSI Pool · {(matchResults.matches || []).filter((e: any) => (e.matchSource || 'BFSI Data') === 'BFSI Data' || e.status === 'Available-Pool').length} matched
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', border: `1px solid ${T.bdr}`, borderRadius: 8, padding: '6px 12px', fontSize: 12, color: T.sub }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: COLORS.warning, flexShrink: 0 }} />
+                  BFSI Pool · <strong style={{ color: T.text }}>{(matchResults.matches || []).filter((e: any) => (e.matchSource || 'BFSI Data') === 'BFSI Data' || e.status === 'Available-Pool').length}</strong> matched
                 </div>
                 <button
                   onClick={() => setShowTopRank(!showTopRank)}
-                  style={{ 
-                    padding: '10px 20px', 
-                    background: showTopRank ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.15)', 
-                    border: '1px solid rgba(255,255,255,0.3)', 
-                    color: '#fff', 
-                    borderRadius: 12, 
-                    cursor: 'pointer', 
-                    fontSize: 13, 
-                    fontWeight: 900, 
-                    transition: '0.3s',
+                  style={{
+                    padding: '9px 16px',
+                    background: showTopRank ? COLORS.success : 'transparent',
+                    border: `1px solid ${showTopRank ? COLORS.success : T.bdr}`,
+                    color: showTopRank ? '#fff' : T.text,
+                    borderRadius: 10,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    transition: '0.2s',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 8
                   }}
-                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.25)'}
-                  onMouseLeave={e => e.currentTarget.style.background = showTopRank ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.15)'}
                 >
-                  <Award size={16} />
-                  {showTopRank ? '📊 SHOW ALL' : '🏆 TOP 5 RANK'}
+                  <Award size={15} />
+                  {showTopRank ? 'Show all' : 'Top 5 rank'}
                 </button>
                 <button
                   onClick={() => setMatchResults(null)}
-                  style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 44, height: 44, borderRadius: 12, cursor: 'pointer', fontSize: 22, transition: '0.3s' }}
-                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.3)'}
-                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
+                  aria-label="Close"
+                  style={{ background: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', border: 'none', color: T.sub, width: 34, height: 34, borderRadius: 10, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
                   ✕
                 </button>
@@ -3765,7 +3875,7 @@ export default function BFSIDashboard() {
               {/* Matched Employees */}
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-                  <h4 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <h4 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: T.text, display: 'flex', alignItems: 'center', gap: 10 }}>
                     <Users size={22} color={COLORS.success} />
                     Matched Employees
                   </h4>
@@ -3805,7 +3915,7 @@ export default function BFSIDashboard() {
                         URL.revokeObjectURL(url);
                         toast.success(`Exported ${filtered.length} employees to CSV`);
                       }}
-                      style={{ padding: '10px 20px', background: COLORS.info, color: '#fff', borderRadius: 12, fontSize: 13, fontWeight: 900, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, transition: '0.3s' }}
+                      style={{ padding: '10px 20px', background: COLORS.info, color: '#fff', borderRadius: 12, fontSize: 13, fontWeight: 700, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, transition: '0.3s' }}
                     >
                       <Download size={16} />
                       Export Results
@@ -3839,7 +3949,7 @@ export default function BFSIDashboard() {
                         {/* ── CARD ── */}
                         <div style={{ background: dark ? 'rgba(30,41,59,0.5)' : '#f8fafc', borderRadius: 14, border: `1px solid ${T.bdr}`, borderLeft: `3px solid ${accent}`, overflow: 'hidden', position: 'relative' }} className="hover-card">
                           {showTopRank && (
-                            <div style={{ position: 'absolute', top: -8, left: -8, width: 28, height: 28, borderRadius: '50%', background: idx < 3 ? 'linear-gradient(135deg,#ffd700,#ffed4e)' : 'linear-gradient(135deg,#6b7280,#9ca3af)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 900, fontSize: 12, border: '2px solid #fff', boxShadow: '0 2px 8px rgba(0,0,0,0.2)', zIndex: 2 }}>
+                            <div style={{ position: 'absolute', top: -8, left: -8, minWidth: 26, height: 26, padding: '0 7px', borderRadius: 8, background: idx < 3 ? COLORS.warning : (dark ? '#334155' : '#e2e8f0'), display: 'flex', alignItems: 'center', justifyContent: 'center', color: idx < 3 ? '#fff' : T.sub, fontWeight: 700, fontSize: 12, border: `1px solid ${T.bdr}`, zIndex: 2 }}>
                               #{(emp as any).rank || idx + 1}
                             </div>
                           )}
@@ -3851,17 +3961,17 @@ export default function BFSIDashboard() {
                             </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                                <span style={{ fontWeight: 900, fontSize: 14, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp.employee_name}</span>
-                                {isPool && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Pool</span>}
-                                {empStatus === 'allocated' && <span style={{ padding: '1px 7px', background: `${COLORS.success}22`, color: COLORS.success, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Allocated</span>}
-                                {empStatus === 'reserved' && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 900, flexShrink: 0 }}>Reserved</span>}
+                                <span style={{ fontWeight: 700, fontSize: 14, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp.employee_name}</span>
+                                {isPool && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 700, flexShrink: 0 }}>Pool</span>}
+                                {empStatus === 'allocated' && <span style={{ padding: '1px 7px', background: `${COLORS.success}22`, color: COLORS.success, borderRadius: 5, fontSize: 9, fontWeight: 700, flexShrink: 0 }}>Allocated</span>}
+                                {empStatus === 'reserved' && <span style={{ padding: '1px 7px', background: `${COLORS.warning}22`, color: COLORS.warning, borderRadius: 5, fontSize: 9, fontWeight: 700, flexShrink: 0 }}>Reserved</span>}
                               </div>
                               <div style={{ fontSize: 11, color: T.sub }}>
                                 {formatZensarId(emp.employee_id)} · {empGrade} · {emp.location || '—'}
                               </div>
                             </div>
                             <div onClick={() => togglePanel('breakdown')} style={{ textAlign: 'right', flexShrink: 0, cursor: 'pointer' }}>
-                              <div style={{ fontSize: 22, fontWeight: 900, color: mColor, lineHeight: 1 }}>{pct}%</div>
+                              <div style={{ fontSize: 22, fontWeight: 700, color: mColor, lineHeight: 1 }}>{pct}%</div>
                               <div style={{ fontSize: 9, color: T.sub }}>match score</div>
                               <div style={{ fontSize: 10, color: COLORS.info, textDecoration: 'underline', marginTop: 2 }}>see breakdown</div>
                             </div>
@@ -3885,7 +3995,7 @@ export default function BFSIDashboard() {
                                 { label: 'Freshness', v: Number((emp as any).freshness_at_alloc ?? 0) },
                               ].map(c => (
                                 <div key={c.label} style={{ textAlign: 'center', padding: '8px 4px', background: darkerBg, borderRadius: 8 }}>
-                                  <div style={{ fontSize: 15, fontWeight: 900, color: scoreCellColor(c.v) }}>{c.v}%</div>
+                                  <div style={{ fontSize: 15, fontWeight: 700, color: scoreCellColor(c.v) }}>{c.v}%</div>
                                   <div style={{ fontSize: 9, color: T.sub, marginTop: 2 }}>{c.label}</div>
                                 </div>
                               ))}
@@ -3895,16 +4005,16 @@ export default function BFSIDashboard() {
 
                           {/* CARD FOOTER */}
                           <div style={{ display: 'flex', gap: 8, padding: '12px 14px', background: darkerBg }}>
-                            <button onClick={() => handleViewDetails(emp)} style={{ flex: 2, padding: '9px 8px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 9, fontSize: 11, fontWeight: 900, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}>View Details</button>
-                            <button onClick={allocate} disabled={empStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 900, border: 'none', cursor: empStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: empStatus === 'allocated' ? 0.7 : 1 }}>{empStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
-                            <button onClick={reserve} disabled={empStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 900, border: 'none', cursor: empStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: empStatus === 'reserved' ? 0.7 : 1 }}>{empStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
+                            <button onClick={() => handleViewDetails(emp)} style={{ flex: 2, padding: '9px 8px', background: dark ? '#1e293b' : '#fff', color: T.text, borderRadius: 9, fontSize: 11, fontWeight: 700, border: `1px solid ${T.bdr}`, cursor: 'pointer' }}>View Details</button>
+                            <button onClick={allocate} disabled={empStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 700, border: 'none', cursor: empStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: empStatus === 'allocated' ? 0.7 : 1 }}>{empStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
+                            <button onClick={reserve} disabled={empStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '9px 8px', background: empStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 9, fontSize: 11, fontWeight: 700, border: 'none', cursor: empStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: empStatus === 'reserved' ? 0.7 : 1 }}>{empStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
                           </div>
                         </div>
 
                         {/* ── MATCH BREAKDOWN PANEL ── */}
                         {breakdownOpen && (
                           <div style={{ marginTop: 8, padding: 16, background: dark ? 'rgba(15,23,42,0.6)' : '#fff', border: `1px solid ${accent}`, borderRadius: 12 }}>
-                            <div style={{ fontSize: 13, fontWeight: 900, color: T.text, marginBottom: 14 }}>Match breakdown — {emp.employee_name} vs {matchResults.role.role_title}</div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 14 }}>Match breakdown — {emp.employee_name} vs {matchResults.role.role_title}</div>
                             {bd.rows.map(r => {
                               const tagColor = r.pct >= 80 ? COLORS.success : r.pct >= 40 ? COLORS.warning : COLORS.danger;
                               const tagLabel = r.pct >= 80 ? (r.key === 'verified' ? '✓ Verified' : '✓ Match') : r.pct >= 40 ? 'Partial' : (r.key === 'verified' ? 'None' : r.key === 'certs' ? 'None' : 'Missing');
@@ -3920,17 +4030,17 @@ export default function BFSIDashboard() {
                               );
                             })}
                             <div style={{ marginTop: 16 }}>
-                              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
                               {bd.gaining.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>—</div>}
                               {bd.gaining.map((g, i) => (
-                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 900 }}>✓</span>{g}</div>
+                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 700 }}>✓</span>{g}</div>
                               ))}
                             </div>
                             <div style={{ marginTop: 12 }}>
-                              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
                               {bd.missing.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>Nothing — full match!</div>}
                               {bd.missing.map((m, i) => (
-                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 900 }}>✕</span>{m}</div>
+                                <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 700 }}>✕</span>{m}</div>
                               ))}
                             </div>
                           </div>
@@ -3945,11 +4055,11 @@ export default function BFSIDashboard() {
                   <div style={{ textAlign: 'center', marginTop: 28 }}>
                     <button
                       onClick={() => setShowAllMatches(!showAllMatches)}
-                      style={{ padding: '14px 36px', background: COLORS.info, color: '#fff', borderRadius: 14, fontSize: 14, fontWeight: 900, border: 'none', cursor: 'pointer', transition: '0.3s', boxShadow: '0 4px 12px rgba(59,130,246,0.25)' }}
+                      style={{ padding: '11px 28px', background: COLORS.info, color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer', transition: '0.2s' }}
                     >
                       {showAllMatches
-                        ? '🏆 Show Top 10'
-                        : `📊 Show All ${matchResults.matches.length} Matches`}
+                        ? 'Show top 10'
+                        : `Show all ${matchResults.matches.length} matches`}
                     </button>
                   </div>
                 )}
@@ -3957,9 +4067,9 @@ export default function BFSIDashboard() {
                   <div style={{ textAlign: 'center', marginTop: 28 }}>
                     <button
                       onClick={() => { setShowTopRank(false); setShowAllMatches(true); }}
-                      style={{ padding: '14px 36px', background: COLORS.info, color: '#fff', borderRadius: 14, fontSize: 14, fontWeight: 900, border: 'none', cursor: 'pointer', transition: '0.3s', boxShadow: '0 4px 12px rgba(59,130,246,0.25)' }}
+                      style={{ padding: '11px 28px', background: COLORS.info, color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer', transition: '0.2s' }}
                     >
-                      📊 Show All {matchResults.matches.length} Matches
+                      Show all {matchResults.matches.length} matches
                     </button>
                   </div>
                 )}
@@ -4003,7 +4113,7 @@ export default function BFSIDashboard() {
                   {(dm.employee_name || '?')[0]}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 900, fontSize: 16, color: T.text }}>{dm.employee_name}</div>
+                  <div style={{ fontWeight: 700, fontSize: 16, color: T.text }}>{dm.employee_name}</div>
                   <div style={{ fontSize: 11, color: T.sub }}>{formatZensarId(dm.employee_id)} · {dmGrade}</div>
                 </div>
                 <button onClick={() => setDetailModal(null)} style={{ background: dark ? 'rgba(255,255,255,0.1)' : '#f1f5f9', border: 'none', color: T.text, width: 36, height: 36, borderRadius: 10, cursor: 'pointer', fontSize: 18, flexShrink: 0 }}>✕</button>
@@ -4029,7 +4139,7 @@ export default function BFSIDashboard() {
               </div>
 
               {/* Section 2 — Verified Skills */}
-              <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, marginBottom: 6, textTransform: 'uppercase' }}>Verified Skills</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.success, marginBottom: 6, textTransform: 'uppercase' }}>Verified Skills</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 18 }}>
                 {verifiedSkills.length === 0 && <span style={{ fontSize: 11, color: T.sub }}>No verified badges yet — complete ZenAssess to boost score</span>}
                 {verifiedSkills.map((s: any, i: number) => (
@@ -4038,7 +4148,7 @@ export default function BFSIDashboard() {
               </div>
 
               {/* Section 3 — All Skills */}
-              <div style={{ fontSize: 11, fontWeight: 900, color: T.sub, marginBottom: 6, textTransform: 'uppercase' }}>All Skills</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, marginBottom: 6, textTransform: 'uppercase' }}>All Skills</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 18 }}>
                 {allSkillNames.length === 0 && <span style={{ fontSize: 11, color: T.sub }}>No skill data</span>}
                 {allSkillNames.map((s: string, i: number) => (
@@ -4047,7 +4157,7 @@ export default function BFSIDashboard() {
               </div>
 
               {/* Section 4 — Match Breakdown */}
-              <div style={{ fontSize: 11, fontWeight: 900, color: T.sub, marginBottom: 10, textTransform: 'uppercase' }}>Match Breakdown</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, marginBottom: 10, textTransform: 'uppercase' }}>Match Breakdown</div>
               {bd.rows.map(r => {
                 const tagColor = r.pct >= 80 ? COLORS.success : r.pct >= 40 ? COLORS.warning : COLORS.danger;
                 const tagLabel = r.pct >= 80 ? (r.key === 'verified' ? '✓ Verified' : '✓ Match') : r.pct >= 40 ? 'Partial' : (r.key === 'verified' || r.key === 'certs' ? 'None' : 'Missing');
@@ -4063,24 +4173,24 @@ export default function BFSIDashboard() {
                 );
               })}
               <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.success, marginBottom: 6 }}>What is gaining this score</div>
                 {bd.gaining.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>—</div>}
                 {bd.gaining.map((g, i) => (
-                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 900 }}>✓</span>{g}</div>
+                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.success, fontWeight: 700 }}>✓</span>{g}</div>
                 ))}
               </div>
               <div style={{ marginTop: 12, marginBottom: 20 }}>
-                <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.danger, marginBottom: 6 }}>What is missing to reach 100%</div>
                 {bd.missing.length === 0 && <div style={{ fontSize: 11, color: T.sub }}>Nothing — full match!</div>}
                 {bd.missing.map((m, i) => (
-                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 900 }}>✕</span>{m}</div>
+                  <div key={i} style={{ fontSize: 11, color: T.text, marginBottom: 4, display: 'flex', gap: 6 }}><span style={{ color: COLORS.danger, fontWeight: 700 }}>✕</span>{m}</div>
                 ))}
               </div>
 
               {/* Modal footer */}
               <div style={{ display: 'flex', gap: 10 }}>
-                <button onClick={dmAllocate} disabled={dmStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 900, border: 'none', cursor: dmStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'allocated' ? 0.7 : 1 }}>{dmStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
-                <button onClick={dmReserve} disabled={dmStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 900, border: 'none', cursor: dmStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'reserved' ? 0.7 : 1 }}>{dmStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
+                <button onClick={dmAllocate} disabled={dmStatus === 'allocated' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'allocated' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#3b82f6,#2563eb)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 700, border: 'none', cursor: dmStatus === 'allocated' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'allocated' ? 0.7 : 1 }}>{dmStatus === 'allocated' ? 'Allocated' : 'Allocate'}</button>
+                <button onClick={dmReserve} disabled={dmStatus === 'reserved' || isAllocating} style={{ flex: 1, padding: '12px', background: dmStatus === 'reserved' ? (dark ? '#334155' : '#cbd5e1') : 'linear-gradient(135deg,#ec4899,#db2777)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 700, border: 'none', cursor: dmStatus === 'reserved' ? 'not-allowed' : 'pointer', opacity: dmStatus === 'reserved' ? 0.7 : 1 }}>{dmStatus === 'reserved' ? 'Reserved' : 'Reserve'}</button>
               </div>
             </div>
           </div>
@@ -4093,7 +4203,7 @@ export default function BFSIDashboard() {
           <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 800, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(135deg,#3b82f6,#6366f1)' }}>
               <div>
-                <div style={{ fontSize: 10, fontWeight: 900, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 4 }}>Job Description</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Job Description</div>
                 <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: '#fff' }}>{jdModal.title}</h3>
               </div>
               <button onClick={() => setJdModal(null)} style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 36, height: 36, borderRadius: 10, cursor: 'pointer', fontSize: 18 }}>✕</button>
@@ -4111,7 +4221,7 @@ export default function BFSIDashboard() {
           <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 600, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 32px', borderBottom: `1px solid ${T.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(135deg,#10b981,#059669)' }}>
               <div>
-                <div style={{ fontSize: 10, fontWeight: 900, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 4 }}>Zen Matrix</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Zen Matrix</div>
                 <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: '#fff' }}>
                   {skillMatrixModal.employee.employee_name} ({formatZensarId(skillMatrixModal.employee.employee_id)})
                   {(() => {
@@ -4175,7 +4285,7 @@ export default function BFSIDashboard() {
       {overridePrompt && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
           <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
-            <div style={{ fontSize: 11, fontWeight: 900, color: '#EF4444', textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#EF4444', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
               <AlertTriangle size={14} /> Admin Override Alert
             </div>
             <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>Reason for Non-Rank #1 Allocation</h3>
@@ -4212,7 +4322,7 @@ export default function BFSIDashboard() {
       {outcomeModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, backdropFilter: 'blur(10px)' }}>
           <div style={{ background: T.cardSolid, borderRadius: 24, border: `1px solid ${T.bdr}`, maxWidth: 500, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
-            <div style={{ fontSize: 11, fontWeight: 900, color: COLORS.success, textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.success, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
               <CheckCircle size={14} /> Log Project Outcome & Release
             </div>
             <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 800 }}>
@@ -4226,15 +4336,15 @@ export default function BFSIDashboard() {
             <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
               <button
                 onClick={() => setOutcomeStatusInput('Success')}
-                style={{ flex: 1, padding: '10px', borderRadius: 8, border: outcomeStatusInput === 'Success' ? `2px solid #10B981` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Success' ? 'rgba(16,185,129,0.1)' : 'transparent', color: outcomeStatusInput === 'Success' ? '#10B981' : T.sub, fontWeight: 700, cursor: 'pointer' }}
+                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', borderRadius: 8, border: outcomeStatusInput === 'Success' ? `1.5px solid ${COLORS.success}` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Success' ? 'rgba(16,185,129,0.1)' : 'transparent', color: outcomeStatusInput === 'Success' ? COLORS.success : T.sub, fontWeight: 600, cursor: 'pointer' }}
               >
-                🟢 Project Success (+10 Skill Confidence)
+                <CheckCircle size={16} /> Project Success <span style={{ fontSize: 11, opacity: 0.8 }}>(+10 confidence)</span>
               </button>
               <button
                 onClick={() => setOutcomeStatusInput('Failure')}
-                style={{ flex: 1, padding: '10px', borderRadius: 8, border: outcomeStatusInput === 'Failure' ? `2px solid #EF4444` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Failure' ? 'rgba(239,68,68,0.1)' : 'transparent', color: outcomeStatusInput === 'Failure' ? '#EF4444' : T.sub, fontWeight: 700, cursor: 'pointer' }}
+                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', borderRadius: 8, border: outcomeStatusInput === 'Failure' ? `1.5px solid ${COLORS.danger}` : `1px solid ${T.bdr}`, background: outcomeStatusInput === 'Failure' ? 'rgba(239,68,68,0.1)' : 'transparent', color: outcomeStatusInput === 'Failure' ? COLORS.danger : T.sub, fontWeight: 600, cursor: 'pointer' }}
               >
-                🔴 Project Failure (-15 Skill Penalty)
+                <XCircle size={16} /> Project Failure <span style={{ fontSize: 11, opacity: 0.8 }}>(−15 penalty)</span>
               </button>
             </div>
 
@@ -4343,9 +4453,9 @@ export default function BFSIDashboard() {
                       </div>
                       <button
                         onClick={() => setShowAllMatches(!showAllMatches)}
-                        style={{ padding: '6px 14px', background: COLORS.info, color: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: 'pointer', border: 'none' }}
+                        style={{ padding: '6px 14px', background: COLORS.info, color: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', border: 'none' }}
                       >
-                        {showAllMatches ? '🏆 Show Top 5' : '📊 Show All'}
+                        {showAllMatches ? 'Show top 5' : 'Show all'}
                       </button>
                     </div>
 
@@ -4389,9 +4499,9 @@ export default function BFSIDashboard() {
                             </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                                <span style={{ fontWeight: 900, fontSize: 15, color: T.text }}>{role.role_title}</span>
-                                <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
-                                <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || '—'}</span>
+                                <span style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{role.role_title}</span>
+                                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{role.type}</span>
+                                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{role.fill_priority || '—'}</span>
                               </div>
                               <div style={{ fontSize: 12, color: T.sub }}>
                                 SRF: <strong style={{ color: T.text }}>{role.role_id}</strong>
@@ -4402,7 +4512,7 @@ export default function BFSIDashboard() {
                             {/* Match badge */}
                             <div style={{ textAlign: 'right', flexShrink: 0, background: `${COLORS.success}15`, padding: '8px 14px', borderRadius: 12, border: `1px solid ${COLORS.success}44` }}>
                               <div style={{ fontSize: 18, fontWeight: 800, color: COLORS.success, lineHeight: 1 }}>{matchedEmps.length}</div>
-                              <div style={{ fontSize: 9, fontWeight: 900, color: COLORS.success, textTransform: 'uppercase' }}>Matched</div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: COLORS.success, textTransform: 'uppercase' }}>Matched</div>
                             </div>
                           </div>
 
@@ -4417,7 +4527,7 @@ export default function BFSIDashboard() {
                               { label: 'Month',      value: meta.month || '—' },
                             ].map((f, fi) => (
                               <div key={f.label} style={{ padding: '10px 14px', borderRight: fi < 5 ? `1px solid ${T.bdr}` : 'none' }}>
-                                <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
                                 <div style={{ fontSize: 12, fontWeight: 800, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                               </div>
                             ))}
@@ -4549,9 +4659,9 @@ export default function BFSIDashboard() {
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', marginBottom: 3 }}>
-                              <span style={{ fontWeight: 900, fontSize: 14, color: T.text }}>{item.role_title}</span>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{item.type}</span>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{item.fill_priority || '—'}</span>
+                              <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{item.role_title}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${typeColor}18`, color: typeColor, border: `1px solid ${typeColor}44` }}>{item.type}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: `${pColor}18`, color: pColor, border: `1px solid ${pColor}44` }}>{item.fill_priority || '—'}</span>
                             </div>
                             <div style={{ fontSize: 11, color: T.sub }}>
                               SRF: <strong style={{ color: T.text }}>{item.role_id}</strong>
@@ -4570,7 +4680,7 @@ export default function BFSIDashboard() {
                             { label: 'Month',      value: meta.month || '—' },
                           ].map((f, fi) => (
                             <div key={f.label} style={{ padding: '8px 12px', borderRight: fi < 5 ? `1px solid ${T.bdr}` : 'none' }}>
-                              <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{f.label}</div>
                               <div style={{ fontSize: 11, fontWeight: 800, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                             </div>
                           ))}
@@ -4610,8 +4720,8 @@ export default function BFSIDashboard() {
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 3 }}>
-                              <span style={{ fontWeight: 900, fontSize: 14, color: T.text }}>{item.employee_name}</span>
-                              <span style={{ fontSize: 10, fontWeight: 900, padding: '2px 8px', borderRadius: 999, background: isDealloc ? `${COLORS.warning}22` : `${COLORS.info}22`, color: isDealloc ? COLORS.warning : COLORS.info, border: `1px solid ${isDealloc ? COLORS.warning : COLORS.info}55`, textTransform: 'uppercase' }}>
+                              <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{item.employee_name}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: isDealloc ? `${COLORS.warning}22` : `${COLORS.info}22`, color: isDealloc ? COLORS.warning : COLORS.info, border: `1px solid ${isDealloc ? COLORS.warning : COLORS.info}55`, textTransform: 'uppercase' }}>
                                 {isDealloc ? 'Deallocating' : 'Pool'}
                               </span>
                               {item.primary_skill && <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999, background: dark ? 'rgba(255,255,255,0.07)' : '#e2e8f0', color: T.sub }}>{item.primary_skill}</span>}
@@ -4623,13 +4733,13 @@ export default function BFSIDashboard() {
                             {isDealloc && dDate ? (
                               <>
                                 <div style={{ fontSize: 20, fontWeight: 800, color: urgency, lineHeight: 1 }}>{daysLeft !== null ? Math.abs(daysLeft) : 0}</div>
-                                <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>Days Left</div>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>Days Left</div>
                                 <div style={{ fontSize: 10, color: urgency, fontWeight: 800, marginTop: 4 }}>📅 {dDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
                               </>
                             ) : (
                               <>
                                 <div style={{ fontSize: 20, fontWeight: 800, color: (item.aging_days || 0) > 30 ? COLORS.danger : COLORS.success, lineHeight: 1 }}>{item.aging_days || 0}</div>
-                                <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>Ageing</div>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', marginTop: 1 }}>Ageing</div>
                               </>
                             )}
                           </div>
@@ -4650,7 +4760,7 @@ export default function BFSIDashboard() {
                             { label: 'Deployable', value: (item as any).deployable_flag ? '✅ Yes' : '❌ No' },
                           ]).map(f => (
                             <div key={f.label}>
-                              <div style={{ fontSize: 9, fontWeight: 900, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: T.sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{f.label}</div>
                               <div style={{ fontSize: 12, fontWeight: 800, color: T.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.value}>{f.value}</div>
                             </div>
                           ))}
@@ -4683,7 +4793,7 @@ export default function BFSIDashboard() {
                 <Landmark size={20} color="#fff" />
               </div>
               <div>
-                <div style={{ fontWeight: 900, fontSize: 16, color: T.text }}>ZenTalentHub — Demand vs Supply Report</div>
+                <div style={{ fontWeight: 700, fontSize: 16, color: T.text }}>ZenTalentHub — Demand vs Supply Report</div>
                 <div style={{ fontSize: 11, color: T.sub }}>BFSI Testing Practice · {new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}</div>
               </div>
             </div>
@@ -4703,7 +4813,7 @@ export default function BFSIDashboard() {
               ].map(k => (
                 <div key={k.label} style={{ background: dark ? '#1e293b' : '#fff', borderRadius: 14, padding: '16px 20px', border: `1px solid ${T.bdr}`, borderTop: `4px solid ${k.color}`, textAlign: 'center' }}>
                   <div style={{ fontSize: 20, marginBottom: 4 }}>{k.icon}</div>
-                  <div style={{ fontSize: 32, fontWeight: 900, color: T.text, lineHeight: 1 }}>{k.val}</div>
+                  <div style={{ fontSize: 32, fontWeight: 700, color: T.text, lineHeight: 1 }}>{k.val}</div>
                   <div style={{ fontSize: 11, fontWeight: 700, color: k.color, marginTop: 4 }}>{k.label}</div>
                 </div>
               ))}
@@ -4712,18 +4822,18 @@ export default function BFSIDashboard() {
             {/* MAIN TABLE — exactly like Excel Summary sheet */}
             <div style={{ background: dark ? '#1e293b' : '#fff', borderRadius: 16, border: `1px solid ${T.bdr}`, overflow: 'hidden', marginBottom: 24 }}>
               <div style={{ padding: '14px 24px', borderBottom: `1px solid ${T.bdr}`, background: dark ? 'rgba(59,130,246,0.08)' : 'rgba(59,130,246,0.04)' }}>
-                <div style={{ fontWeight: 900, fontSize: 15, color: T.text }}>Report 1 — DEMAND VS SUPPLY</div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>Report 1 — DEMAND VS SUPPLY</div>
                 <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>All skills · Status: All</div>
               </div>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: dark ? 'rgba(255,255,255,0.06)' : '#f1f5f9' }}>
-                      <th rowSpan={2} style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 900, color: T.text, fontSize: 12, borderBottom: `2px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, minWidth: 220, verticalAlign: 'bottom' }}>Primary Skill</th>
-                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 900, color: COLORS.danger, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, background: `${COLORS.danger}08` }}>DEMAND</th>
-                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 900, color: COLORS.success, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, background: `${COLORS.success}08` }}>SUPPLY</th>
-                      <th rowSpan={2} style={{ padding: '12px 14px', textAlign: 'center', fontWeight: 900, color: T.text, fontSize: 12, borderBottom: `2px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, minWidth: 70, verticalAlign: 'bottom' }}>GAP</th>
-                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 900, color: COLORS.info, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, background: `${COLORS.info}08` }}>OFFERS RECEIVED</th>
+                      <th rowSpan={2} style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 700, color: T.text, fontSize: 12, borderBottom: `2px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, minWidth: 220, verticalAlign: 'bottom' }}>Primary Skill</th>
+                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 700, color: COLORS.danger, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, background: `${COLORS.danger}08` }}>DEMAND</th>
+                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 700, color: COLORS.success, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, background: `${COLORS.success}08` }}>SUPPLY</th>
+                      <th rowSpan={2} style={{ padding: '12px 14px', textAlign: 'center', fontWeight: 700, color: T.text, fontSize: 12, borderBottom: `2px solid ${T.bdr}`, borderRight: `1px solid ${T.bdr}`, minWidth: 70, verticalAlign: 'bottom' }}>GAP</th>
+                      <th colSpan={3} style={{ padding: '8px 16px', textAlign: 'center', fontWeight: 700, color: COLORS.info, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.bdr}`, background: `${COLORS.info}08` }}>OFFERS RECEIVED</th>
                     </tr>
                     <tr style={{ background: dark ? 'rgba(255,255,255,0.04)' : '#f8fafc' }}>
                       {[{l:'Reactive SRF',c:COLORS.danger},{l:'Backup SRF',c:COLORS.warning},{l:'Proactive',c:COLORS.purple}].map(h=>(

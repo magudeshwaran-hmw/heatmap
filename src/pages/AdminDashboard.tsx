@@ -1836,38 +1836,6 @@ Return ONLY valid JSON. NO markdown. NO explanations.`;
                 </div>
               </div>
 
-              {/* 4 ── Skills we have vs need ── */}
-              {demandRows.length > 0 && (
-                <div style={{ background: T.bg, border: `1px solid ${T.bdr}`, borderRadius: 20, padding: 24 }}>
-                  <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800, color: T.text }}>Skills We Have vs Need</h3>
-                  <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 16 }}>Green = enough people · Red = need to hire or train.</div>
-                  <div style={{ overflowX: 'auto' }}>
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 420 }}>
-                      <thead>
-                        <tr style={{ color: T.sub, textAlign: 'left' }}>
-                          <th style={{ padding: '6px 8px', fontWeight: 700 }}>Skill</th>
-                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'center' }}>Have</th>
-                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'center' }}>Need</th>
-                          <th style={{ padding: '6px 8px', fontWeight: 700, textAlign: 'right' }}>Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {demandRows.map(r => {
-                          const st = statusOf(r.gap);
-                          return (
-                            <tr key={r.skill} style={{ borderTop: `1px solid ${T.bdr}` }}>
-                              <td style={{ padding: '9px 8px', color: T.text, fontWeight: 700 }}>{r.skill}</td>
-                              <td style={{ padding: '9px 8px', textAlign: 'center', color: T.text, fontWeight: 700 }}>{r.have}</td>
-                              <td style={{ padding: '9px 8px', textAlign: 'center', color: T.sub }}>{r.need}</td>
-                              <td style={{ padding: '9px 8px', textAlign: 'right', fontWeight: 800, color: st.c }}>{st.t}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
             </div>
             );
           })()}

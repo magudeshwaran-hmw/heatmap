@@ -55,6 +55,56 @@ export default function ProctorCameraView({
   const liveState = engine?.getAttentionState?.();
   const safeScore = Number.isFinite(attentionScore) ? attentionScore : 100;
 
+  // Live camera-quality snapshot from the enhancement pipeline (may be null before
+  // the first analysis pass or if the engine build predates enhancement).
+  const quality = engine?.getQuality?.() ?? null;
+  const enh = engine?.getEnhanceState?.() ?? null;
+  const qScore = quality?.score ?? null;
+  const qColor = qScore == null ? '#64748b' : qScore >= 80 ? '#22c55e' : qScore >= 55 ? '#f59e0b' : '#ef4444';
+
+  // Map quality labels → short display text + traffic-light colour.
+  const GOOD = '#22c55e', WARN = '#f59e0b', BAD = '#ef4444';
+  const lightingCell = () => {
+    switch (quality?.brightnessLabel) {
+      case 'good': return { t: 'Good', c: GOOD };
+      case 'dark': case 'bright': return { t: quality.brightnessLabel === 'dark' ? 'Dim' : 'Bright', c: WARN };
+      case 'too_dark': return { t: 'Too dark', c: BAD };
+      case 'too_bright': return { t: 'Harsh', c: BAD };
+      default: return { t: '—', c: '#64748b' };
+    }
+  };
+  const sharpCell = () => {
+    switch (quality?.blurLabel) {
+      case 'none': return { t: 'High', c: GOOD };
+      case 'low': return { t: 'Good', c: GOOD };
+      case 'medium': return { t: 'Fair', c: WARN };
+      case 'high': return { t: 'Low', c: BAD };
+      default: return { t: '—', c: '#64748b' };
+    }
+  };
+  const noiseCell = () => {
+    switch (quality?.noiseLabel) {
+      case 'low': return { t: 'Low', c: GOOD };
+      case 'medium': return { t: 'Med', c: WARN };
+      case 'high': return { t: 'High', c: BAD };
+      default: return { t: '—', c: '#64748b' };
+    }
+  };
+  const enhLabel = (() => {
+    switch (enh?.mode) {
+      case 'low-light': return 'Low-light boost';
+      case 'sharpen': return 'Sharpening';
+      case 'denoise': return 'Denoising';
+      case 'boost': return 'Backlight fix';
+      case 'normal': return 'Active';
+      default: return 'Idle';
+    }
+  })();
+  const enhActive = !!enh && enh.mode !== 'off';
+  // COCO-SSD (phone/object) layer status — false means the model failed to load and
+  // phone/second-screen detection is silently unavailable.
+  const objModelLoaded = engine?.isObjectModelLoaded?.();
+
   // Attention traffic-light mapping.
   const getAttentionColor = (score: number) => {
     if (score >= 75) return { color: '#22c55e', label: 'FOCUSED', bg: 'rgba(34,197,94,0.15)', border: 'rgba(34,197,94,0.4)' };
@@ -149,9 +199,70 @@ export default function ProctorCameraView({
           </div>
         </div>
 
+        {/* CAMERA QUALITY STRIP — always visible when the pipeline is running */}
+        {stream && quality && (
+          <div style={{ padding: '6px 10px', background: '#07070c', borderTop: '0.5px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+              <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: qColor, boxShadow: `0 0 6px ${qColor}`, flexShrink: 0 }} />
+              <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.5)', letterSpacing: '0.03em' }}>Camera</span>
+              <span style={{ fontSize: '12px', fontWeight: 700, color: qColor }}>{qScore ?? '—'}%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+              {enhActive && (
+                <span style={{ fontSize: '9px', fontWeight: 600, color: '#38bdf8', background: 'rgba(56,189,248,0.12)', border: '0.5px solid rgba(56,189,248,0.35)', padding: '1px 5px', borderRadius: '10px', whiteSpace: 'nowrap' }}>
+                  ✦ {enhLabel}
+                </span>
+              )}
+              {enh?.faceBoost && (
+                <span style={{ fontSize: '9px', fontWeight: 600, color: '#a78bfa', background: 'rgba(167,139,250,0.12)', border: '0.5px solid rgba(167,139,250,0.35)', padding: '1px 5px', borderRadius: '10px', whiteSpace: 'nowrap' }}>
+                  ◎ Face
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* EXPANDED DETAILS */}
         {isExpanded && (
           <div style={{ padding: '10px', borderTop: '0.5px solid rgba(255,255,255,0.06)', background: '#0a0a0f' }}>
+
+            {/* CAMERA QUALITY METRICS */}
+            {quality && (
+              <div style={{ marginBottom: '10px' }}>
+                <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.35)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '6px' }}>Camera Quality</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+                  {[
+                    { k: 'Lighting', ...lightingCell() },
+                    { k: 'Sharpness', ...sharpCell() },
+                    { k: 'Noise', ...noiseCell() },
+                    { k: 'Resolution', t: quality.height ? `${quality.height}p` : '—', c: 'rgba(255,255,255,0.85)' },
+                    { k: 'FPS', t: quality.fps ? String(quality.fps) : '—', c: quality.fps >= 20 ? GOOD : quality.fps >= 12 ? WARN : BAD },
+                    { k: 'Enhance', t: enhActive ? 'On' : 'Off', c: enhActive ? '#38bdf8' : 'rgba(255,255,255,0.4)' },
+                  ].map(cell => (
+                    <div key={cell.k} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '6px', padding: '5px 6px' }}>
+                      <div style={{ fontSize: '8px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.03em', marginBottom: '2px' }}>{cell.k}</div>
+                      <div style={{ fontSize: '11px', fontWeight: 700, color: cell.c, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cell.t}</div>
+                    </div>
+                  ))}
+                </div>
+                {quality.backlight && (
+                  <div style={{ marginTop: '6px', fontSize: '9px', color: WARN, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    ⚠ Backlight detected — enhancing face region
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* OBJECT / PHONE AI STATUS — makes a silent COCO-SSD load failure visible */}
+            {objModelLoaded !== undefined && (
+              <div style={{ marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '9px' }}>
+                <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: objModelLoaded ? GOOD : BAD, boxShadow: `0 0 5px ${objModelLoaded ? GOOD : BAD}` }} />
+                <span style={{ color: 'rgba(255,255,255,0.55)' }}>
+                  {objModelLoaded ? 'Phone / object AI active' : 'Phone AI unavailable (model not loaded)'}
+                </span>
+              </div>
+            )}
+
             <div style={{ marginBottom: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
                 <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>Attention</span>

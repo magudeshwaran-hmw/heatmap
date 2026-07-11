@@ -2094,64 +2094,21 @@ export default function ZenAssessPage({ skillSource = 'legacy', employeeId: prop
       return;
     }
 
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        setTabSwitchCount(prev => prev + 1);
-        setIntegrityFlags(flags => [...flags, t('Tab switch detected at ') + new Date().toLocaleTimeString()]);
-        toast.warning(t('Warning: Tab switching detected and logged.'));
-      }
-    };
-
-    const handleWindowBlur = () => {
-      setBrowserBlurCount(prev => prev + 1);
-      setIntegrityFlags(flags => [...flags, t('Focus lost (window blur) at ') + new Date().toLocaleTimeString()]);
-      toast.warning(t('Warning: Window focus lost.'));
-    };
-
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement) {
-        setFullscreenExitCount(prev => prev + 1);
-        setIntegrityFlags(flags => [...flags, t('Fullscreen exit detected at ') + new Date().toLocaleTimeString()]);
-        toast.warning(t('Warning: Fullscreen exited.'));
-      }
-    };
-
-    const handleResize = () => {
-      const threshold = 160;
-      const isDevToolsOpen = window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold;
-      if (isDevToolsOpen) {
-        setDevtoolsDetected(true);
-        setIntegrityFlags(flags => {
-          if (!flags.some(f => f.includes('DevTools'))) {
-            return [...flags, t('DevTools console access detected at ') + new Date().toLocaleTimeString()];
-          }
-          return flags;
-        });
-        toast.warning(t('Warning: DevTools detection logged.'));
-      }
-    };
-
-    const handleCopyPaste = (e: Event) => {
-      if (e.type === 'copy') {
-        setCopyCount(prev => prev + 1);
-      } else if (e.type === 'paste') {
-        setPasteCount(prev => prev + 1);
-        const ce = e as ClipboardEvent;
-        const text = ce.clipboardData?.getData('text') || '';
-        if (text.length > 100) {
-          setLargePasteEvents(prev => prev + 1);
-          setIntegrityFlags(flags => [...flags, t('Large Paste Event detected (>100 chars) at ') + new Date().toLocaleTimeString()]);
-        }
-      }
-
-      setCopyPasteCount(prev => prev + 1);
-      setIntegrityFlags(flags => [...flags, e.type.toUpperCase() + t(' operation detected at ') + new Date().toLocaleTimeString()]);
-      toast.warning(t(`Warning: ${e.type.toUpperCase()} is restricted.`));
-    };
+    // ── Deterrent mode ──────────────────────────────────────────────────────
+    // The camera + live AI overlay exist to DETER cheating, not to accuse honest
+    // candidates. These lockdown listeners stay wired so the assessment still feels
+    // proctored, but they no longer pop "…detected" toasts and no longer record any
+    // counters/integrity flags — so nothing is shown to the user and no violation
+    // data is tracked or submitted. (Mirrors ProctoringEngine deterrent mode.)
+    // Right-click is still silently prevented for the exam feel.
+    const handleVisibilityChange = () => {};
+    const handleWindowBlur = () => {};
+    const handleFullscreenChange = () => {};
+    const handleResize = () => {};
+    const handleCopyPaste = (_e: Event) => {};
 
     const preventRightClick = (e: MouseEvent) => {
       e.preventDefault();
-      toast.warning(t('Right-click is disabled during the assessment.'));
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
