@@ -8,7 +8,8 @@ import {
   apiQBCoverage, apiQBItems, apiQBValidate, apiQBUpload, apiQBToggle, apiQBDelete, apiQBSeed,
   apiGetBlueprint, apiSaveBlueprint, type QBItem, type QBUploadResult,
 } from '@/lib/api';
-import { ArrowLeft, Upload, CheckCircle2, X, FileJson, Trash2, Eye, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Upload, CheckCircle2, X, FileJson, FileSpreadsheet, Trash2, Eye, ChevronRight } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 type Level = 'beginner' | 'intermediate' | 'expert';
 type View = 'hub' | Level;
@@ -250,6 +251,89 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
   const downloadTemplate = () => { const blob = new Blob([JSON.stringify(TEMPLATES[level as Exclude<Level, 'expert'>], null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${level}_template.json`; a.click(); URL.revokeObjectURL(a.href); };
   const onFile = (f: File | null) => { if (!f) return; const r = new FileReader(); r.onload = () => setUploadText(String(r.result || '')); r.readAsText(f); };
 
+  // Excel (.xlsx) MCQ template — same columns the per-skill upload + bulk paste accept.
+  const downloadExcelTemplate = () => {
+    const header = ['skill', 'question', 'A', 'B', 'C', 'D', 'correct', 'explanation'];
+    const rows = [
+      ['Java', 'Which keyword makes a variable a constant in Java?', 'final', 'const', 'static', 'let', 'A', 'final makes a value unmodifiable.'],
+      ['Java', 'What does JVM stand for?', 'Java Virtual Machine', 'Java Variable Method', 'Joint Virtual Memory', 'Java Verified Module', 'A', ''],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws['!cols'] = [{ wch: 18 }, { wch: 48 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 9 }, { wch: 40 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'MCQs');
+    XLSX.writeFile(wb, `${level}_mcq_template.xlsx`);
+  };
+  const downloadCsvTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['skill', 'question', 'A', 'B', 'C', 'D', 'correct', 'explanation'],
+      ['Java', 'Which keyword makes a variable a constant in Java?', 'final', 'const', 'static', 'let', 'A', 'final makes a value unmodifiable.'],
+    ]);
+    const csv = XLSX.utils.sheet_to_csv(ws);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${level}_mcq_template.csv`; a.click(); URL.revokeObjectURL(a.href);
+  };
+  const loadJsonExample = () => setUploadText(JSON.stringify(TEMPLATES[level as Exclude<Level, 'expert'>], null, 2));
+
+  // ── Per-skill file upload (Excel/CSV MCQs or a whole-skill JSON) — same importer
+  //    used by the bulk paste + advanced upload, but scoped to one skill's row. ──
+  const [skillUploadBusy, setSkillUploadBusy] = useState<string | null>(null);
+  const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const toLetter = (raw: string, opts: string[]): string | null => {
+    const v = String(raw || '').trim();
+    if (/^[A-Da-d]$/.test(v)) return v.toUpperCase();
+    if (/^[1-4]$/.test(v)) return 'ABCD'[Number(v) - 1];
+    const i = opts.findIndex(o => o.trim() !== '' && norm(o) === norm(v));
+    return i >= 0 ? 'ABCD'[i] : null;
+  };
+  const uploadForSkill = async (skill: string, file: File | null) => {
+    if (!file) return;
+    setSkillUploadBusy(skill);
+    try {
+      const nameLc = file.name.toLowerCase();
+      if (nameLc.endsWith('.json')) {
+        // Whole-skill JSON (same as the advanced upload) — force THIS skill + level.
+        let body: any;
+        try { body = JSON.parse(await file.text()); } catch { toast.error('That JSON file is not valid.'); return; }
+        const r = await apiQBUpload({ ...body, skill, level, mode: 'append' });
+        toast.success(`${skill}: ${r.inserted} added${r.skipped ? ` · ${r.skipped} skipped` : ''} ✓`);
+      } else {
+        // Excel / CSV → MCQ rows, all assigned to THIS skill.
+        const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const aoa = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, blankrows: false });
+        if (aoa.length < 2) { toast.error('The sheet needs a header row plus at least one question.'); return; }
+        const H = aoa[0].map((h: any) => norm(String(h)));
+        const find = (names: string[]) => H.findIndex((h: string) => names.includes(h));
+        const iQ = find(['question', 'q', 'questiontext']);
+        const iA = find(['a', 'optiona', 'option1', 'opt1', 'opta']);
+        const iB = find(['b', 'optionb', 'option2', 'opt2', 'optb']);
+        const iC = find(['c', 'optionc', 'option3', 'opt3', 'optc']);
+        const iD = find(['d', 'optiond', 'option4', 'opt4', 'optd']);
+        const iCorr = find(['correct', 'answer', 'correctoption', 'correctanswer', 'key']);
+        const iExp = find(['explanation', 'reason', 'explain']);
+        if (iQ < 0 || iCorr < 0) { toast.error('Header must include: question, A, B, C, D, correct.'); return; }
+        const mcq: any[] = [];
+        let bad = 0;
+        for (let n = 1; n < aoa.length; n++) {
+          const raw = (aoa[n] || []).map((c: any) => String(c ?? '').trim());
+          const question = (raw[iQ] || '').trim();
+          const rawOpts = [iA, iB, iC, iD].map(ix => ix >= 0 ? (raw[ix] || '').trim() : '');
+          const filled = rawOpts.map((o, i) => ({ o, i })).filter(x => x.o !== '');
+          const correctLetter = toLetter(raw[iCorr] || '', rawOpts);
+          const pos = correctLetter ? filled.findIndex(x => x.i === 'ABCD'.indexOf(correctLetter)) : -1;
+          if (!question || filled.length < 2 || pos < 0) { if (question) bad++; continue; }
+          mcq.push({ question, options: filled.map(x => x.o), correct: 'ABCD'[pos], explanation: iExp >= 0 ? (raw[iExp] || '').trim() : '' });
+        }
+        if (mcq.length === 0) { toast.error('No valid MCQ rows found. Check the columns and the correct answer (A–D).'); return; }
+        const r = await apiQBSeed([{ skill, level, mcq }]);
+        toast.success(`${skill}: ${r.inserted} added${r.skipped ? ` · ${r.skipped} skipped` : ''}${bad ? ` · ${bad} row(s) skipped` : ''} ✓`);
+      }
+      onUploaded();
+    } catch (e: any) { toast.error(e?.message || 'Upload failed'); }
+    finally { setSkillUploadBusy(null); }
+  };
+
   const cellStyle = (count: number, target: number) => { const c = count >= target ? '#10B981' : count > 0 ? '#F59E0B' : '#EF4444'; return { color: c, background: `${c}1f`, display: 'inline-flex', minWidth: 46, justifyContent: 'center', padding: '4px 9px', borderRadius: 7, fontWeight: 800, fontSize: 12.5, fontVariantNumeric: 'tabular-nums' as const }; };
 
   return (
@@ -283,18 +367,11 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
       {/* Add questions — two easy ways */}
       <div style={{ background: T.card, border: `1px solid ${T.bdr}`, borderRadius: 16, padding: 22, marginBottom: 24 }}>
         <h3 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 800 }}>Add questions</h3>
-        <p style={{ margin: '0 0 16px', fontSize: 13, color: T.sub }}>Two easy ways — no code or JSON needed.</p>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
-          <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>① One at a time</div>
-            <p style={{ margin: 0, fontSize: 12.5, color: T.sub, flex: 1 }}>Pick a skill in the list below and click <b style={{ color: T.text }}>+ Add</b>. A guided form walks you through every field — including coding test cases.</p>
-            <div style={{ fontSize: 12, color: T.muted }}>↓ scroll to the skills table</div>
-          </div>
-          <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>② Bulk from a spreadsheet</div>
-            <p style={{ margin: 0, fontSize: 12.5, color: T.sub, flex: 1 }}>Have lots of MCQs in Excel? Paste the rows and import them all at once — de-duped automatically.</p>
-            <button onClick={() => setBulkOpen(true)} style={{ alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: meta.color, border: 'none', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}><Upload size={15} /> Paste from Excel / CSV</button>
-          </div>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: T.sub }}>Add one at a time, or upload a spreadsheet per skill — no code or JSON needed.</p>
+        <div style={{ border: `1px solid ${T.bdr}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>Pick a skill in the list below</div>
+          <p style={{ margin: 0, fontSize: 12.5, color: T.sub }}>Click <b style={{ color: T.text }}>+ Add</b> for a guided form (every field, including coding test cases), or click <b style={{ color: T.text }}>Upload</b> to import an Excel/CSV of MCQs (or a whole-skill JSON) for that skill — de-duped automatically.</p>
+          <div style={{ fontSize: 12, color: T.muted }}>↓ scroll to the skills table</div>
         </div>
 
         {/* Advanced: whole-skill JSON / file (power users) */}
@@ -304,7 +381,10 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
               <p style={{ margin: 0, fontSize: 12, color: T.sub }}>One JSON file per skill (skill auto-detected). Sections: {types.map(t => t.key).join(', ')}. Partial files are fine.</p>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={downloadTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileJson size={15} /> Template</button>
+                <button onClick={downloadTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileJson size={15} /> JSON template</button>
+                <button onClick={downloadExcelTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileSpreadsheet size={15} /> Excel template</button>
+                <button onClick={downloadCsvTemplate} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}><FileSpreadsheet size={15} /> CSV template</button>
+                <button onClick={loadJsonExample} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Load an example</button>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 15px', borderRadius: 9, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
                   <Upload size={15} /> Choose file<input type="file" accept=".json" style={{ display: 'none' }} onChange={e => onFile(e.target.files?.[0] || null)} />
                 </label>
@@ -366,6 +446,10 @@ function LevelPage({ T, dark, level, families, coverage, onBack, onUploaded, onP
                       {types.map((t: TypeInfo) => { const n = coverage[skill]?.[t.key] || 0; return <td key={t.key} style={{ padding: '10px 16px' }}><span style={cellStyle(n, t.target)}>{n}</span></td>; })}
                       <td style={{ padding: '10px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                         <button onClick={() => setAddFor({ skill })} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, background: `${meta.color}1a`, border: 'none', color: meta.color, fontWeight: 800, fontSize: 11.5, cursor: 'pointer', marginRight: 6 }}>+ Add</button>
+                        <label title="Upload an Excel/CSV of MCQs or a whole-skill JSON for this skill" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 11px', borderRadius: 8, background: skillUploadBusy === skill ? T.card : 'rgba(16,185,129,0.1)', border: 'none', color: '#10B981', fontWeight: 700, fontSize: 11.5, cursor: skillUploadBusy ? 'not-allowed' : 'pointer', marginRight: 6, opacity: skillUploadBusy && skillUploadBusy !== skill ? 0.5 : 1 }}>
+                          <Upload size={13} /> {skillUploadBusy === skill ? 'Uploading…' : 'Upload'}
+                          <input type="file" accept=".xlsx,.xls,.csv,.json" disabled={!!skillUploadBusy} style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0] || null; e.currentTarget.value = ''; uploadForSkill(skill, f); }} />
+                        </label>
                         <button onClick={() => onPreview(skill)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 11px', borderRadius: 8, background: 'rgba(59,130,246,0.1)', border: 'none', color: '#3B82F6', fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}><Eye size={13} /> View</button>
                       </td>
                     </tr>
@@ -618,7 +702,27 @@ function BulkPasteModal({ T, dark, level, onClose, onSaved }: any) {
           <div style={{ fontSize: 12, color: T.sub, lineHeight: 1.6 }}>
             In Excel/Sheets make columns: <b style={{ color: T.text }}>skill · question · A · B · C · D · correct</b> (optionally <b style={{ color: T.text }}>explanation</b>). Put the answer in <b style={{ color: T.text }}>correct</b> as a letter (A–D), a number (1–4), or the exact option text. Copy the rows including the header and paste below.
           </div>
-          <button onClick={loadExample} style={{ marginTop: 8, padding: '5px 11px', borderRadius: 7, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}>Load an example</button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button onClick={loadExample} style={{ padding: '5px 11px', borderRadius: 7, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}>Load an example</button>
+            <button onClick={() => {
+              const ws = XLSX.utils.aoa_to_sheet([
+                ['skill', 'question', 'A', 'B', 'C', 'D', 'correct', 'explanation'],
+                ['Java', 'Which keyword makes a variable a constant in Java?', 'final', 'const', 'static', 'let', 'A', 'final makes a value unmodifiable.'],
+              ]);
+              ws['!cols'] = [{ wch: 18 }, { wch: 48 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 9 }, { wch: 40 }];
+              const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'MCQs');
+              XLSX.writeFile(wb, `${level}_mcq_template.xlsx`);
+            }} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 7, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}><FileSpreadsheet size={13} /> Download Excel template</button>
+            <button onClick={() => {
+              const ws = XLSX.utils.aoa_to_sheet([
+                ['skill', 'question', 'A', 'B', 'C', 'D', 'correct', 'explanation'],
+                ['Java', 'Which keyword makes a variable a constant in Java?', 'final', 'const', 'static', 'let', 'A', 'final makes a value unmodifiable.'],
+              ]);
+              const csv = XLSX.utils.sheet_to_csv(ws);
+              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+              const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${level}_mcq_template.csv`; a.click(); URL.revokeObjectURL(a.href);
+            }} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 7, background: T.input, border: `1px solid ${T.inputBdr}`, color: T.text, fontWeight: 700, fontSize: 11.5, cursor: 'pointer' }}><FileSpreadsheet size={13} /> Download CSV template</button>
+          </div>
         </div>
 
         <textarea value={text} onChange={e => { setText(e.target.value); setRows(null); }} placeholder="Paste your spreadsheet rows here (with the header row)…"
